@@ -1,0 +1,230 @@
+{
+  "MAINHAND": [
+  ],
+  "OFFHAND": [
+  ],
+  "FEET": [
+    {
+      "id": "blacksmith_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bounty_hunter_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "deserter_armor_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "forgotten_knight_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "oni_slayer_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "royal_steel_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "rogue_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "sandstone_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "steel_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "titan_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "titanium_boots",
+      "min_difficulty": "HARD"
+    }
+  ],
+  "LEGS": [
+    {
+      "id": "blacksmith_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bounty_hunter_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "deserter_armor_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "forgotten_knight_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "oni_slayer_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "royal_steel_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "rogue_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "sandstone_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "steel_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "titan_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "titanium_leggings",
+      "min_difficulty": "HARD"
+    }
+  ],
+  "CHEST": [
+    {
+      "id": "blacksmith_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bounty_hunter_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "deserter_armor_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "forgotten_knight_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "oni_slayer_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "royal_steel_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "rogue_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "sandstone_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "steel_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "titan_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "titanium_chestplate",
+      "min_difficulty": "HARD"
+    }
+  ],
+  "HEAD": [
+    {
+      "id": "blacksmith_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bounty_hunter_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "deserter_armor_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "forgotten_knight_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "hood_of_shame_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "oni_slayer_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "prisoner_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "royal_steel_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "rogue_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "sandstone_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "steel_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "titan_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "titanium_helmet",
+      "min_difficulty": "HARD"
+    }
+  ]
+}

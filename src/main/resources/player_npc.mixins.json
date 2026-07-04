@@ -1,0 +1,10 @@
+{
+  "required": true,
+  "package": "com.pla.player_npc.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "MonsterMixin"
+  ],
+  "refmap": "player_npc.mixins.refmap.json",
+  "minVersion": "0.8"
+}

@@ -1,0 +1,77 @@
+package com.pla.player_npc.item;
+
+import com.pla.player_npc.entity.PlayerNpcEntity;
+import com.pla.player_npc.network.PlayerNpcInspectorData;
+import com.pla.player_npc.network.PlayerNpcInspectorPacket;
+import com.pla.player_npc.network.PlayerNpcNetwork;
+import net.minecraft.ChatFormatting;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.InteractionResultHolder;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.TooltipFlag;
+import net.minecraft.world.level.Level;
+import net.minecraftforge.network.PacketDistributor;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.List;
+
+public class InventoryViewerItem extends Item {
+    public InventoryViewerItem() {
+        super(new Properties().stacksTo(1));
+    }
+
+    @Override
+    public @NotNull InteractionResult interactLivingEntity(
+            @NotNull ItemStack stack,
+            @NotNull Player player,
+            @NotNull LivingEntity target,
+            @NotNull InteractionHand hand
+    ) {
+        if (!(target instanceof PlayerNpcEntity playerNpcEntity)) {
+            if (!player.level().isClientSide()) {
+                player.displayClientMessage(Component.translatable("message.player_npc.inspector.unsupported")
+                        .withStyle(ChatFormatting.GRAY), true);
+            }
+            return InteractionResult.sidedSuccess(player.level().isClientSide());
+        }
+
+        if (player instanceof ServerPlayer serverPlayer) {
+            PlayerNpcNetwork.CHANNEL.send(
+                    PacketDistributor.PLAYER.with(() -> serverPlayer),
+                    new PlayerNpcInspectorPacket(target.getId(), PlayerNpcInspectorData.createSnapshot(playerNpcEntity))
+            );
+        }
+
+        return InteractionResult.sidedSuccess(player.level().isClientSide());
+    }
+
+    @Override
+    public @NotNull InteractionResultHolder<ItemStack> use(@NotNull Level level, @NotNull Player player, @NotNull InteractionHand hand) {
+        ItemStack stack = player.getItemInHand(hand);
+        if (player instanceof ServerPlayer serverPlayer) {
+            PlayerNpcNetwork.CHANNEL.send(
+                    PacketDistributor.PLAYER.with(() -> serverPlayer),
+                    PlayerNpcInspectorPacket.clear()
+            );
+        }
+        return InteractionResultHolder.sidedSuccess(stack, level.isClientSide());
+    }
+
+    @Override
+    public void appendHoverText(
+            @NotNull ItemStack stack,
+            Level level,
+            @NotNull List<Component> tooltip,
+            @NotNull TooltipFlag flag
+    ) {
+        super.appendHoverText(stack, level, tooltip, flag);
+        tooltip.add(Component.translatable("tooltip.player_npc.player_npc_inspector").withStyle(ChatFormatting.GRAY));
+    }
+
+}

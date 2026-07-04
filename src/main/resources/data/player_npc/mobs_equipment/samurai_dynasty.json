@@ -1,0 +1,714 @@
+{
+  "MAINHAND": [
+    {
+      "id": "katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wakizashi",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "naginata",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nagamaki",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "shuko",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "tetsubo",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "odachi",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tonbukiri",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "kamayari",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "kunai",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "kama",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "sai",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "shuriken",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "katana_oni",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "katana_kitsune",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "katana_kitsune_blue",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "katana_akaname",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "katana_jorogumo",
+      "min_difficulty": "HARD"
+    }
+  ],
+  "OFFHAND": [
+  ],
+  "FEET": [
+    {
+      "id": "iron_samurai_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_samurai_boots_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_samurai_boots_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "white_samurai_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "white_samurai_boots_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "white_samurai_boots_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "gold_samurai_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_samurai_boots_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gold_samurai_boots_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_boots_light",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_boots_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "amethyst_samurai_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "quartz_samurai_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "red_samurai_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "red_samurai_boots_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "red_samurai_boots_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "blue_samurai_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "blue_samurai_boots_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "blue_samurai_boots_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "green_samurai_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "green_samurai_boots_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "green_samurai_boots_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "gray_samurai_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gray_samurai_boots_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gray_samurai_boots_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "steel_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "brass_samurai_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "sculk_samurai_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "mage_samurai_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "neptunium_samurai_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "living_samurai_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "etyrite_samurai_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tyr_samurai_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "draco_samurai_boots",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "iron_ninja_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_ninja_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_ninja_boots",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_ninja_boots",
+      "min_difficulty": "HARD"
+    }
+  ],
+  "LEGS": [
+    {
+      "id": "iron_samurai_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_samurai_leggings_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_samurai_leggings_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "white_samurai_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "white_samurai_leggings_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "white_samurai_leggings_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "gold_samurai_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_samurai_leggings_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gold_samurai_leggings_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_leggings_light",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_leggings_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "amethyst_samurai_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "quartz_samurai_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "red_samurai_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "red_samurai_leggings_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "red_samurai_leggings_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "blue_samurai_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "blue_samurai_leggings_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "blue_samurai_leggings_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "green_samurai_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "green_samurai_leggings_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "green_samurai_leggings_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "gray_samurai_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gray_samurai_leggings_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gray_samurai_leggings_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "steel_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "brass_samurai_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "sculk_samurai_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "mage_samurai_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "neptunium_samurai_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "living_samurai_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "etyrite_samurai_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tyr_samurai_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "draco_samurai_leggings",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "ninja_leggings",
+      "min_difficulty": "MEDIUM"
+    }
+  ],
+  "CHEST": [
+    {
+      "id": "iron_samurai_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_samurai_chestplate_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_samurai_chestplate_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "white_samurai_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "white_samurai_chestplate_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "white_samurai_chestplate_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "gold_samurai_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_samurai_chestplate_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gold_samurai_chestplate_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_chestplate_light",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_chestplate_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "amethyst_samurai_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "quartz_samurai_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "red_samurai_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "red_samurai_chestplate_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "red_samurai_chestplate_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "blue_samurai_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "blue_samurai_chestplate_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "blue_samurai_chestplate_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "green_samurai_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "green_samurai_chestplate_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "green_samurai_chestplate_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "gray_samurai_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gray_samurai_chestplate_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gray_samurai_chestplate_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "steel_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "brass_samurai_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "sculk_samurai_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "mage_samurai_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "neptunium_samurai_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "living_samurai_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "etyrite_samurai_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tyr_samurai_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "draco_samurai_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "iron_ninja_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_ninja_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_ninja_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_ninja_chestplate",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "kimono",
+      "min_difficulty": "EASY"
+    }
+  ],
+  "HEAD": [
+    {
+      "id": "iron_samurai_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_samurai_helmet_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_samurai_helmet_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "white_samurai_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "white_samurai_helmet_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "white_samurai_helmet_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "gold_samurai_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_samurai_helmet_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gold_samurai_helmet_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_helmet_light",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_samurai_helmet_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "amethyst_samurai_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "quartz_samurai_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "red_samurai_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "red_samurai_helmet_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "red_samurai_helmet_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "blue_samurai_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "blue_samurai_helmet_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "blue_samurai_helmet_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "green_samurai_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "green_samurai_helmet_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "green_samurai_helmet_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "gray_samurai_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gray_samurai_helmet_light",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gray_samurai_helmet_master",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "steel_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "brass_samurai_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "sculk_samurai_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "mage_samurai_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "neptunium_samurai_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "living_samurai_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "etyrite_samurai_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tyr_samurai_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "draco_samurai_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "iron_ninja_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_ninja_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_ninja_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_ninja_helmet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "straw_hat",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "oni_mask",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "kitsune_mask",
+      "min_difficulty": "HARD"
+    }
+  ]
+}

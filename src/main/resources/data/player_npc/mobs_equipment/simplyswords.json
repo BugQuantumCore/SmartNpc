@@ -1,0 +1,134 @@
+{
+  "MAINHAND": [
+    {
+      "id": "runic_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_cutlass",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_greataxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_greathammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_claymore",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_scimitar",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_twinblade",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_chakram",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "runic_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_cutlass",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_greataxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_greathammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_claymore",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_scimitar",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_twinblade",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_chakram",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_scythe",
+      "min_difficulty": "MEDIUM"
+    }
+  ],
+  "OFFHAND": [
+  ],
+  "FEET": [
+  ],
+  "LEGS": [
+  ],
+  "CHEST": [
+  ],
+  "HEAD": [
+  ]
+}

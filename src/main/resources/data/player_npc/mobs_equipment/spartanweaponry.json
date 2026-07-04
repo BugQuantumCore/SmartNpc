@@ -1,0 +1,1758 @@
+{
+  "MAINHAND": [
+    {
+      "id": "wooden_dagger",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_dagger",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_parrying_dagger",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_parrying_dagger",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_parrying_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_parrying_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_parrying_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_parrying_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_parrying_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_parrying_dagger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_parrying_dagger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_longsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_longsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_longsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_longsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_longsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_longsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_longsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_longsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_longsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_katana",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_katana",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_katana",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_katana",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_katana",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_katana",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_katana",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_katana",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_katana",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_saber",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_saber",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_saber",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_saber",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_saber",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_saber",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_saber",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_saber",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_saber",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_rapier",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_rapier",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_rapier",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_rapier",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_rapier",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_rapier",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_rapier",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_rapier",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_rapier",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_greatsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_greatsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_greatsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_greatsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_greatsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_greatsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_greatsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_greatsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_greatsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_club",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "studded_club",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "cestus",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "studded_cestus",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_battle_hammer",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_battle_hammer",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_battle_hammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_battle_hammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_battle_hammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_battle_hammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_battle_hammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_battle_hammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_battle_hammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_warhammer",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_warhammer",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_warhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_warhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_warhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_warhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_warhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_warhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_warhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_spear",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_spear",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_spear",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_spear",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_spear",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_spear",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_spear",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_spear",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_spear",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_halberd",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_halberd",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_halberd",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_halberd",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_halberd",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_halberd",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_halberd",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_halberd",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_halberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_pike",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_pike",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_pike",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_pike",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_pike",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_pike",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_pike",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_pike",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_lance",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_lance",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_lance",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_lance",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_lance",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_lance",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_lance",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_lance",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_lance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_longbow",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "leather_longbow",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_longbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_longbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_longbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_longbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_longbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_longbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_longbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_heavy_crossbow",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "leather_heavy_crossbow",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_heavy_crossbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_heavy_crossbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_heavy_crossbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_heavy_crossbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_heavy_crossbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_heavy_crossbow",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_heavy_crossbow",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_throwing_knife",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_throwing_knife",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_throwing_knife",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_throwing_knife",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_throwing_knife",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_throwing_knife",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_throwing_knife",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_throwing_knife",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_throwing_knife",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_tomahawk",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_tomahawk",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_tomahawk",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_tomahawk",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_tomahawk",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_tomahawk",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_tomahawk",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_tomahawk",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_tomahawk",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_javelin",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_javelin",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_javelin",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_javelin",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_javelin",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_javelin",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_javelin",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_javelin",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_javelin",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_boomerang",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_boomerang",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_boomerang",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_boomerang",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_boomerang",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_boomerang",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_boomerang",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_boomerang",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_boomerang",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_battleaxe",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_battleaxe",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_battleaxe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_battleaxe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_battleaxe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_battleaxe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_battleaxe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_battleaxe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_battleaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_flanged_mace",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_flanged_mace",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_flanged_mace",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_flanged_mace",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_flanged_mace",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_flanged_mace",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_flanged_mace",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_flanged_mace",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_flanged_mace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_glaive",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_glaive",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_glaive",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_glaive",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_glaive",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_glaive",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_glaive",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_glaive",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_glaive",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_quarterstaff",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_quarterstaff",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_quarterstaff",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_quarterstaff",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_quarterstaff",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_quarterstaff",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_quarterstaff",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_quarterstaff",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_quarterstaff",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wooden_scythe",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_scythe",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "copper_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "golden_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_scythe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_scythe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "tin_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "electrum_scythe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "lead_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "nickel_scythe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "invar_scythe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "constantan_scythe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "platinum_scythe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "aluminum_scythe",
+      "min_difficulty": "MEDIUM"
+    }
+  ],
+  "OFFHAND": [
+  ],
+  "FEET": [
+  ],
+  "LEGS": [
+  ],
+  "CHEST": [
+  ],
+  "HEAD": [
+  ]
+}

@@ -1,0 +1,1658 @@
+{
+  "MAINHAND": [
+    {
+      "id": "wood_stylet",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_stylet",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_stylet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_stylet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_stylet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_stylet",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_stylet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_stylet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_stylet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_stylet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_stylet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_shortsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_shortsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_shortsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_shortsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_shortsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_shortsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_shortsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_shortsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_shortsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_shortsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_shortsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_katzbalger",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_katzbalger",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_katzbalger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_katzbalger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_katzbalger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_katzbalger",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_katzbalger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_katzbalger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_katzbalger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_katzbalger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_katzbalger",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_pike",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_pike",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_pike",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_pike",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_pike",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_ranseur",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_ranseur",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_ranseur",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_ranseur",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_ranseur",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_ranseur",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_ranseur",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_ranseur",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_ranseur",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_ranseur",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_ranseur",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_ahlspiess",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_ahlspiess",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_ahlspiess",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_ahlspiess",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_ahlspiess",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_ahlspiess",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_ahlspiess",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_ahlspiess",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_ahlspiess",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_ahlspiess",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_ahlspiess",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_chivalrylance",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_chivalrylance",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_chivalrylance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_chivalrylance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_chivalrylance",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_chivalrylance",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_chivalrylance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_chivalrylance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_chivalrylance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_chivalrylance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_chivalrylance",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_bastardsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_bastardsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_bastardsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_bastardsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_bastardsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_bastardsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_bastardsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_bastardsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_bastardsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_bastardsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_bastardsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_estoc",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_estoc",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_estoc",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_estoc",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_estoc",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_estoc",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_estoc",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_estoc",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_estoc",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_estoc",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_estoc",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_claymore",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_claymore",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_claymore",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_claymore",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_claymore",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_claymore",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_claymore",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_claymore",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_claymore",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_claymore",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_claymore",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_zweihander",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_zweihander",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_zweihander",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_zweihander",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_zweihander",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_zweihander",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_zweihander",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_zweihander",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_zweihander",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_zweihander",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_zweihander",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_flamebladedsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_flamebladedsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_flamebladedsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_flamebladedsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_flamebladedsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_flamebladedsword",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_flamebladedsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_flamebladedsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_flamebladedsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_flamebladedsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_flamebladedsword",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_lochaberaxe",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_lochaberaxe",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_lochaberaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_lochaberaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_lochaberaxe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_lochaberaxe",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_lochaberaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_lochaberaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_lochaberaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_lochaberaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_lochaberaxe",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_concavehalberd",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_concavehalberd",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_concavehalberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_concavehalberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_concavehalberd",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_concavehalberd",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_concavehalberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_concavehalberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_concavehalberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_concavehalberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_concavehalberd",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_heavymace",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_heavymace",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_heavymace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_heavymace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_heavymace",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_heavymace",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_heavymace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_heavymace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_heavymace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_heavymace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_heavymace",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_heavywarhammer",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_heavywarhammer",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_heavywarhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_heavywarhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_heavywarhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_heavywarhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_heavywarhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_heavywarhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_heavywarhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_heavywarhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_heavywarhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_lucernhammer",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_lucernhammer",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_lucernhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_lucernhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_lucernhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_lucernhammer",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_lucernhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_lucernhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_lucernhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_lucernhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_lucernhammer",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_morgenstern",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_morgenstern",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_morgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_morgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_morgenstern",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_morgenstern",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_morgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_morgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_morgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_morgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_morgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_chainmorgenstern",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_chainmorgenstern",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_chainmorgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_chainmorgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_chainmorgenstern",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_chainmorgenstern",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_chainmorgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_chainmorgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_chainmorgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_chainmorgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_chainmorgenstern",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wood_guisarme",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_guisarme",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_guisarme",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_guisarme",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_guisarme",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_guisarme",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_guisarme",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_guisarme",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_guisarme",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_guisarme",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_guisarme",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "blacksmith_hammer",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "barbedclub",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "pitchfork",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "noble_sword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "rusted_bastardsword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "rusted_heavymace",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "messer_sword",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "longbow",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "heavy_crossbow",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "club",
+      "min_difficulty": "EASY"
+    }
+  ],
+  "OFFHAND": [
+    {
+      "id": "heatershield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "target",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "buckler",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "rondache",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "tartsche",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "ellipticalshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "roundshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "pavese",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "kiteshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "corruptedroundshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "wood_heatershield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "wood_target",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "wood_buckler",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "wood_rondache",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "wood_tartsche",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "wood_ellipticalshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "wood_roundshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "wood_pavese",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "wood_kiteshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_heatershield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_target",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_buckler",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_rondache",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_tartsche",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_ellipticalshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_roundshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_pavese",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "stone_kiteshield",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "iron_heatershield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_target",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_buckler",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_rondache",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_tartsche",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_ellipticalshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_roundshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_pavese",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "iron_kiteshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_heatershield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_target",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_buckler",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_rondache",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_tartsche",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_ellipticalshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_roundshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_pavese",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gold_kiteshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "diamond_heatershield",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_target",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_buckler",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_rondache",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_tartsche",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_ellipticalshield",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_roundshield",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_pavese",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "diamond_kiteshield",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_heatershield",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_target",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_buckler",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_rondache",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_tartsche",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_ellipticalshield",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_roundshield",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_pavese",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "netherite_kiteshield",
+      "min_difficulty": "HARD"
+    },
+    {
+      "id": "copper_heatershield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_target",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_buckler",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_rondache",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_tartsche",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_ellipticalshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_roundshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_pavese",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "copper_kiteshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_heatershield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_target",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_buckler",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_rondache",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_tartsche",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_ellipticalshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_roundshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_pavese",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "steel_kiteshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_heatershield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_target",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_buckler",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_rondache",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_tartsche",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_ellipticalshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_roundshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_pavese",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "silver_kiteshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_heatershield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_target",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_buckler",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_rondache",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_tartsche",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_ellipticalshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_roundshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_pavese",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "tin_kiteshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_heatershield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_target",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_buckler",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_rondache",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_tartsche",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_ellipticalshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_roundshield",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_pavese",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bronze_kiteshield",
+      "min_difficulty": "MEDIUM"
+    }
+  ],
+  "FEET": [
+    {
+      "id": "knight_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "jousting_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gothic_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "maximilian_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "chainmail_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "platemail_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "crusader_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "ceremonial_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "gambeson_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "rustedcrusader_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "rustedchainmail_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "xivcenturyknight_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "cuirassier_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "kastenbrust_boots",
+      "min_difficulty": "EASY"
+    },
+    {
+      "id": "lamellar_boots",
+      "min_difficulty": "EASY"
+    }
+  ],
+  "LEGS": [
+    {
+      "id": "knight_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "jousting_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gothic_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "maximilian_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "chainmail_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "platemail_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "crusader_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "pantyhose",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "rustedchainmail_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "xivcenturyknight_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "cuirassier_leggings",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "kastenbrust_leggings",
+      "min_difficulty": "MEDIUM"
+    }
+  ],
+  "CHEST": [
+    {
+      "id": "knight_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "jousting_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gothic_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "maximilian_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "chainmail_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "platemail_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "halfarmor_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "crusader_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "ceremonial_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "gambeson_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "brigandine_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "rustedhalfarmor_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "rustedcrusader_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "rustedchainmail_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "xivcenturyknight_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "wingedhussar_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "cuirassier_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "kastenbrust_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "lamellar_chestplate",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "hood_decoration",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "ecranche_decoration",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "rondel_decoration",
+      "min_difficulty": "MEDIUM"
+    }
+  ],
+  "HEAD": [
+    {
+      "id": "armet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "stechhelm",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "sallet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "maximilian_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "chainmail_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "kettlehat",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "barbute",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "greathelm",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "ceremonialarmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "coif",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "norman_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "shishak",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "rustedbarbute",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "rustedgreathelm",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "rustedchainmail_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "rustedkettlehat",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "bascinet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "cuirassier_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "grand_bascinet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "face_helmet",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "crown_decoration",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "flowercrown_decoration",
+      "min_difficulty": "MEDIUM"
+    },
+    {
+      "id": "minicrown_decoration",
+      "min_difficulty": "MEDIUM"
+    }
+  ]
+}

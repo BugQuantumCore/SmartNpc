@@ -1,0 +1,83 @@
+package com.pla.player_npc.config;
+
+import net.minecraftforge.common.ForgeConfigSpec;
+
+import java.util.List;
+
+public class PlayerNpcConfig {
+    public record SpawnConfig(int weight, int minCount, int maxCount) {}
+
+    public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
+    public static final ForgeConfigSpec SPEC;
+    private static final SpawnConfig DEFAULT_PLAYER_NPC_SPAWN = new SpawnConfig(1, 1, 1);
+
+    public static ForgeConfigSpec.ConfigValue<Boolean> TURN_ON_NPC_CHAT;
+    public static ForgeConfigSpec.ConfigValue<List<? extends Number>> PLAYER_NPC_SPAWN;
+    public static ForgeConfigSpec.ConfigValue<List<? extends String>> BLACKLIST_COMPAT_MOD_WEAPON;
+
+    static {
+        TURN_ON_NPC_CHAT = BUILDER.comment(
+                        "Turn on all chatting for NPC")
+                .define("turnOnNpcChat", true);
+
+        PLAYER_NPC_SPAWN = BUILDER.comment(
+                        "Spawn config for Player NPC. Format: [weight, minCount, maxCount]. Weight is added to the spawn pool in each overworld biome. 0 disables spawning")
+                .defineList("spawnPlayerNpc", List.of(
+                        DEFAULT_PLAYER_NPC_SPAWN.weight(),
+                        DEFAULT_PLAYER_NPC_SPAWN.minCount(),
+                        DEFAULT_PLAYER_NPC_SPAWN.maxCount()
+                ), element -> element instanceof Number);
+
+        BLACKLIST_COMPAT_MOD_WEAPON = BUILDER.comment(
+                        "Mod ids whose mobs_equipment JSON should not distribute weapons to Player NPC")
+                .defineList("blacklistCompatModWeapon", List.of(), element -> element instanceof String);
+
+        SPEC = BUILDER.build();
+    }
+
+    public static SpawnConfig getPlayerNpcSpawnConfig() {
+        return parseSpawnConfigOrDefault(PLAYER_NPC_SPAWN.get(), DEFAULT_PLAYER_NPC_SPAWN);
+    }
+
+    public static boolean isCompatWeaponBlacklisted(String modId) {
+        return BLACKLIST_COMPAT_MOD_WEAPON.get().stream().anyMatch(entry -> entry.equalsIgnoreCase(modId));
+    }
+
+    private static SpawnConfig parseSpawnConfigOrDefault(List<? extends Number> rawValues, SpawnConfig defaultConfig) {
+        if (rawValues == null || rawValues.size() != 3) {
+            return defaultConfig;
+        }
+
+        Integer weight = toExactInteger(rawValues.get(0));
+        Integer minCount = toExactInteger(rawValues.get(1));
+        Integer maxCount = toExactInteger(rawValues.get(2));
+
+        if (weight == null) {
+            return defaultConfig;
+        }
+        if (weight == 0) {
+            return new SpawnConfig(0, 1, 1);
+        }
+
+        if (minCount == null || maxCount == null) {
+            return defaultConfig;
+        }
+        if (weight < 0 || weight > 1000 || minCount < 1 || minCount > 64 || maxCount < minCount || maxCount > 64) {
+            return defaultConfig;
+        }
+
+        return new SpawnConfig(weight, minCount, maxCount);
+    }
+
+    private static Integer toExactInteger(Number number) {
+        if (number == null) return null;
+
+        double valueAsDouble = number.doubleValue();
+        long roundedValue = Math.round(valueAsDouble);
+
+        if (Math.abs(valueAsDouble - roundedValue) > 1e-9) return null;
+        if (roundedValue < Integer.MIN_VALUE || roundedValue > Integer.MAX_VALUE) return null;
+
+        return (int) roundedValue;
+    }
+}
