@@ -15,6 +15,7 @@ import net.minecraft.world.entity.player.Player;
 public class ChatUtil {
     private static final int CALL_FOR_HELP_MESSAGES = 5;
     private static final int WARN_DEATH_MESSAGES = 5;
+    private static final int MISSING_HOME_CHEST_MESSAGES = 4;
     private static final int KILLER_TAUNT_MESSAGES = 20;
     private static final int DEATH_REACTION_MESSAGES = 20;
 
@@ -40,6 +41,10 @@ public class ChatUtil {
         }
 
         broadcastNpcChat(victim, randomKey(victim, "chat.player_npc.warn_death", WARN_DEATH_MESSAGES), threat.getDisplayName());
+    }
+
+    public static void missingHomeChest(PlayerNpcEntity speaker) {
+        broadcastNpcChat(speaker, randomKey(speaker, "chat.player_npc.missing_home_chest", MISSING_HOME_CHEST_MESSAGES));
     }
 
     public static void broadcastDeathSummary(PlayerNpcEntity victim, Entity killer) {

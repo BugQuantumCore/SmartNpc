@@ -42,7 +42,7 @@ public class BoatStockpileGoal extends Goal {
             return false;
         }
 
-        return PlayerNpcCraftingUtil.countPlankEquivalent(this.playerNpc.getInventory()) >= 5;
+        return PlayerNpcCraftingUtil.countPlankEquivalent(this.playerNpc.getInventory(), this.playerNpc.getRawLogReserveTarget()) >= 5;
     }
 
     @Override
@@ -59,7 +59,7 @@ public class BoatStockpileGoal extends Goal {
         this.playerNpc.getNavigation().stop();
         this.playerNpc.setCurrentAiState("ai.player_npc.crafting_boat");
         this.playerNpc.setCurrentAiDetail(this.countBoats() + "/" + this.playerNpc.getDesiredBoatCount());
-        if (PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 5)) {
+        if (PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 5, this.playerNpc.getRawLogReserveTarget())) {
             InventoryUtils.addItem(this.playerNpc, new ItemStack(Items.OAK_BOAT));
             this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
             serverLevel.playSound(null, this.playerNpc.blockPosition(), SoundEvents.WOOD_PLACE, SoundSource.PLAYERS, 0.6F, 1.2F);

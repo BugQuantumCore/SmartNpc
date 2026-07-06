@@ -26,7 +26,9 @@ public class PlayerNpcAlertManager {
     }
 
     public static void raiseDeathAlert(PlayerNpcEntity reporter, LivingEntity threat) {
-        raiseAlert(reporter, threat, true);
+        if (raiseAlert(reporter, threat, true)) {
+            ChatUtil.warnDeath(reporter, threat);
+        }
     }
 
     public static Optional<LivingEntity> getNearbyThreat(PlayerNpcEntity listener, double radius) {
@@ -55,17 +57,18 @@ public class PlayerNpcAlertManager {
         return Optional.empty();
     }
 
-    private static void raiseAlert(PlayerNpcEntity reporter, LivingEntity threat, boolean deathAlert) {
+    private static boolean raiseAlert(PlayerNpcEntity reporter, LivingEntity threat, boolean deathAlert) {
         if (!(reporter.level() instanceof ServerLevel serverLevel)
                 || threat == null
                 || !threat.isAlive()) {
-            return;
+            return false;
         }
 
         prune(serverLevel);
         List<Alert> alerts = ALERTS.computeIfAbsent(serverLevel.dimension(), key -> new ArrayList<>());
         long expiresAt = serverLevel.getGameTime() + (deathAlert ? DEATH_ALERT_TICKS : THREAT_ALERT_TICKS);
         alerts.add(new Alert(reporter.getUUID(), threat.getUUID(), reporter.blockPosition().immutable(), expiresAt));
+        return true;
     }
 
     private static void prune(ServerLevel serverLevel) {

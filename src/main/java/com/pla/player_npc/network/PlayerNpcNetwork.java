@@ -31,5 +31,12 @@ public class PlayerNpcNetwork {
                 PlayerNpcInspectorRequestPacket::decode,
                 PlayerNpcInspectorRequestPacket::handle
         );
+        CHANNEL.registerMessage(
+                packetId++,
+                PlayerNpcInspectatorModePacket.class,
+                PlayerNpcInspectatorModePacket::encode,
+                PlayerNpcInspectatorModePacket::decode,
+                PlayerNpcInspectatorModePacket::handle
+        );
     }
 }

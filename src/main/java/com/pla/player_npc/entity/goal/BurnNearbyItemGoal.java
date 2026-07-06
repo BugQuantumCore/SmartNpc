@@ -45,7 +45,6 @@ public class BurnNearbyItemGoal extends Goal {
     }
 
     private static final List<String> burnMessageKeys = keys("burn_item.player_npc", 56);
-
     private enum BurnTool {
         FLINT_AND_STEEL,
         LAVA_BUCKET
@@ -151,6 +150,12 @@ public class BurnNearbyItemGoal extends Goal {
                 }
             }
 
+            if (shouldReserveInsteadOfBurn(targetItem.getItem())) {
+                targetItem = null;
+                mob.getNavigation().stop();
+                return;
+            }
+
             igniteGroundAtItem(serverLevel);
         }
     }
@@ -220,9 +225,11 @@ public class BurnNearbyItemGoal extends Goal {
                 ItemEntity.class,
                 mob.getBoundingBox().inflate(searchRadius),
                 e -> e.isAlive()
+                        && !e.hasPickUpDelay()
                         && e.onGround()
                         && !e.getItem().isEmpty()
-                        && (shouldPickupOrEquipInsteadOfBurn(e.getItem()) || hasAnyBurnTool())
+                        && (shouldPickupOrEquipInsteadOfBurn(e.getItem())
+                        || (hasAnyBurnTool() && !shouldReserveInsteadOfBurn(e.getItem())))
         );
 
         if (items.isEmpty()) return null;
@@ -425,6 +432,10 @@ public class BurnNearbyItemGoal extends Goal {
         }
 
         return emptyArmorSlotCanUse(stack);
+    }
+
+    private boolean shouldReserveInsteadOfBurn(ItemStack stack) {
+        return InventoryUtils.isInventoryBackedSupplyDrop(stack);
     }
 
     private boolean tryHandleItemWithoutBurning(ItemEntity itemEntity) {

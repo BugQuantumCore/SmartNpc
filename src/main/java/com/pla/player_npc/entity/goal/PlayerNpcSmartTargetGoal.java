@@ -51,8 +51,7 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
     public boolean canUse() {
         if (this.playerNpc.level().isClientSide
                 || this.playerNpc.isNoAi()
-                || this.playerNpc.isHealing()
-                || this.playerNpc.tickCount % SCAN_INTERVAL_TICKS != 0) {
+                || this.playerNpc.isHealing()) {
             return false;
         }
 
@@ -60,11 +59,20 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
         if (currentTarget != null && currentTarget.isAlive() && this.canAttack(currentTarget, this.targetConditions)) {
             return false;
         }
-
-        this.nextTarget = this.findTarget();
-        if (this.nextTarget == null && PlayerNpcEntity.AI_IDLE.equals(this.playerNpc.getCurrentAiState())) {
-            this.playerNpc.setCurrentAiDetail("target scan: none");
+        if (currentTarget != null) {
+            this.playerNpc.setTarget(null);
+            if (this.isTargetCombatState(this.playerNpc.getCurrentAiState())) {
+                this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+            }
         }
+
+        if (this.playerNpc.tickCount % SCAN_INTERVAL_TICKS != 0) {
+            return false;
+        }
+
+        this.nextTarget = null;
+        this.nextState = PlayerNpcEntity.AI_IDLE;
+        this.nextTarget = this.findTarget();
         return this.nextTarget != null;
     }
 
@@ -155,8 +163,17 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
                 score += 8.0D;
             }
         } else if (candidate instanceof Animal) {
+            if (this.playerNpc.hasAnimalLootPriority()) {
+                return 0.0D;
+            }
+            if (this.playerNpc.shouldPrioritizeLogGathering()) {
+                return 0.0D;
+            }
             boolean needsFood = !InventoryUtils.hasHealingFood(this.playerNpc);
             if (!needsFood) {
+                return 0.0D;
+            }
+            if (this.hasNearbyCollectableSupplyDrop()) {
                 return 0.0D;
             }
             score += 12.0D;
@@ -178,6 +195,10 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
         }
 
         return Math.max(0.0D, score);
+    }
+
+    private boolean hasNearbyCollectableSupplyDrop() {
+        return this.playerNpc.hasCollectableSupplyDropNearby(24.0D);
     }
 
     private boolean isClearlyOutmatched(LivingEntity candidate) {
@@ -243,5 +264,21 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
             return "ai.player_npc.engaging_villager";
         }
         return "ai.player_npc.engaging";
+    }
+
+    private boolean isTargetCombatState(String state) {
+        return "ai.player_npc.engaging".equals(state)
+                || "ai.player_npc.engaging_player_like".equals(state)
+                || "ai.player_npc.engaging_monster".equals(state)
+                || "ai.player_npc.hunting_animal".equals(state)
+                || "ai.player_npc.engaging_villager".equals(state)
+                || "ai.player_npc.melee_attacking".equals(state)
+                || "ai.player_npc.ranged_bow".equals(state)
+                || "ai.player_npc.throwing_ender_pearl".equals(state)
+                || "ai.player_npc.combat_fishing".equals(state)
+                || "ai.player_npc.shield_guarding".equals(state)
+                || "ai.player_npc.troll_hit".equals(state)
+                || "ai.player_npc.using_lava_bucket".equals(state)
+                || "ai.player_npc.blocking_projectile".equals(state);
     }
 }

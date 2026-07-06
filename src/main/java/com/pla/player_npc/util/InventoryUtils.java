@@ -183,9 +183,29 @@ public class InventoryUtils {
                 || isHealingFoodStack(stack)
                 || isPlaceableBlockStack(stack)
                 || isUtilityMaterialStack(stack)
+                || isAnimalLootStack(stack)
                 || stack.is(ItemTags.SAPLINGS)
                 || stack.getItem() instanceof RecordItem
                 || stack.getItem() instanceof ThrowablePotionItem);
+    }
+
+    public static boolean isAnimalLootStack(ItemStack stack) {
+        return !stack.isEmpty()
+                && (stack.is(ItemTags.WOOL)
+                || stack.is(Items.LEATHER)
+                || stack.is(Items.FEATHER)
+                || stack.is(Items.EGG)
+                || stack.is(Items.RABBIT_HIDE)
+                || stack.is(Items.RABBIT_FOOT)
+                || stack.is(Items.STRING)
+                || stack.is(Items.BONE)
+                || stack.is(Items.INK_SAC)
+                || stack.is(Items.GLOW_INK_SAC)
+                || stack.is(Items.PHANTOM_MEMBRANE)
+                || stack.is(Items.SLIME_BALL)
+                || stack.is(Items.SCUTE)
+                || stack.is(Items.GOAT_HORN)
+                || stack.is(Items.HONEYCOMB));
     }
 
     public static Optional<ItemStack> selectHealingFood(Entity entity, RandomSource random) {
@@ -287,6 +307,8 @@ public class InventoryUtils {
                 || stack.is(Items.REDSTONE)
                 || stack.is(Items.LAPIS_LAZULI)
                 || stack.is(Items.WHEAT)
+                || stack.is(Items.WHEAT_SEEDS)
+                || stack.is(Items.BEETROOT_SEEDS)
                 || stack.is(Items.STICK)
                 || stack.is(Items.BONE_MEAL)
                 || stack.is(Items.SPYGLASS)

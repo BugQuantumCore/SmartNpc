@@ -5,6 +5,7 @@ import com.pla.player_npc.clazz.Difficulty;
 import com.pla.player_npc.clazz.FakePlayer;
 import com.pla.player_npc.clazz.PlayerNpcTarget;
 import com.pla.player_npc.entity.goal.BuildHouseGoal;
+import com.pla.player_npc.entity.goal.BreakTargetObstructionGoal;
 import com.pla.player_npc.entity.goal.BurnNearbyItemGoal;
 import com.pla.player_npc.entity.goal.BoatStockpileGoal;
 import com.pla.player_npc.entity.goal.BoatTrapMonsterGoal;
@@ -12,11 +13,15 @@ import com.pla.player_npc.entity.goal.CallForHelpGoal;
 import com.pla.player_npc.entity.goal.CombatFishingRodGoal;
 import com.pla.player_npc.entity.goal.CookFoodGoal;
 import com.pla.player_npc.entity.goal.CraftBasicGearGoal;
+import com.pla.player_npc.entity.goal.CraftCropFoodGoal;
 import com.pla.player_npc.entity.goal.CraftIronGearGoal;
 import com.pla.player_npc.entity.goal.CraftShieldGoal;
 import com.pla.player_npc.entity.goal.EatHealingFoodGoal;
 import com.pla.player_npc.entity.goal.EscapeHoleWithBlockGoal;
+import com.pla.player_npc.entity.goal.EscapeWaterCurrentGoal;
+import com.pla.player_npc.entity.goal.ExploreBiomeForLogsGoal;
 import com.pla.player_npc.entity.goal.ExploreCaveOreGoal;
+import com.pla.player_npc.entity.goal.DigDownForStoneGoal;
 import com.pla.player_npc.entity.goal.FillWaterBucketGoal;
 import com.pla.player_npc.entity.goal.FarmCropGoal;
 import com.pla.player_npc.entity.goal.GatherMaterialsGoal;
@@ -30,6 +35,7 @@ import com.pla.player_npc.entity.goal.PlayerNpcFishingGoal;
 import com.pla.player_npc.entity.goal.PlayerNpcProjectileBlockGoal;
 import com.pla.player_npc.entity.goal.PlayerNpcRangedBowAttackGoal;
 import com.pla.player_npc.entity.goal.PlayerNpcSmartTargetGoal;
+import com.pla.player_npc.entity.goal.PickupNearbyItemGoal;
 import com.pla.player_npc.entity.goal.RandomCombatJumpGoal;
 import com.pla.player_npc.entity.goal.RareSneakGoal;
 import com.pla.player_npc.entity.goal.RecoverWeaponInCombatGoal;
@@ -63,6 +69,7 @@ import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.DamageTypeTags;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.DifficultyInstance;
@@ -89,6 +96,8 @@ import net.minecraft.world.item.*;
 import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ServerLevelAccessor;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkHooks;
 import net.minecraftforge.network.PlayMessages;
@@ -110,7 +119,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final EntityDataAccessor<String> AI_DETAIL = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<Boolean> DANCING = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
     private static final int MAIN_HAND_ATTACK_ANIMATION_DURATION = 10;
+    private static final int MAIN_HAND_USE_ANIMATION_DURATION = 6;
     private static final int PLACE_BLOCK_PARRY_COOLDOWN_TICKS = 60;
+    private static final double PLAYER_LIKE_JUMP_Y = 0.42D;
+    private static final int[] RAW_LOG_RESERVE_OPTIONS = {12, 20, 24, 32};
+    private static final int[] WOOD_SUPPLY_TARGET_OPTIONS = {48, 64, 96, 124};
+    private static final int[] COBBLESTONE_SUPPLY_TARGET_OPTIONS = {16, 24, 32, 48};
     public static final String AI_IDLE = "ai.player_npc.idle";
     private static final List<ItemLike> REGULAR_FOODS = List.of(
             Items.COOKED_BEEF,
@@ -169,6 +183,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int craftGearCooldown = 0;
     private int farmCooldown = 0;
     private int gatherCooldown = 0;
+    private int biomeExploreCooldown = 0;
     private int huntSheepCooldown = 0;
     private int ironGolemTrollCooldown = 0;
     private int lootChestCooldown = 0;
@@ -190,15 +205,27 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int shieldGuardCooldown = 0;
     private boolean boatCollector = new Random().nextFloat() < 0.35F;
     private int desiredBoatCount = new Random().nextInt(2, 4);
+    private int rawLogReserveTarget = 24;
+    private int woodSupplyTarget = 64;
+    private int cobblestoneSupplyTarget = 24;
     private PlayerNpcTarget target;
     private ItemStack mainWeaponItem = ItemStack.EMPTY;
     private ItemStack offWeaponItem = ItemStack.EMPTY;
     private boolean healing = false;
     private boolean useBow = true;
+    @Nullable
+    private BlockPos ownedChestPos;
     private double placeBlockToParryChance;
     private int placeBlockParryCooldown = 0;
     private int stunEscapeCooldown = 0;
     private int playingIdleCooldown = new Random().nextInt(600, 1200);
+    private int tasklessIdleTicks = 0;
+    private int staleTargetTicks = 0;
+    private int staleTargetEntityId = -1;
+    private int lastCombatProgressTick = 0;
+    private int animalLootPriorityTicks = 0;
+    @Nullable
+    private BlockPos animalLootPriorityPos;
     private static final String EPICFIGHT_PLAYER_NPC_MODID = "epicfight_player_npc";
 
     public int getPlayingIdleCooldown() {
@@ -281,6 +308,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return gatherCooldown;
     }
 
+    public int getBiomeExploreCooldown() {
+        return biomeExploreCooldown;
+    }
+
     public int getHuntSheepCooldown() {
         return huntSheepCooldown;
     }
@@ -357,6 +388,19 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return shieldGuardCooldown;
     }
 
+    @Nullable
+    public BlockPos getOwnedChestPos() {
+        return this.ownedChestPos;
+    }
+
+    public void setOwnedChestPos(@Nullable BlockPos ownedChestPos) {
+        this.ownedChestPos = ownedChestPos == null ? null : ownedChestPos.immutable();
+    }
+
+    public boolean isOwnedChest(BlockPos pos) {
+        return this.ownedChestPos != null && this.ownedChestPos.equals(pos);
+    }
+
     public boolean isBoatCollector() {
         return boatCollector;
     }
@@ -419,6 +463,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public void setGatherCooldown(int ticks) {
         this.gatherCooldown = normalizeCooldown(ticks);
+    }
+
+    public void setBiomeExploreCooldown(int ticks) {
+        this.biomeExploreCooldown = normalizeCooldown(ticks);
     }
 
     public void setHuntSheepCooldown(int ticks) {
@@ -497,6 +545,140 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.shieldGuardCooldown = normalizeCooldown(ticks);
     }
 
+    public void wakeUpIdleWork() {
+        this.buildHouseCooldown = 0;
+        this.craftGearCooldown = 0;
+        this.manageHomeCooldown = 0;
+        this.returnHomeCooldown = 0;
+        this.craftCooldown = 0;
+        this.farmCooldown = 0;
+        this.gatherCooldown = 0;
+        this.biomeExploreCooldown = 0;
+        this.oreMiningCooldown = 0;
+        this.saplingPlantCooldown = 0;
+        this.playingIdleCooldown = 0;
+    }
+
+    public boolean hasAnimalLootPriority() {
+        return this.animalLootPriorityTicks > 0 && this.animalLootPriorityPos != null;
+    }
+
+    @Nullable
+    public BlockPos getAnimalLootPriorityPos() {
+        return this.animalLootPriorityPos;
+    }
+
+    public void clearAnimalLootPriority() {
+        this.animalLootPriorityTicks = 0;
+        this.animalLootPriorityPos = null;
+    }
+
+    public boolean hasCollectableSupplyDropNearby(double radius) {
+        if (this.level().isClientSide || radius <= 0.0D) {
+            return false;
+        }
+
+        AABB searchBox = this.getBoundingBox().inflate(radius, Math.min(6.0D, radius), radius);
+        return !this.level().getEntitiesOfClass(
+                ItemEntity.class,
+                searchBox,
+                item -> item.isAlive()
+                        && !item.isRemoved()
+                        && !item.getItem().isEmpty()
+                        && InventoryUtils.isInventoryBackedSupplyDrop(item.getItem())
+                        && this.canAcceptInventoryStack(item.getItem())
+        ).isEmpty();
+    }
+
+    public boolean canAcceptInventoryStack(ItemStack incoming) {
+        if (incoming.isEmpty()) {
+            return false;
+        }
+
+        for (int i = 0; i < this.inventory.getContainerSize(); i++) {
+            ItemStack slotStack = this.inventory.getItem(i);
+            if (slotStack.isEmpty()) {
+                return true;
+            }
+            if (ItemStack.isSameItemSameTags(slotStack, incoming)
+                    && slotStack.getCount() < slotStack.getMaxStackSize()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public int getRawLogReserveTarget() {
+        return this.rawLogReserveTarget;
+    }
+
+    public int getWoodSupplyTarget() {
+        return this.woodSupplyTarget;
+    }
+
+    public int getCobblestoneSupplyTarget() {
+        return this.cobblestoneSupplyTarget;
+    }
+
+    public boolean shouldPrioritizeLogGathering() {
+        int rawLogs = this.countHeldAndInventoryItems(stack -> stack.is(ItemTags.LOGS));
+        if (rawLogs < this.rawLogReserveTarget) {
+            return true;
+        }
+
+        int plankSupply = this.countHeldAndInventoryItems(stack -> stack.is(ItemTags.PLANKS));
+        int usableWoodEquivalent = plankSupply + Math.max(0, rawLogs - this.rawLogReserveTarget) * 4;
+        return usableWoodEquivalent < this.woodSupplyTarget;
+    }
+
+    private boolean hasHeldOrInventoryTool(Class<?> toolClass) {
+        if (toolClass.isInstance(this.getMainHandItem().getItem())
+                || toolClass.isInstance(this.getOffhandItem().getItem())) {
+            return true;
+        }
+
+        for (int i = 0; i < this.inventory.getContainerSize(); i++) {
+            ItemStack stack = this.inventory.getItem(i);
+            if (!stack.isEmpty() && toolClass.isInstance(stack.getItem())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int countHeldAndInventoryItems(Predicate<ItemStack> matcher) {
+        int count = 0;
+        ItemStack mainHand = this.getMainHandItem();
+        if (!mainHand.isEmpty() && matcher.test(mainHand)) {
+            count += mainHand.getCount();
+        }
+        ItemStack offhand = this.getOffhandItem();
+        if (!offhand.isEmpty() && matcher.test(offhand)) {
+            count += offhand.getCount();
+        }
+        for (int i = 0; i < this.inventory.getContainerSize(); i++) {
+            ItemStack stack = this.inventory.getItem(i);
+            if (!stack.isEmpty() && matcher.test(stack)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private void prioritizeAnimalLoot(BlockPos pos) {
+        this.animalLootPriorityTicks = 20 * 8;
+        this.animalLootPriorityPos = pos == null ? this.blockPosition() : pos.immutable();
+        this.gatherCooldown = 0;
+        this.biomeExploreCooldown = 0;
+        this.fishingCooldown = 0;
+        this.playingIdleCooldown = 0;
+        this.setCurrentAiState("ai.player_npc.collecting_item");
+        this.setCurrentAiDetail("animal drops @ "
+                + this.animalLootPriorityPos.getX() + " "
+                + this.animalLootPriorityPos.getY() + " "
+                + this.animalLootPriorityPos.getZ());
+    }
+
     private static int normalizeCooldown(int ticks) {
         return Math.max(0, ticks);
     }
@@ -569,7 +751,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.setCustomNameVisible(true);
         this.setPersistenceRequired();
         this.placeBlockToParryChance = new Random().nextDouble(0.20, 0.40);
+        this.rawLogReserveTarget = this.randomMaterialTarget(RAW_LOG_RESERVE_OPTIONS);
+        this.woodSupplyTarget = this.randomMaterialTarget(WOOD_SUPPLY_TARGET_OPTIONS);
+        this.cobblestoneSupplyTarget = this.randomMaterialTarget(COBBLESTONE_SUPPLY_TARGET_OPTIONS);
         this.setCanPickUpLoot(true);
+    }
+
+    private int randomMaterialTarget(int[] options) {
+        return options[this.getRandom().nextInt(options.length)];
     }
 
     @Override
@@ -598,6 +787,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         tag.putInt("CraftGearCooldown", this.craftGearCooldown);
         tag.putInt("FarmCooldown", this.farmCooldown);
         tag.putInt("GatherCooldown", this.gatherCooldown);
+        tag.putInt("BiomeExploreCooldown", this.biomeExploreCooldown);
         tag.putInt("HuntSheepCooldown", this.huntSheepCooldown);
         tag.putInt("IronGolemTrollCooldown", this.ironGolemTrollCooldown);
         tag.putInt("LootChestCooldown", this.lootChestCooldown);
@@ -619,6 +809,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         tag.putInt("ShieldGuardCooldown", this.shieldGuardCooldown);
         tag.putBoolean("BoatCollector", this.boatCollector);
         tag.putInt("DesiredBoatCount", this.desiredBoatCount);
+        tag.putInt("RawLogReserveTarget", this.rawLogReserveTarget);
+        tag.putInt("WoodSupplyTarget", this.woodSupplyTarget);
+        tag.putInt("CobblestoneSupplyTarget", this.cobblestoneSupplyTarget);
         tag.putBoolean("UseBow", this.useBow);
         tag.putDouble("BlockProjectileChance", this.placeBlockToParryChance);
         tag.putInt("BlockParryCooldown", this.placeBlockParryCooldown);
@@ -635,6 +828,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.offWeaponItem.save(itemTag);
             tag.put("OffHandItem", itemTag);
         }
+        if (this.ownedChestPos != null) {
+            tag.putInt("OwnedChestX", this.ownedChestPos.getX());
+            tag.putInt("OwnedChestY", this.ownedChestPos.getY());
+            tag.putInt("OwnedChestZ", this.ownedChestPos.getZ());
+        }
+        PlayerNpcHomeUtil.saveHomeToTag(this, tag);
         tag.putBoolean("MainWeaponDisarmed", this.mainWeaponDisarmed);
     }
 
@@ -657,6 +856,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.craftGearCooldown = tag.getInt("CraftGearCooldown");
         this.farmCooldown = tag.getInt("FarmCooldown");
         this.gatherCooldown = tag.getInt("GatherCooldown");
+        this.biomeExploreCooldown = tag.getInt("BiomeExploreCooldown");
         this.huntSheepCooldown = tag.getInt("HuntSheepCooldown");
         this.ironGolemTrollCooldown = tag.getInt("IronGolemTrollCooldown");
         this.lootChestCooldown = tag.getInt("LootChestCooldown");
@@ -682,6 +882,15 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (tag.contains("DesiredBoatCount", Tag.TAG_INT)) {
             this.desiredBoatCount = Math.max(2, Math.min(3, tag.getInt("DesiredBoatCount")));
         }
+        if (tag.contains("RawLogReserveTarget", Tag.TAG_INT)) {
+            this.rawLogReserveTarget = Math.max(0, tag.getInt("RawLogReserveTarget"));
+        }
+        if (tag.contains("WoodSupplyTarget", Tag.TAG_INT)) {
+            this.woodSupplyTarget = Math.max(0, tag.getInt("WoodSupplyTarget"));
+        }
+        if (tag.contains("CobblestoneSupplyTarget", Tag.TAG_INT)) {
+            this.cobblestoneSupplyTarget = Math.max(0, tag.getInt("CobblestoneSupplyTarget"));
+        }
         this.useBow = tag.getBoolean("UseBow");
         if (tag.contains("BlockProjectileChance", Tag.TAG_DOUBLE)) {
             this.placeBlockToParryChance = tag.getDouble("BlockProjectileChance");
@@ -705,6 +914,18 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         } else {
             this.offWeaponItem = ItemStack.EMPTY;
         }
+        if (tag.contains("OwnedChestX", Tag.TAG_INT)
+                && tag.contains("OwnedChestY", Tag.TAG_INT)
+                && tag.contains("OwnedChestZ", Tag.TAG_INT)) {
+            this.ownedChestPos = new BlockPos(
+                    tag.getInt("OwnedChestX"),
+                    tag.getInt("OwnedChestY"),
+                    tag.getInt("OwnedChestZ")
+            );
+        } else {
+            this.ownedChestPos = null;
+        }
+        PlayerNpcHomeUtil.readHomeFromTag(this, tag);
         this.mainWeaponDisarmed = tag.getBoolean("MainWeaponDisarmed");
     }
 
@@ -767,6 +988,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     protected void registerGoals() {
         this.goalSelector.addGoal(-2, new RecoverWeaponInCombatGoal(this, 1.0D, 10.0D));
+        this.goalSelector.addGoal(-1, new EscapeWaterCurrentGoal(this));
         this.goalSelector.addGoal(0, new FloatGoal(this));
         this.targetSelector.addGoal(0, new RetargetCloserThreatGoal(this));
         this.targetSelector.addGoal(1, new HurtByTargetGoal(this));
@@ -774,28 +996,33 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(1, new EscapeHoleWithBlockGoal(this));
         this.goalSelector.addGoal(1, new RespondToNpcAlertGoal(this));
         this.goalSelector.addGoal(2, new CallForHelpGoal(this));
+        this.goalSelector.addGoal(2, new BreakTargetObstructionGoal(this));
         this.goalSelector.addGoal(2, new SleepAtHomeGoal(this));
         this.goalSelector.addGoal(2, new BoatTrapMonsterGoal(this));
         this.goalSelector.addGoal(2, new TrollHitGoal(this));
+        this.goalSelector.addGoal(3, new PickupNearbyItemGoal(this, 1.1D));
         this.goalSelector.addGoal(5, new BurnNearbyItemGoal(this, 1.0D, 10.0D));
         this.goalSelector.addGoal(5, new IronGolemTrollGoal(this));
+        this.goalSelector.addGoal(5, new CraftBasicGearGoal(this));
         this.goalSelector.addGoal(3, new MeleeAttackGoal(this, 1.0D, false));
+        this.goalSelector.addGoal(4, new ReturnHomeGoal(this, 1.0D));
+        this.goalSelector.addGoal(5, new BuildHouseGoal(this));
+        this.goalSelector.addGoal(5, new ManageHomeBaseGoal(this));
         this.goalSelector.addGoal(6, new GatherMaterialsGoal(this, 1.0D));
+        this.goalSelector.addGoal(6, new DigDownForStoneGoal(this, 1.0D));
+        this.goalSelector.addGoal(6, new ExploreBiomeForLogsGoal(this, 1.0D));
         this.goalSelector.addGoal(6, new ExploreCaveOreGoal(this, 1.0D));
-        this.goalSelector.addGoal(6, new ManageHomeBaseGoal(this));
-        this.goalSelector.addGoal(6, new CraftBasicGearGoal(this));
         this.goalSelector.addGoal(6, new CraftIronGearGoal(this));
         this.goalSelector.addGoal(6, new CookFoodGoal(this));
+        this.goalSelector.addGoal(6, new CraftCropFoodGoal(this));
         this.goalSelector.addGoal(6, new CraftShieldGoal(this));
         this.goalSelector.addGoal(6, new FarmCropGoal(this));
         this.goalSelector.addGoal(6, new PlantSaplingGoal(this));
         this.goalSelector.addGoal(6, new LootNearbyChestGoal(this, 1.0D));
         this.goalSelector.addGoal(6, new HuntSheepForBedGoal(this));
         this.goalSelector.addGoal(6, new PlayerNpcFishingGoal(this));
-        this.goalSelector.addGoal(6, new BuildHouseGoal(this));
         this.goalSelector.addGoal(6, new BoatStockpileGoal(this));
         this.goalSelector.addGoal(6, new UtilityCraftingGoal(this));
-        this.goalSelector.addGoal(7, new ReturnHomeGoal(this, 1.0D));
         this.goalSelector.addGoal(7, new WaterAvoidingRandomStrollGoal(this, 1.0D));
         this.goalSelector.addGoal(8, new UseSpyglassGoal(this));
         this.goalSelector.addGoal(8, new JukeboxDanceGoal(this, 1.0D));
@@ -848,10 +1075,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.jumpFromGround();
         Vec3 motion = this.getDeltaMovement();
         Vec3 forward = this.getForward();
-        double strength = new Random().nextDouble(0.2, 0.4);
+        double strength = new Random().nextDouble(0.28, 0.48);
         this.setDeltaMovement(
                 motion.x + forward.x * strength,
-                motion.y,
+                Math.max(motion.y, PLAYER_LIKE_JUMP_Y),
                 motion.z + forward.z * strength
         );
         this.hasImpulse = true;
@@ -861,7 +1088,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (!this.onGround()) return;
         Vec3 v = this.getDeltaMovement();
         double keepH = 0.02D;
-        this.setDeltaMovement(v.x * keepH, 0.42D, v.z * keepH);
+        this.setDeltaMovement(v.x * keepH, PLAYER_LIKE_JUMP_Y, v.z * keepH);
         this.hasImpulse = true;
     }
 
@@ -876,6 +1103,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 && attacker != this
                 && !this.isAlliedTo(attacker)) {
             this.setTarget(attacker);
+            this.lastCombatProgressTick = this.tickCount;
+            this.staleTargetTicks = 0;
             this.setCurrentAiState("ai.player_npc.retaliating");
         }
         return hurt;
@@ -917,7 +1146,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.triggerMainHandAttackAnimation();
         boolean hurtTarget = super.doHurtTarget(target);
         if (hurtTarget) {
+            this.lastCombatProgressTick = this.tickCount;
+            this.staleTargetTicks = 0;
             this.hurtMainHandItem(1);
+            if (target instanceof Animal animal && (animal.isDeadOrDying() || !animal.isAlive())) {
+                this.prioritizeAnimalLoot(animal.blockPosition());
+                this.setTarget(null);
+                this.getNavigation().stop();
+            }
         }
         return hurtTarget;
     }
@@ -967,9 +1203,171 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return false;
     }
 
+    public void showBlockBreakProgress(BlockPos pos, int breakTicks, int requiredBreakTicks) {
+        if (!(this.level() instanceof ServerLevel serverLevel) || pos == null) {
+            return;
+        }
+
+        int progress = requiredBreakTicks <= 1
+                ? 9
+                : (int) ((breakTicks * 10.0F) / requiredBreakTicks);
+        progress = Math.max(0, Math.min(9, progress));
+        serverLevel.destroyBlockProgress(this.getId(), pos, progress);
+    }
+
+    public void clearBlockBreakProgress(BlockPos pos) {
+        if (this.level() instanceof ServerLevel serverLevel && pos != null) {
+            serverLevel.destroyBlockProgress(this.getId(), pos, -1);
+        }
+    }
+
+    public void markCombatProgress() {
+        this.lastCombatProgressTick = this.tickCount;
+        this.staleTargetTicks = 0;
+    }
+
+    public void equipBetterGearFromInventory() {
+        boolean changed = false;
+        changed |= this.equipBestArmorFromInventory();
+        if (!this.shouldPauseMainHandAutoEquip()) {
+            changed |= this.equipBestMainHandFromInventory();
+        }
+        if (changed) {
+            this.inventory.setChanged();
+        }
+    }
+
+    private boolean shouldPauseMainHandAutoEquip() {
+        String state = this.getCurrentAiState();
+        return this.isHealing()
+                || "ai.player_npc.gathering_materials".equals(state)
+                || "ai.player_npc.exploring_cave".equals(state)
+                || "ai.player_npc.escaping_hole".equals(state)
+                || "ai.player_npc.escaping_water_current".equals(state)
+                || "ai.player_npc.breaking_target_obstruction".equals(state)
+                || "ai.player_npc.managing_home".equals(state)
+                || "ai.player_npc.building_house".equals(state)
+                || "ai.player_npc.farming".equals(state)
+                || "ai.player_npc.planting_sapling".equals(state);
+    }
+
+    private boolean equipBestArmorFromInventory() {
+        boolean changed = false;
+        for (int i = 0; i < this.inventory.getContainerSize(); i++) {
+            ItemStack stack = this.inventory.getItem(i);
+            if (stack.isEmpty()) {
+                continue;
+            }
+
+            EquipmentSlot slot = LivingEntity.getEquipmentSlotForItem(stack);
+            if (slot.getType() != EquipmentSlot.Type.ARMOR) {
+                continue;
+            }
+
+            ItemStack equipped = this.getItemBySlot(slot);
+            if (this.gearScore(stack) <= this.gearScore(equipped) + 0.05D) {
+                continue;
+            }
+
+            this.equipOneFromInventorySlot(i, slot);
+            changed = true;
+        }
+        return changed;
+    }
+
+    private boolean equipBestMainHandFromInventory() {
+        int bestSlot = -1;
+        double bestScore = this.gearScore(this.getMainHandItem());
+        for (int i = 0; i < this.inventory.getContainerSize(); i++) {
+            ItemStack stack = this.inventory.getItem(i);
+            if (!this.isMainHandGear(stack)) {
+                continue;
+            }
+
+            double score = this.gearScore(stack);
+            if (score > bestScore + 0.05D) {
+                bestScore = score;
+                bestSlot = i;
+            }
+        }
+
+        if (bestSlot < 0) {
+            return false;
+        }
+
+        this.equipOneFromInventorySlot(bestSlot, EquipmentSlot.MAINHAND);
+        return true;
+    }
+
+    private void equipOneFromInventorySlot(int inventorySlot, EquipmentSlot equipmentSlot) {
+        ItemStack source = this.inventory.getItem(inventorySlot);
+        if (source.isEmpty()) {
+            return;
+        }
+
+        ItemStack replacement = source.copy();
+        replacement.setCount(1);
+        source.shrink(1);
+        if (source.isEmpty()) {
+            this.inventory.setItem(inventorySlot, ItemStack.EMPTY);
+        }
+
+        ItemStack previous = this.getItemBySlot(equipmentSlot).copy();
+        this.setItemSlot(equipmentSlot, replacement);
+        if (!previous.isEmpty() && !InventoryUtils.addItem(this.inventory, previous)) {
+            this.spawnAtLocation(previous);
+        }
+    }
+
+    private boolean isMainHandGear(ItemStack stack) {
+        return !stack.isEmpty()
+                && (stack.getItem() instanceof SwordItem
+                || stack.getItem() instanceof AxeItem
+                || stack.getItem() instanceof TridentItem
+                || stack.getItem() instanceof DiggerItem
+                || stack.getItem() instanceof BowItem
+                || stack.getItem() instanceof CrossbowItem
+                || stack.getItem() instanceof ProjectileWeaponItem);
+    }
+
+    private double gearScore(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return 0.0D;
+        }
+
+        double score = 0.0D;
+        if (stack.getItem() instanceof ArmorItem armorItem) {
+            score += armorItem.getDefense() * 3.0D;
+            score += armorItem.getToughness() * 1.5D;
+        } else if (stack.getItem() instanceof SwordItem swordItem) {
+            score += swordItem.getDamage() + 4.0D;
+        } else if (stack.getItem() instanceof AxeItem axeItem) {
+            score += axeItem.getAttackDamage() + 3.0D;
+        } else if (stack.getItem() instanceof TridentItem) {
+            score += 9.0D;
+        } else if (stack.getItem() instanceof BowItem || stack.getItem() instanceof CrossbowItem || stack.getItem() instanceof ProjectileWeaponItem) {
+            score += 6.0D;
+        } else if (stack.getItem() instanceof DiggerItem) {
+            score += 3.0D + stack.getDestroySpeed(Blocks.STONE.defaultBlockState()) * 0.1D;
+        }
+
+        if (stack.isEnchanted()) {
+            score += 2.0D;
+        }
+        if (stack.isDamageableItem()) {
+            score += ((double) stack.getMaxDamage() - stack.getDamageValue()) / Math.max(1, stack.getMaxDamage());
+        }
+        return score;
+    }
+
     public void triggerMainHandAttackAnimation() {
         this.entityData.set(MAIN_HAND_ATTACK_ANIMATION_TICKS, MAIN_HAND_ATTACK_ANIMATION_DURATION);
-        this.swing(InteractionHand.MAIN_HAND, true);
+    }
+
+    public void triggerMainHandUseAnimation() {
+        if (this.entityData.get(MAIN_HAND_ATTACK_ANIMATION_TICKS) <= 0) {
+            this.entityData.set(MAIN_HAND_ATTACK_ANIMATION_TICKS, MAIN_HAND_USE_ANIMATION_DURATION);
+        }
     }
 
     public int getMainHandAttackAnimationTicks() {
@@ -1072,7 +1470,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
 
         ChatUtil.broadcastDeathSummary(this, killer);
-        ChatUtil.warnDeath(this, killer);
         ChatUtil.scheduleDeathReaction(this, killer);
 
         if (killer instanceof LivingEntity livingKiller) {
@@ -1105,9 +1502,30 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         for (ItemEntity itemEntity : items) {
             tryPickup(itemEntity);
         }
+        this.equipBetterGearFromInventory();
     }
-    private void tryPickup(ItemEntity itemEntity) {
+
+    public boolean tryPickupItemEntity(ItemEntity itemEntity) {
+        if (this.level().isClientSide
+                || itemEntity == null
+                || !itemEntity.isAlive()
+                || itemEntity.isRemoved()
+                || itemEntity.hasPickUpDelay()
+                || itemEntity.getItem().isEmpty()
+                || !shouldCustomInventoryPickup(itemEntity.getItem())) {
+            return false;
+        }
+
+        boolean pickedUp = tryPickup(itemEntity);
+        if (pickedUp) {
+            this.equipBetterGearFromInventory();
+        }
+        return pickedUp;
+    }
+
+    private boolean tryPickup(ItemEntity itemEntity) {
         ItemStack remaining = itemEntity.getItem().copy();
+        int originalCount = remaining.getCount();
 
         for (int i = 0; i < inventory.getContainerSize() && !remaining.isEmpty(); i++) {
             if (remaining.isEmpty()) break;
@@ -1128,6 +1546,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             }
         }
 
+        if (remaining.getCount() == originalCount) {
+            return false;
+        }
+
+        this.inventory.setChanged();
+        this.swing(InteractionHand.MAIN_HAND, true);
+        this.level().playSound(null, this.blockPosition(), SoundEvents.ITEM_PICKUP, SoundSource.HOSTILE, 0.2F, 1.0F);
+
         if (remaining.isEmpty()) {
             itemEntity.setDeltaMovement(
                     (this.getX() - itemEntity.getX()) * 0.25,
@@ -1136,10 +1562,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             );
             itemEntity.setPickUpDelay(0);
             itemEntity.discard();
-            this.level().playSound(null, this.blockPosition(), SoundEvents.ITEM_PICKUP, SoundSource.HOSTILE, 0.2F, 1.0F);
         } else {
             itemEntity.setItem(remaining);
         }
+        return true;
     }
 
     @Override
@@ -1155,6 +1581,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         this.tickAiCooldowns();
         this.cleanupStaleCombatState();
+        this.tickTasklessActivityWatchdog();
 
         if ((tickCount + getId()) % 20 != 0) {
             return;
@@ -1179,6 +1606,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.craftGearCooldown = tickCooldown(this.craftGearCooldown);
         this.farmCooldown = tickCooldown(this.farmCooldown);
         this.gatherCooldown = tickCooldown(this.gatherCooldown);
+        this.biomeExploreCooldown = tickCooldown(this.biomeExploreCooldown);
         this.huntSheepCooldown = tickCooldown(this.huntSheepCooldown);
         this.ironGolemTrollCooldown = tickCooldown(this.ironGolemTrollCooldown);
         this.lootChestCooldown = tickCooldown(this.lootChestCooldown);
@@ -1191,6 +1619,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.ironGearCooldown = tickCooldown(this.ironGearCooldown);
         this.spyglassCooldown = tickCooldown(this.spyglassCooldown);
         this.saplingPlantCooldown = tickCooldown(this.saplingPlantCooldown);
+        this.animalLootPriorityTicks = tickCooldown(this.animalLootPriorityTicks);
+        if (this.animalLootPriorityTicks <= 0) {
+            this.animalLootPriorityPos = null;
+        }
         this.boatStockCooldown = tickCooldown(this.boatStockCooldown);
         this.boatTrapCooldown = tickCooldown(this.boatTrapCooldown);
         this.jukeboxDanceCooldown = tickCooldown(this.jukeboxDanceCooldown);
@@ -1207,15 +1639,81 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return cooldown > 0 ? cooldown - 1 : 0;
     }
 
+    private void tickTasklessActivityWatchdog() {
+        if (this.level().isClientSide
+                || !this.isAlive()
+                || this.isNoAi()
+                || this.isPassenger()
+                || this.isHealing()
+                || this.getTarget() != null
+                || this.isSleeping()) {
+            this.tasklessIdleTicks = 0;
+            return;
+        }
+
+        String state = this.getCurrentAiState();
+        if (!AI_IDLE.equals(state) && !"ai.player_npc.looking_for_work".equals(state)) {
+            this.tasklessIdleTicks = 0;
+            return;
+        }
+
+        this.tasklessIdleTicks++;
+        if (this.tasklessIdleTicks >= 20) {
+            this.wakeUpIdleWork();
+            if (this.tasklessIdleTicks > 80) {
+                this.tasklessIdleTicks = 20;
+            }
+        }
+    }
+
     private void cleanupStaleCombatState() {
         LivingEntity currentTarget = this.getTarget();
         if (currentTarget != null && (!currentTarget.isAlive() || currentTarget.isRemoved())) {
+            if (currentTarget instanceof Animal) {
+                this.prioritizeAnimalLoot(currentTarget.blockPosition());
+            }
             this.setTarget(null);
             currentTarget = null;
         }
 
         if (currentTarget == null && this.isCombatAiState(this.getCurrentAiState())) {
             this.setCurrentAiState(AI_IDLE);
+        }
+
+        if (currentTarget == null) {
+            this.staleTargetTicks = 0;
+            this.staleTargetEntityId = -1;
+            return;
+        }
+
+        if (this.staleTargetEntityId != currentTarget.getId()) {
+            this.staleTargetEntityId = currentTarget.getId();
+            this.staleTargetTicks = 0;
+            this.lastCombatProgressTick = this.tickCount;
+        }
+
+        double followDistance = this.getAttributeValue(Attributes.FOLLOW_RANGE);
+        double clearDistance = Math.max(48.0D, followDistance + 24.0D);
+        double distanceSqr = this.distanceToSqr(currentTarget);
+        boolean tooFar = distanceSqr > clearDistance * clearDistance;
+        boolean blockedAndNotMoving = distanceSqr > 16.0D * 16.0D
+                && !this.hasLineOfSight(currentTarget)
+                && (this.getNavigation().isDone() || this.getNavigation().isStuck());
+        boolean noCombatProgress = this.tickCount - this.lastCombatProgressTick > 20 * 8;
+
+        if (noCombatProgress && (tooFar || blockedAndNotMoving)) {
+            this.staleTargetTicks++;
+        } else {
+            this.staleTargetTicks = 0;
+        }
+
+        if (this.staleTargetTicks > 20 * 3) {
+            this.setTarget(null);
+            this.staleTargetTicks = 0;
+            this.staleTargetEntityId = -1;
+            if (this.isCombatAiState(this.getCurrentAiState())) {
+                this.setCurrentAiState(AI_IDLE);
+            }
         }
     }
 
@@ -1232,6 +1730,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || "ai.player_npc.engaging".equals(state)
                 || "ai.player_npc.engaging_player_like".equals(state)
                 || "ai.player_npc.engaging_monster".equals(state)
+                || "ai.player_npc.breaking_target_obstruction".equals(state)
                 || "ai.player_npc.hunting_animal".equals(state)
                 || "ai.player_npc.engaging_villager".equals(state)
                 || "ai.player_npc.assisting_alert".equals(state);
@@ -1278,9 +1777,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         boolean isHard = ProgressionUtil.isAtLeastDifficulty(Difficulty.HARD);
         boolean isMedium = ProgressionUtil.isAtLeastDifficulty(Difficulty.MEDIUM);
 
-        int goldenAppleCount = isHard ? random.nextInt(8, 16)
-                : isMedium ? random.nextInt(4, 8)
-                : random.nextInt(0, 2);
+        int goldenAppleCount = isHard ? random.nextInt(6, 12)
+                : isMedium ? random.nextInt(2, 6)
+                : 0;
         if (goldenAppleCount > 0) {
             InventoryUtils.addItem(this.inventory, new ItemStack(Items.GOLDEN_APPLE, goldenAppleCount));
         }
@@ -1289,11 +1788,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
 
         List<ItemLike> foods = new ArrayList<>(REGULAR_FOODS);
-        for (int i = 0; i < 2 && !foods.isEmpty(); i++) {
+        for (int i = 0; i < random.nextInt(isHard ? 2 : (isMedium ? 1 : 0), isHard ? 3 : (isMedium ? 2 : 1)) && !foods.isEmpty(); i++) {
             ItemLike food = foods.remove(random.nextInt(foods.size()));
-            int foodCount = isHard ? random.nextInt(24, 32)
-                    : isMedium ? random.nextInt(12, 24)
-                    : random.nextInt(8, 12);
+            int foodCount = isHard ? random.nextInt(12, 24)
+                    : isMedium ? random.nextInt(8, 12)
+                    : random.nextInt(2, 4);
             InventoryUtils.addItem(this.inventory, new ItemStack(food, foodCount));
         }
 

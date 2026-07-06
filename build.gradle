@@ -58,13 +58,6 @@ minecraft {
 
 sourceSets.main.resources { srcDirs = ['src/main/resources', 'src/generated/resources'] }
 sourceSets.main.java {
-    exclude 'com/pla/player_npc/entity/goal/DragonOrbitLeaderGoal.java'
-    exclude 'com/pla/player_npc/entity/goal/EscapeAvoidGoal.java'
-    exclude 'com/pla/player_npc/entity/goal/FollowEscapeLeaderGoal.java'
-    exclude 'com/pla/player_npc/entity/goal/PortalApproachGoal.java'
-    exclude 'com/pla/player_npc/entity/goal/RecallLandGoal.java'
-    exclude 'com/pla/player_npc/entity/goal/VillagerArmyHurtByTargetGoal.java'
-    exclude 'com/pla/player_npc/util/CommonGoals.java'
 }
 repositories {
     mavenCentral()

@@ -42,7 +42,7 @@ public class UtilityCraftingGoal extends Goal {
             return false;
         }
 
-        return PlayerNpcCraftingUtil.countPlankEquivalent(this.playerNpc.getInventory()) >= 4;
+        return PlayerNpcCraftingUtil.countPlankEquivalent(this.playerNpc.getInventory(), this.playerNpc.getRawLogReserveTarget()) >= 4;
     }
 
     @Override
@@ -59,17 +59,17 @@ public class UtilityCraftingGoal extends Goal {
         this.playerNpc.getNavigation().stop();
         this.playerNpc.setCurrentAiState("ai.player_npc.crafting");
 
-        if (PlayerNpcCraftingUtil.countPlankEquivalent(this.playerNpc.getInventory()) >= 5
-                && PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 5)) {
+        if (PlayerNpcCraftingUtil.countPlankEquivalent(this.playerNpc.getInventory(), this.playerNpc.getRawLogReserveTarget()) >= 5
+                && PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 5, this.playerNpc.getRawLogReserveTarget())) {
             InventoryUtils.addItem(this.playerNpc, new ItemStack(Items.OAK_BOAT));
-            this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+            this.playerNpc.triggerMainHandUseAnimation();
             serverLevel.playSound(null, this.playerNpc.blockPosition(), SoundEvents.WOOD_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
         } else {
             BlockPos tablePos = this.findCraftingTablePlacement(serverLevel);
-            if (tablePos != null && PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 4)) {
+            if (tablePos != null && PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 4, this.playerNpc.getRawLogReserveTarget())) {
                 serverLevel.setBlockAndUpdate(tablePos, Blocks.CRAFTING_TABLE.defaultBlockState());
                 this.playerNpc.getLookControl().setLookAt(tablePos.getX() + 0.5D, tablePos.getY() + 0.5D, tablePos.getZ() + 0.5D, 40.0F, 40.0F);
-                this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+                this.playerNpc.triggerMainHandUseAnimation();
                 serverLevel.playSound(null, tablePos, SoundEvents.WOOD_PLACE, SoundSource.BLOCKS, 1.0F, 1.0F);
             }
         }

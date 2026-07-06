@@ -5,6 +5,11 @@
   "mixins": [
     "MonsterMixin"
   ],
+  "client": [
+    "CameraMixin",
+    "GuiMixin",
+    "PlayerRendererMixin"
+  ],
   "refmap": "player_npc.mixins.refmap.json",
   "minVersion": "0.8"
 }

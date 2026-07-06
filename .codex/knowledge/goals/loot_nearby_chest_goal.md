@@ -7,16 +7,18 @@
 
 ## Purpose
 
-Lets idle Player NPCs loot useful supplies from world chests.
+Lets idle Player NPCs loot world chests.
 
 ## Behavior
 
-The goal searches nearby chests outside the NPC's saved home area. If the NPC has inventory space, it walks to the chest and transfers up to four useful stacks per activation.
+The goal searches nearby chests outside the NPC's saved home area and skips the NPC's recorded owned chest. It chooses a valid adjacent standing position, walks next to the chest, looks at it, opens the chest lid with the vanilla block event, and transfers acceptable item stacks sequentially with a short delay between takes until the chest has no acceptable items or the NPC inventory cannot accept more.
 
-Useful loot includes food, arrows, ender pearls, buckets, fuel/materials, weapons, tools, armor, shields, and block items.
+Loot is no longer filtered to a useful-item list. Any chest item can be moved if the NPC inventory has an empty slot or a compatible partial stack.
 
-Home chests are skipped so the NPC does not immediately steal back stored items.
+Home chests are skipped so the NPC does not immediately steal back stored items. `PlayerNpcEntity.ownedChestPos` records the specific chest the NPC placed or adopted for home storage.
 
-When looting, the goal fires the vanilla chest block event to open the lid, plays `CHEST_OPEN`, transfers loot, then schedules a short delayed close event with `CHEST_CLOSE`.
+The NPC must be standing beside the chest to interact, so it should not loot through walls. When looting finishes or the goal stops, the goal fires the vanilla chest close block event and plays `CHEST_CLOSE`.
+
+After moving gear into inventory, the goal asks `PlayerNpcEntity.equipBetterGearFromInventory()` to equip better weapons/tools or armor.
 
 Cooldown uses `PlayerNpcEntity.lootChestCooldown`.

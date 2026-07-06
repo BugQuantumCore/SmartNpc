@@ -9,7 +9,7 @@
 
 Do not show the "everyone be careful, <name> is griefing" style messages for zombies, creepers, or other monster kills.
 
-`PlayerNpcDeadEvent` also gates `PlayerNpcAlertManager.raiseDeathAlert` with the same player-like check, so nearby Player NPCs only choose to avoid/attack the death-alert threat when the killer is a player or Player NPC.
+Death warning chat is emitted from `PlayerNpcAlertManager.raiseDeathAlert`, not directly from `PlayerNpcEntity.handlePlayerNpcDeathChat`, so the warning and the AI alert stay paired. `PlayerNpcDeadEvent` also gates `PlayerNpcAlertManager.raiseDeathAlert` with the same player-like check, so nearby Player NPCs only choose to avoid/attack the death-alert threat when the killer is a player or Player NPC.
 
 ## Movement Speed Cap
 
@@ -26,6 +26,8 @@ Known examples:
 Do not raise Player NPC run, flee, avoid, chase, recover, or combat navigation to `1.25D+`.
 
 Eating is separate: `EatHealingFoodGoal` must not sprint while eating, and uses slower player-like movement while backing away or chasing.
+
+Player NPC jump helpers should stay player-like. `PlayerNpcEntity.jump()` and `shortPillarJump()` use vanilla-style `0.42D` vertical lift; do not raise this back to high values that make the NPC look like it can jump around two blocks.
 
 ## Cooldown Style
 

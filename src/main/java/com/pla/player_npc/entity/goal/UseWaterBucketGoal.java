@@ -74,7 +74,7 @@ public class UseWaterBucketGoal extends Goal {
         this.playerNpc.getNavigation().stop();
         this.playerNpc.getLookControl().setLookAt(this.placePos.getX() + 0.5D, this.placePos.getY() + 0.5D, this.placePos.getZ() + 0.5D, 40.0F, 40.0F);
         this.playerNpc.setCurrentAiState("ai.player_npc.using_water_bucket");
-        this.playerNpc.swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
+        this.playerNpc.triggerMainHandUseAnimation();
         serverLevel.setBlockAndUpdate(this.placePos, Blocks.WATER.defaultBlockState());
         this.placedWaterPos = this.placePos.immutable();
         this.pickupDelayTicks = PICKUP_DELAY_TICKS;
@@ -170,7 +170,7 @@ public class UseWaterBucketGoal extends Goal {
 
         serverLevel.setBlockAndUpdate(this.placedWaterPos, Blocks.AIR.defaultBlockState());
         this.giveOrDrop(new ItemStack(Items.WATER_BUCKET));
-        this.playerNpc.swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
+        this.playerNpc.triggerMainHandUseAnimation();
         serverLevel.playSound(null, this.placedWaterPos, SoundEvents.BUCKET_FILL, SoundSource.BLOCKS, 1.0F, 1.0F);
         return true;
     }

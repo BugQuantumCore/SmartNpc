@@ -17,5 +17,4 @@ Makes Player NPCs randomly jump during combat when `epicfight_player_npc` is not
 
 ## Behavior
 
-When selected, calls `PlayerNpcEntity.jump()`, which jumps and adds forward movement so the motion looks closer to player combat movement.
-
+When selected, calls `PlayerNpcEntity.jump()`, which uses vanilla-style `0.42D` vertical lift and adds forward movement so the motion looks closer to player combat movement.

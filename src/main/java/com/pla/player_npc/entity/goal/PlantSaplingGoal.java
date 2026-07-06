@@ -79,7 +79,7 @@ public class PlantSaplingGoal extends Goal {
 
         serverLevel.setBlockAndUpdate(this.plantPos, state);
         this.playerNpc.getLookControl().setLookAt(this.plantPos.getX() + 0.5D, this.plantPos.getY() + 0.5D, this.plantPos.getZ() + 0.5D, 40.0F, 40.0F);
-        this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+        this.playerNpc.triggerMainHandUseAnimation();
         this.playerNpc.setCurrentAiState("ai.player_npc.planting_sapling");
         serverLevel.playSound(null, this.plantPos, SoundEvents.GRASS_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
         this.playerNpc.setSaplingPlantCooldown(COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 35));

@@ -56,6 +56,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
         if (!mob.isAlive() || mob.isRemoved() || mob.isDeadOrDying()) return false;
         if (mob.isPassenger()) return false;
         if (mob.isNoAi()) return false;
+        if (mob instanceof PlayerNpcEntity playerNpcEntity && playerNpcEntity.isHealing()) return false;
 
         LivingEntity target = mob.getTarget();
         if (target == null || !target.isAlive()) {
@@ -91,6 +92,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
         if (!mob.isAlive() || mob.isRemoved() || mob.isDeadOrDying()) return false;
         if (mob.isPassenger()) return false;
         if (mob.isNoAi()) return false;
+        if (mob instanceof PlayerNpcEntity playerNpcEntity && playerNpcEntity.isHealing()) return false;
 
         if (!mainWeaponIsEmpty()) {
             return false;

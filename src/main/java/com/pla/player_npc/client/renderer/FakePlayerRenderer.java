@@ -2,6 +2,7 @@ package com.pla.player_npc.client.renderer;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.pla.player_npc.clazz.FakePlayer;
+import com.pla.player_npc.client.gui.PlayerNpcInspectorOverlay;
 import com.pla.player_npc.entity.PlayerNpcEntity;
 import net.minecraft.client.model.HumanoidArmorModel;
 import net.minecraft.client.model.HumanoidModel;
@@ -54,6 +55,7 @@ public class FakePlayerRenderer<T extends FakePlayer> extends HumanoidMobRendere
 
     @Override
     public void render(@NotNull T entity, float entityYaw, float partialTick, @NotNull PoseStack poseStack, @NotNull MultiBufferSource buffer, int packedLight) {
+        boolean renderInspectatorBody = PlayerNpcInspectorOverlay.shouldRenderInspectatorCameraTargetBody(entity);
         boolean slim = FakePlayerTextureUtils.getPlayerSkinType(entity.getProfile()) == FakePlayerTextureUtils.SkinType.SLIM;
         this.model = slim ? this.slimModel : this.defaultModel;
         this.layers.remove(this.defaultArmorLayer);
@@ -85,7 +87,18 @@ public class FakePlayerRenderer<T extends FakePlayer> extends HumanoidMobRendere
             setOffhandPose(entity, HumanoidModel.ArmPose.BLOCK);
         }
 
-        super.render(entity, entityYaw, partialTick, poseStack, buffer, packedLight);
+        boolean headVisible = this.model.head.visible;
+        boolean hatVisible = this.model.hat.visible;
+        if (renderInspectatorBody) {
+            this.model.head.visible = false;
+            this.model.hat.visible = false;
+        }
+        try {
+            super.render(entity, entityYaw, partialTick, poseStack, buffer, packedLight);
+        } finally {
+            this.model.head.visible = headVisible;
+            this.model.hat.visible = hatVisible;
+        }
     }
 
     @Override

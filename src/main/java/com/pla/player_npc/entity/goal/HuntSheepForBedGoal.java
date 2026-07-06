@@ -32,6 +32,9 @@ public class HuntSheepForBedGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
+                || this.playerNpc.shouldPrioritizeLogGathering()
+                || this.playerNpc.hasAnimalLootPriority()
+                || this.playerNpc.hasCollectableSupplyDropNearby(24.0D)
                 || this.playerNpc.getHuntSheepCooldown() > 0
                 || this.hasBedOrEnoughWool()) {
             return false;

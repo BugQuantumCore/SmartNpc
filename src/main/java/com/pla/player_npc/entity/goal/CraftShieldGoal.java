@@ -7,7 +7,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -43,8 +42,7 @@ public class CraftShieldGoal extends Goal {
             return false;
         }
 
-        return PlayerNpcCraftingUtil.countPlankEquivalent(this.playerNpc.getInventory()) >= 6
-                && PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(Items.IRON_INGOT)) >= 1;
+        return PlayerNpcCraftingUtil.canCraft(serverLevel, this.playerNpc.getInventory(), Items.SHIELD, true);
     }
 
     @Override
@@ -60,13 +58,12 @@ public class CraftShieldGoal extends Goal {
 
         this.playerNpc.getNavigation().stop();
         this.playerNpc.setCurrentAiState("ai.player_npc.crafting_shield");
-        if (PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 6)
-                && PlayerNpcCraftingUtil.consumeItem(this.playerNpc.getInventory(), stack -> stack.is(Items.IRON_INGOT), 1)) {
-            ItemStack shield = new ItemStack(Items.SHIELD);
+        ItemStack shield = PlayerNpcCraftingUtil.craftItem(serverLevel, this.playerNpc.getInventory(), Items.SHIELD, true).orElse(ItemStack.EMPTY);
+        if (!shield.isEmpty()) {
             if (!InventoryUtils.addItem(this.playerNpc, shield)) {
                 this.playerNpc.spawnAtLocation(shield);
             }
-            this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+            this.playerNpc.triggerMainHandUseAnimation();
             serverLevel.playSound(null, this.playerNpc.blockPosition(), SoundEvents.WOOD_PLACE, SoundSource.PLAYERS, 0.7F, 1.15F);
         }
         this.playerNpc.setShieldCraftCooldown(COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 90));

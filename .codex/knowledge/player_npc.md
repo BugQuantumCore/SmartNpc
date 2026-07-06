@@ -23,7 +23,7 @@
 
 `FakePlayer` extends `PathfinderMob`, so Player NPC uses normal pathfinder mob spawning and navigation behavior instead of zombie-specific surface-spawn behavior.
 
-`PlayerNpcEntity` persists custom state such as inventory, cooldowns, target type, main/offhand weapon snapshots, bow usage, block projectile chance, and disarmed state.
+`PlayerNpcEntity` persists custom state such as inventory, cooldowns, target type, main/offhand weapon snapshots, bow usage, owned home chest position, block projectile chance, and disarmed state.
 
 AI cooldowns are explicit integer fields on `PlayerNpcEntity`, saved with the entity and decremented every server tick. Player NPC goals should not use ad hoc persistent-data timestamp tags for `PlayerNpc...Cooldown` values.
 
@@ -285,12 +285,13 @@ Inventory-backed actions:
 - ender pearl throws require and consume one ender pearl,
 - eating requires one available food item and consumes it only after the eating animation completes,
 - item burning requires flint and steel or a lava bucket in inventory,
-- chest looting moves useful world-chest supplies into the custom inventory,
-- cave ore exploration can mine cave-adjacent iron/coal/copper ore with a pickaxe,
+- chest looting skips the NPC's owned home chest, requires an adjacent standing position, opens/closes the chest, and moves acceptable world-chest items sequentially into the custom inventory,
+- cave ore exploration can mine cave-adjacent iron/coal/copper ore with a pickaxe, craft torches from coal/charcoal and sticks, and randomly place torches in dark cave spots while not mid-break,
 - cooking can place/craft a home furnace, insert raw food or smeltable ore/fuel, and collect cooked output,
 - iron gear crafting can turn iron ingots into iron tools and armor near a crafting table,
 - farming can harvest mature crops and plant a small wheat patch near the home,
 - sapling planting can place carried saplings on valid ground,
+- biome log exploration can move a low-supply or raw-log-starved NPC far in one chosen direction when no logs are within 48 blocks, then yield immediately once logs enter scan range so material gathering can harvest a connected tree in 4-8 log batches, refill a 4-12 raw-log reserve, and use dirt-only pillaring for high connected logs,
 - boat collector NPCs can stock 2-3 boats near a crafting table,
 - boat trap combat can place a boat on monster targets only, never players or Player NPCs,
 - jukebox dancing can place a home jukebox, insert a disc, sneak/jump dance near active jukeboxes, and rarely disturb another dancing NPC,
@@ -298,7 +299,7 @@ Inventory-backed actions:
 - combat fishing can temporarily put a fishing rod in the offhand during vanilla replacement combat and pull the current target,
 - shield crafting can consume six planks and one iron ingot near a crafting table to craft a shield,
 - shield guard can temporarily put a shield in the offhand during vanilla replacement combat, slow movement, block incoming damage, and consume shield durability,
-- regular food heals and gives short regeneration but no absorption,
+- regular food directly restores exactly 4 HP, capped at max health, and applies no absorption,
 - golden apples keep their special absorption/regeneration behavior,
 - water bucket self-extinguish consumes a water bucket and returns a water bucket only when the placed source is recovered, otherwise it returns an empty bucket,
 - empty buckets can be refilled by `FillWaterBucketGoal` from nearby source water when Player NPC has no active target,
@@ -306,23 +307,41 @@ Inventory-backed actions:
 
 Player NPC death loot is inventory-backed. `PlayerNpcEntity.dropCustomDeathLoot` drops only remaining container contents, and the old delayed `PlayerNpcDeadEvent` generated item drops are skipped for Player NPC.
 
+`PlayerNpcEntity.equipBetterGearFromInventory()` upgrades armor and main-hand gear from the custom inventory. It is called after nearby item pickup and after chest loot transfers, so looted chestplates, swords, tools, bows, and similar gear can be equipped when better than current gear. Main-hand auto-upgrades are paused while `PlayerNpcEntity.isHealing()` is true or while temporary main-hand goals such as material gathering, cave ore mining, hole escape, and home management are active, so food/tools/placement blocks are not replaced before the goal finishes. High-priority weapon recovery is also blocked while healing.
+
+`PickupNearbyItemGoal` actively pathfinds to useful dropped items in a short 8 block radius when the NPC is idle and not healing or fighting. This covers nearby loot without letting item collection starve material gathering. Useful dropped supplies are defined by `InventoryUtils.isInventoryBackedSupplyDrop(...)`, which includes food, placeable blocks, utility materials, saplings, and common animal drops. When an animal target dies, `PlayerNpcEntity` stores a short post-kill loot priority at the death position, clears the animal target, and lets pickup briefly search a wider local area around the kill site until drops spawn. `PlayerNpcSmartTargetGoal` and `HuntSheepForBedGoal` yield new animal targets while collectable supply drops are nearby, and `BurnNearbyItemGoal` reserves those supply drops from burning when they cannot be picked up.
+
+Post-kill loot priority must not block resource AI for long if no drop entity appears. `PickupNearbyItemGoal` releases an empty animal-drop wait quickly so gather/log exploration can resume.
+
+Fresh or low-supply Player NPCs prioritize tree logs before passive animal hunting. `PlayerNpcEntity.shouldPrioritizeLogGathering()` stays true while the NPC has fewer than four raw logs, or while low wood supply and missing starter tools make logs urgent. Smart animal targeting and sheep-for-bed hunting both yield while this is true.
+
+Gradual Player NPC block-breaking goals should call `PlayerNpcEntity.showBlockBreakProgress(pos, elapsedTicks, requiredTicks)` while mining and `clearBlockBreakProgress(pos)` when leaving range, switching targets, finishing, failing, or stopping. This uses vanilla client crack overlays like player block breaking.
+
 ## Inspector Overlay
 
 `PlayerNpcEntity` syncs both a broad AI state and a free-form AI detail string to clients. The inspector overlay renders the state as `AI playing:` and the detail as `Task:`.
 
 `GatherMaterialsGoal` uses the detail field to show the block id and coordinates it is trying to mine, for example `minecraft:oak_log @ 12 64 -8`.
 
+`PlayerNpcInspectorOverlay` renders from `RenderGuiEvent.Post` once per HUD frame and caches formatted display text for 500 ms, similar to Minecraft's F3-style throttled debug text updates. Network refreshes still use the 10 tick server request interval.
+
+The inspector item, inventory snapshot packets, inspectator camera mode, and Shift/dismount patch are documented in `.codex/knowledge/player_npc_inspector.md`.
+
 ## Home And Build Data
 
-`PlayerNpcHomeUtil` stores a per-NPC home origin plus width/depth in persistent entity data. `BuildHouseGoal` chooses a clear, flat layout footprint before saving the home area, and `ManageHomeBaseGoal` uses that home for crafting table, bed, chest, and storage behavior.
+`PlayerNpcHomeUtil` stores a per-NPC home origin plus width/depth in persistent entity data. `BuildHouseGoal` chooses a clear, flat layout footprint before saving the home area, and `ManageHomeBaseGoal` uses that home for crafting table, bed, chest, and storage behavior. The saved home area is also a protected resource volume, so material gathering and biome log scanning skip house blocks instead of harvesting the NPC's own shelter. `ReturnHomeGoal` can bring a nearby NPC back to that area for storage, crafting, cooking, or sleeping instead of letting those utility goals operate from a distance.
 
 The `workers-1.20.1-2.0.3_decompiled` reference uses compressed NBT scan files through `StructureManager` (`scanStructure`, `saveStructureToFile`, `loadScanNbt`, and default `structures/*.nbt` resources). Player NPC uses its own data-pack JSON path at `src/main/resources/data/player_npc/builds/` instead of copying that implementation.
 
-`PlayerNpcBuildLayoutLoader` now loads JSON build layouts from the `builds` resource folder. The repository contains 520 generated small layouts plus the original example resource. Layouts are role-based, not material-locked, so `BuildHouseGoal` can substitute any valid building block in the NPC inventory instead of requiring a specific block palette.
+`PlayerNpcBuildLayoutLoader` now loads JSON build layouts from the `builds` resource folder. The repository contains 1000 generated rectangular layouts plus the original example resource. Layouts are role-based, not material-locked, so `BuildHouseGoal` can substitute any valid building block in the NPC inventory instead of requiring a specific block palette.
 
-Generated footprints include 3x3, 4x4, 5x5, 3x4, 4x3, 4x5, and 5x4 rectangles and L shapes. Every generated layout includes a door role, plus optional roles such as torches, fence windows, trapdoors, and roof stairs. `BuildHouseGoal` checks every footprint cell for solid support underneath and clear air through the layout height before the NPC starts building.
+Generated footprints are rectangles only: 5x5, 6x6, 7x7, 8x8, 9x9, 10x10, 5x6, 6x7, 7x8, 8x9, and 9x10. L-shaped generated layouts were removed. Every generated layout includes a door role, plus optional roles such as torches, fence windows, trapdoors, and roof stairs. `BuildHouseGoal` checks every footprint cell for solid support underneath and clear air through the layout height before the NPC starts building.
 
 Player NPC now clears stale combat AI state when its target is gone, so a dead or removed target should not leave the inspector stuck on melee/engaging forever.
+
+Player NPC also clears stale live combat targets when no hit progress has happened for several seconds and the target is too far away or blocked behind failed navigation. This prevents a live but unreachable target from blocking every utility goal through `getTarget() != null`.
+
+Do not use a fallback movement goal for "staying busy". `PlayerNpcStayBusyGoal` was removed because it could own MOVE/LOOK, write navigation targets, and wake resource cooldowns immediately before `ReturnHomeGoal` or `GatherMaterialsGoal` took over, causing direction flips and spin loops. `PlayerNpcEntity` keeps only the taskless idle watchdog: if synced AI state remains idle for about one second while the NPC is not fighting, healing, sleeping, or riding, it wakes real worker cooldowns but does not claim an AI state. Real goals such as gather, return-home, farm, cave exploration, and build/home management must be the only systems that move the NPC toward work.
 
 ## Gear Difficulty Filtering
 

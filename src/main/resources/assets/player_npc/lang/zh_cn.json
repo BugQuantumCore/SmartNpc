@@ -24,6 +24,7 @@
   "ai.player_npc.blocking_projectile": "阻挡弹射物",
   "ai.player_npc.burning_item": "焚烧物品",
   "ai.player_npc.gathering_materials": "采集材料",
+  "ai.player_npc.digging_down_for_stone": "向下挖石头",
   "ai.player_npc.crafting": "合成",
   "ai.player_npc.crafting_gear": "合成装备",
   "ai.player_npc.managing_home": "管理家园",
@@ -48,6 +49,7 @@
   "ai.player_npc.hunting_animal": "猎杀动物",
   "ai.player_npc.engaging_villager": "攻击村民",
   "ai.player_npc.exploring_cave": "探索洞穴",
+  "ai.player_npc.exploring_biome": "Exploring biome",
   "ai.player_npc.crafting_iron_gear": "合成铁装备",
   "ai.player_npc.using_spyglass": "使用望远镜",
   "ai.player_npc.planting_sapling": "种植树苗",
@@ -114,4 +116,14 @@
   "chat.player_npc.death_reaction.18": "%s，我会变强再回来。",
   "chat.player_npc.death_reaction.19": "这不是我打得最好的一场。",
   "chat.player_npc.death_reaction.20": "%s，下次我会赢回来。"
+  ,"chat.player_npc.missing_home_chest.1": "who took my stuff?"
+  ,"chat.player_npc.missing_home_chest.2": "who broke my chest?"
+  ,"chat.player_npc.missing_home_chest.3": "my chest is gone. I need a new one."
+  ,"chat.player_npc.missing_home_chest.4": "someone messed with my storage."
+  ,"ai.player_npc.collecting_item": "Collecting item"
+  ,"ai.player_npc.looking_for_work": "Looking for work"
+  ,"ai.player_npc.staying_busy": "Staying busy"
+  ,"tooltip.player_npc.player_npc_inspector.inspectator": "Press Alt to toggle inspectator view. F5, T chat, and Up/Down zoom work while active."
+  ,"gui.player_npc.inspector.inspectator_hint": "Alt: inspectator view"
+  ,"gui.player_npc.inspector.inspectator_active": "Alt exit | F5 | Up/Down zoom | T chat"
 }

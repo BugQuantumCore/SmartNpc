@@ -1,10 +1,9 @@
 package com.pla.player_npc.entity.goal;
 
 import com.pla.player_npc.entity.PlayerNpcEntity;
-import com.pla.player_npc.task.DelayedTask;
-import com.pla.player_npc.util.InventoryUtils;
 import com.pla.player_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
@@ -12,19 +11,10 @@ import net.minecraft.world.Container;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.ai.goal.Goal;
-import net.minecraft.world.item.ArmorItem;
-import net.minecraft.world.item.BlockItem;
-import net.minecraft.world.item.BowItem;
-import net.minecraft.world.item.DiggerItem;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
-import net.minecraft.world.item.ProjectileWeaponItem;
-import net.minecraft.world.item.ShieldItem;
-import net.minecraft.world.item.SwordItem;
-import net.minecraft.world.item.TridentItem;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.EnumSet;
 import java.util.Optional;
@@ -32,15 +22,21 @@ import java.util.Optional;
 public class LootNearbyChestGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 35;
     private static final int SEARCH_RADIUS = 10;
-    private static final double LOOT_DISTANCE_SQR = 3.5D * 3.5D;
+    private static final double STAND_DISTANCE_SQR = 1.5D * 1.5D;
+    private static final int TAKE_INTERVAL_TICKS = 6;
 
     private final PlayerNpcEntity playerNpc;
     private final double speed;
     private BlockPos chestPos;
+    private BlockPos standPos;
+    private boolean chestOpen;
+    private boolean finishedLooting;
+    private int nextLootSlot;
+    private int takeDelayTicks;
 
     public LootNearbyChestGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
-        this.speed = speed;
+        this.speed = Math.min(speed, 1.0D);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -52,8 +48,7 @@ public class LootNearbyChestGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.getLootChestCooldown() > 0
-                || !this.hasFreeInventorySpace()) {
+                || this.playerNpc.getLootChestCooldown() > 0) {
             return false;
         }
 
@@ -64,6 +59,8 @@ public class LootNearbyChestGoal extends Goal {
     @Override
     public boolean canContinueToUse() {
         return this.chestPos != null
+                && this.standPos != null
+                && !this.finishedLooting
                 && this.playerNpc.isAlive()
                 && this.playerNpc.getTarget() == null
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
@@ -72,87 +69,187 @@ public class LootNearbyChestGoal extends Goal {
 
     @Override
     public void start() {
+        this.chestOpen = false;
+        this.finishedLooting = false;
+        this.nextLootSlot = 0;
+        this.takeDelayTicks = 0;
         this.playerNpc.setCurrentAiState("ai.player_npc.looting_chest");
-        if (this.chestPos != null) {
+        if (this.chestPos != null && this.standPos != null) {
             this.playerNpc.setCurrentAiDetail(this.chestPos.getX() + " " + this.chestPos.getY() + " " + this.chestPos.getZ());
-            this.playerNpc.getNavigation().moveTo(this.chestPos.getX() + 0.5D, this.chestPos.getY(), this.chestPos.getZ() + 0.5D, this.speed);
+            this.moveToStandPos();
         }
     }
 
     @Override
     public void tick() {
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || this.chestPos == null) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || this.chestPos == null || this.standPos == null) {
             return;
         }
 
-        this.playerNpc.getLookControl().setLookAt(this.chestPos.getX() + 0.5D, this.chestPos.getY() + 0.5D, this.chestPos.getZ() + 0.5D, 40.0F, 40.0F);
-        if (this.playerNpc.distanceToSqr(this.chestPos.getX() + 0.5D, this.chestPos.getY() + 0.5D, this.chestPos.getZ() + 0.5D) > LOOT_DISTANCE_SQR) {
+        this.lookAtChest();
+        if (!this.canInteractWithChest(serverLevel)) {
+            if (this.chestOpen) {
+                this.closeChest(serverLevel, this.chestPos);
+                this.chestOpen = false;
+            }
             if (this.playerNpc.getNavigation().isDone()) {
-                this.playerNpc.getNavigation().moveTo(this.chestPos.getX() + 0.5D, this.chestPos.getY(), this.chestPos.getZ() + 0.5D, this.speed);
+                this.moveToStandPos();
             }
             return;
         }
 
         this.playerNpc.getNavigation().stop();
-        if (serverLevel.getBlockEntity(this.chestPos) instanceof ChestBlockEntity chest && this.hasUsefulLoot(chest)) {
-            this.openChest(serverLevel, this.chestPos);
-            boolean looted = this.lootChest(chest);
-            this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
-            if (looted) {
-                serverLevel.playSound(null, this.chestPos, SoundEvents.ITEM_PICKUP, SoundSource.BLOCKS, 0.4F, 1.0F);
+        if (serverLevel.getBlockEntity(this.chestPos) instanceof ChestBlockEntity chest && this.hasLoot(chest)) {
+            if (!this.chestOpen) {
+                this.openChest(serverLevel, this.chestPos);
+                this.chestOpen = true;
             }
-            this.closeChestLater(serverLevel, this.chestPos);
+
+            if (this.takeDelayTicks > 0) {
+                this.takeDelayTicks--;
+                return;
+            }
+
+            int moved = this.lootNextStack(chest);
+            if (moved > 0) {
+                this.takeDelayTicks = TAKE_INTERVAL_TICKS;
+                this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+                this.playerNpc.equipBetterGearFromInventory();
+                serverLevel.playSound(null, this.chestPos, SoundEvents.ITEM_PICKUP, SoundSource.BLOCKS, 0.4F, 1.0F);
+                return;
+            }
         }
-        this.chestPos = null;
+
+        this.finishedLooting = true;
+        if (this.chestOpen) {
+            this.closeChest(serverLevel, this.chestPos);
+            this.chestOpen = false;
+        }
     }
 
     @Override
     public void stop() {
+        if (this.chestOpen
+                && this.chestPos != null
+                && this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            this.closeChest(serverLevel, this.chestPos);
+        }
         if (!this.playerNpc.level().isClientSide) {
             this.playerNpc.setLootChestCooldown(COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 30));
         }
         this.chestPos = null;
+        this.standPos = null;
+        this.chestOpen = false;
+        this.finishedLooting = false;
+        this.nextLootSlot = 0;
+        this.takeDelayTicks = 0;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+    }
+
+    private void lookAtChest() {
+        if (this.chestPos == null) {
+            return;
+        }
+        this.playerNpc.getLookControl().setLookAt(
+                this.chestPos.getX() + 0.5D,
+                this.chestPos.getY() + 0.5D,
+                this.chestPos.getZ() + 0.5D,
+                50.0F,
+                50.0F
+        );
     }
 
     private BlockPos findChest(ServerLevel serverLevel) {
         BlockPos center = this.playerNpc.blockPosition();
         Optional<PlayerNpcHomeUtil.HomeArea> homeArea = PlayerNpcHomeUtil.getHome(this.playerNpc);
+        BlockPos bestChest = null;
+        BlockPos bestStand = null;
+        double bestDistance = Double.MAX_VALUE;
         for (BlockPos pos : BlockPos.betweenClosed(center.offset(-SEARCH_RADIUS, -3, -SEARCH_RADIUS), center.offset(SEARCH_RADIUS, 3, SEARCH_RADIUS))) {
             BlockPos immutable = pos.immutable();
-            if (homeArea.isPresent() && PlayerNpcHomeUtil.isInside(homeArea.get(), immutable)) {
+            if (this.playerNpc.isOwnedChest(immutable)
+                    || (homeArea.isPresent() && PlayerNpcHomeUtil.isInside(homeArea.get(), immutable))) {
                 continue;
             }
             if (serverLevel.getBlockState(immutable).is(Blocks.CHEST)
                     && serverLevel.getBlockEntity(immutable) instanceof ChestBlockEntity chest
-                    && this.hasUsefulLoot(chest)) {
-                return immutable;
+                    && this.hasLoot(chest)) {
+                BlockPos stand = this.findStandPos(serverLevel, immutable);
+                if (stand == null) {
+                    continue;
+                }
+                double distance = this.playerNpc.distanceToSqr(stand.getX() + 0.5D, stand.getY(), stand.getZ() + 0.5D);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestChest = immutable;
+                    bestStand = stand;
+                }
             }
         }
-        return null;
+        this.standPos = bestStand;
+        return bestChest;
     }
 
-    private boolean lootChest(Container chest) {
-        int movedStacks = 0;
-        for (int i = 0; i < chest.getContainerSize() && movedStacks < 4; i++) {
-            ItemStack stack = chest.getItem(i);
-            if (stack.isEmpty() || !this.isUsefulLoot(stack) || !this.canAccept(stack)) {
+    private int lootNextStack(Container chest) {
+        int size = chest.getContainerSize();
+        for (int checked = 0; checked < size; checked++) {
+            int slot = (this.nextLootSlot + checked) % size;
+            ItemStack stack = chest.getItem(slot);
+            if (stack.isEmpty() || !this.canAccept(stack)) {
                 continue;
             }
 
-            int amount = Math.min(stack.getCount(), Math.min(stack.getMaxStackSize(), 16));
-            ItemStack moved = chest.removeItem(i, amount);
-            if (moved.isEmpty()) {
-                continue;
+            int moved = this.transferSlotToInventory(chest, slot);
+            this.nextLootSlot = (slot + 1) % size;
+            if (moved > 0) {
+                return moved;
             }
-
-            if (!InventoryUtils.addItem(this.playerNpc, moved)) {
-                this.playerNpc.spawnAtLocation(moved);
-            }
-            movedStacks++;
         }
-        chest.setChanged();
-        return movedStacks > 0;
+        return 0;
+    }
+
+    private int transferSlotToInventory(Container chest, int chestSlot) {
+        ItemStack source = chest.getItem(chestSlot);
+        if (source.isEmpty()) {
+            return 0;
+        }
+
+        int moved = 0;
+        SimpleContainer inventory = this.playerNpc.getInventory();
+        for (int i = 0; i < inventory.getContainerSize() && !source.isEmpty(); i++) {
+            ItemStack existing = inventory.getItem(i);
+            if (existing.isEmpty()
+                    || !ItemStack.isSameItemSameTags(existing, source)
+                    || existing.getCount() >= existing.getMaxStackSize()) {
+                continue;
+            }
+
+            int transfer = Math.min(source.getCount(), existing.getMaxStackSize() - existing.getCount());
+            existing.grow(transfer);
+            source.shrink(transfer);
+            moved += transfer;
+        }
+
+        for (int i = 0; i < inventory.getContainerSize() && !source.isEmpty(); i++) {
+            if (!inventory.getItem(i).isEmpty()) {
+                continue;
+            }
+
+            ItemStack inserted = source.copy();
+            inserted.setCount(Math.min(source.getCount(), source.getMaxStackSize()));
+            inventory.setItem(i, inserted);
+            source.shrink(inserted.getCount());
+            moved += inserted.getCount();
+        }
+
+        if (source.isEmpty()) {
+            chest.setItem(chestSlot, ItemStack.EMPTY);
+        }
+        if (moved > 0) {
+            inventory.setChanged();
+            chest.setChanged();
+        }
+        return moved;
     }
 
     private void openChest(ServerLevel serverLevel, BlockPos pos) {
@@ -161,26 +258,20 @@ public class LootNearbyChestGoal extends Goal {
         serverLevel.playSound(null, pos, SoundEvents.CHEST_OPEN, SoundSource.BLOCKS, 0.5F, 1.0F);
     }
 
-    private void closeChestLater(ServerLevel serverLevel, BlockPos pos) {
-        BlockPos chestPos = pos.immutable();
-        new DelayedTask(12) {
-            @Override
-            public void run() {
-                if (!serverLevel.getBlockState(chestPos).is(Blocks.CHEST)) {
-                    return;
-                }
+    private void closeChest(ServerLevel serverLevel, BlockPos pos) {
+        if (!serverLevel.getBlockState(pos).is(Blocks.CHEST)) {
+            return;
+        }
 
-                BlockState state = serverLevel.getBlockState(chestPos);
-                serverLevel.blockEvent(chestPos, state.getBlock(), 1, 0);
-                serverLevel.playSound(null, chestPos, SoundEvents.CHEST_CLOSE, SoundSource.BLOCKS, 0.5F, 1.0F);
-            }
-        };
+        BlockState state = serverLevel.getBlockState(pos);
+        serverLevel.blockEvent(pos, state.getBlock(), 1, 0);
+        serverLevel.playSound(null, pos, SoundEvents.CHEST_CLOSE, SoundSource.BLOCKS, 0.5F, 1.0F);
     }
 
-    private boolean hasUsefulLoot(Container chest) {
+    private boolean hasLoot(Container chest) {
         for (int i = 0; i < chest.getContainerSize(); i++) {
             ItemStack stack = chest.getItem(i);
-            if (!stack.isEmpty() && this.isUsefulLoot(stack) && this.canAccept(stack)) {
+            if (!stack.isEmpty() && this.canAccept(stack)) {
                 return true;
             }
         }
@@ -201,38 +292,41 @@ public class LootNearbyChestGoal extends Goal {
         return false;
     }
 
-    private boolean hasFreeInventorySpace() {
-        SimpleContainer inventory = this.playerNpc.getInventory();
-        for (int i = 0; i < inventory.getContainerSize(); i++) {
-            if (inventory.getItem(i).isEmpty()) {
-                return true;
-            }
+    private void moveToStandPos() {
+        if (this.standPos != null) {
+            this.playerNpc.getNavigation().moveTo(this.standPos.getX() + 0.5D, this.standPos.getY(), this.standPos.getZ() + 0.5D, this.speed);
         }
-        return false;
     }
 
-    private boolean isUsefulLoot(ItemStack stack) {
-        return stack.isEdible()
-                || stack.is(Items.ARROW)
-                || stack.is(Items.ENDER_PEARL)
-                || stack.is(Items.WATER_BUCKET)
-                || stack.is(Items.LAVA_BUCKET)
-                || stack.is(Items.BUCKET)
-                || stack.is(Items.COAL)
-                || stack.is(Items.CHARCOAL)
-                || stack.is(Items.IRON_INGOT)
-                || stack.is(Items.GOLD_INGOT)
-                || stack.is(Items.DIAMOND)
-                || stack.is(Items.EMERALD)
-                || stack.is(Items.WHEAT)
-                || stack.is(Items.STICK)
-                || stack.getItem() instanceof SwordItem
-                || stack.getItem() instanceof DiggerItem
-                || stack.getItem() instanceof ArmorItem
-                || stack.getItem() instanceof BowItem
-                || stack.getItem() instanceof TridentItem
-                || stack.getItem() instanceof ProjectileWeaponItem
-                || stack.getItem() instanceof ShieldItem
-                || stack.getItem() instanceof BlockItem;
+    private boolean canInteractWithChest(ServerLevel serverLevel) {
+        return this.standPos != null
+                && this.chestPos != null
+                && this.canStandAt(serverLevel, this.standPos)
+                && this.standPos.distManhattan(this.chestPos) == 1
+                && this.playerNpc.distanceToSqr(this.standPos.getX() + 0.5D, this.standPos.getY(), this.standPos.getZ() + 0.5D) <= STAND_DISTANCE_SQR;
     }
+
+    private BlockPos findStandPos(ServerLevel serverLevel, BlockPos chestPos) {
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos candidate = chestPos.relative(direction).immutable();
+            if (!this.canStandAt(serverLevel, candidate)) {
+                continue;
+            }
+            double distance = this.playerNpc.distanceToSqr(candidate.getX() + 0.5D, candidate.getY(), candidate.getZ() + 0.5D);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
+        return serverLevel.getBlockState(pos).isAir()
+                && serverLevel.getBlockState(pos.above()).isAir()
+                && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+    }
+
 }

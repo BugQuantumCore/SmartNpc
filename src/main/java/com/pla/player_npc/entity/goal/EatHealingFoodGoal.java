@@ -35,6 +35,7 @@ public class EatHealingFoodGoal extends Goal {
     private static final double CLOSE_COMBAT_DISTANCE_SQR = 5.0D * 5.0D;
     private static final double CHASE_DISTANCE_SQR = 7.0D * 7.0D;
     private static final double CHASE_POWER_MARGIN = 4.0D;
+    private static final float REGULAR_FOOD_HEAL_AMOUNT = 4.0F;
 
     private final PlayerNpcEntity playerNpc;
     private ItemStack foodStack = ItemStack.EMPTY;
@@ -48,6 +49,11 @@ public class EatHealingFoodGoal extends Goal {
     public EatHealingFoodGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
+    }
+
+    @Override
+    public boolean isInterruptable() {
+        return false;
     }
 
     @Override
@@ -76,8 +82,7 @@ public class EatHealingFoodGoal extends Goal {
         return this.eatTicks > 0
                 && this.playerNpc.isAlive()
                 && !this.foodStack.isEmpty()
-                && this.playerNpc.getHealth() < this.playerNpc.getMaxHealth()
-                && this.isHoldingFood();
+                && this.playerNpc.getHealth() < this.playerNpc.getMaxHealth();
     }
 
     @Override
@@ -162,28 +167,35 @@ public class EatHealingFoodGoal extends Goal {
         }
 
         ItemStack heldFood = this.playerNpc.getMainHandItem();
-        if (!this.isSameFood(heldFood)) {
-            this.stop();
-            return;
-        }
-
-        ItemStack eatenFood = heldFood.copy();
+        ItemStack eatenFood = this.foodStack.copy();
         eatenFood.setCount(1);
-        heldFood.shrink(1);
+        if (this.isSameFood(heldFood)) {
+            heldFood.shrink(1);
+        }
         this.finishedEating = true;
 
-        this.playerNpc.heal(this.getHealAmount(eatenFood));
         if (eatenFood.is(Items.GOLDEN_APPLE)) {
+            this.playerNpc.heal(this.getHealAmount(eatenFood));
             this.playerNpc.addEffect(new MobEffectInstance(MobEffects.REGENERATION, 100, 1));
             this.playerNpc.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 2400, 0));
         } else if (eatenFood.is(Items.ENCHANTED_GOLDEN_APPLE)) {
+            this.playerNpc.heal(this.getHealAmount(eatenFood));
             this.playerNpc.addEffect(new MobEffectInstance(MobEffects.REGENERATION, 400, 1));
             this.playerNpc.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 2400, 3));
             this.playerNpc.addEffect(new MobEffectInstance(MobEffects.DAMAGE_RESISTANCE, 6000, 0));
             this.playerNpc.addEffect(new MobEffectInstance(MobEffects.FIRE_RESISTANCE, 6000, 0));
+        } else {
+            this.healDirectly(REGULAR_FOOD_HEAL_AMOUNT);
         }
         this.playerNpc.level().playSound(null, this.playerNpc.blockPosition(), SoundEvents.PLAYER_BURP, SoundSource.HOSTILE, 0.5F, 1.0F);
         this.stop();
+    }
+
+    private void healDirectly(float amount) {
+        if (amount <= 0.0F) {
+            return;
+        }
+        this.playerNpc.setHealth(Math.min(this.playerNpc.getMaxHealth(), this.playerNpc.getHealth() + amount));
     }
 
     private boolean isHoldingFood() {
@@ -322,6 +334,6 @@ public class EatHealingFoodGoal extends Goal {
         if (foodStack.is(Items.GOLDEN_APPLE)) {
             return 8.0F;
         }
-        return 5.0F;
+        return REGULAR_FOOD_HEAL_AMOUNT;
     }
 }

@@ -31,6 +31,6 @@ Replaces hard-locked spawn personalities with a scoring target selector.
 
 Selects a target only when the score is positive and the NPC is not clearly outmatched. Players and Player NPCs are treated as the same class of target for gear-risk checks.
 
-If no target is selected during an idle scan, the inspector detail can show `target scan: none`. When a target is selected, the detail shows the chosen target name.
+If the current target is dead, removed, out of range, or no longer attackable, the goal clears it immediately before the 20 tick scan interval check so idle worker goals such as gathering, biome log search, building, and mining can run on the next goal pass. Failed scans no longer write `target scan: none` to the inspector detail. When a target is selected, the detail shows the chosen target name.
 
 Animals are only selected when the NPC lacks healing food. Villagers require villager/hostile personality bias and still use a very low attack chance, so NPCs should not commonly destroy villages.

@@ -72,6 +72,7 @@ public class InventoryViewerItem extends Item {
     ) {
         super.appendHoverText(stack, level, tooltip, flag);
         tooltip.add(Component.translatable("tooltip.player_npc.player_npc_inspector").withStyle(ChatFormatting.GRAY));
+        tooltip.add(Component.translatable("tooltip.player_npc.player_npc_inspector.inspectator").withStyle(ChatFormatting.DARK_AQUA));
     }
 
 }

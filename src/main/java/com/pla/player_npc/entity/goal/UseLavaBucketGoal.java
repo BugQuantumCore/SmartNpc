@@ -67,7 +67,7 @@ public class UseLavaBucketGoal extends Goal {
         this.playerNpc.getNavigation().stop();
         this.playerNpc.getLookControl().setLookAt(this.placePos.getX() + 0.5D, this.placePos.getY() + 0.5D, this.placePos.getZ() + 0.5D, 40.0F, 40.0F);
         this.playerNpc.setCurrentAiState("ai.player_npc.using_lava_bucket");
-        this.playerNpc.swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
+        this.playerNpc.triggerMainHandUseAnimation();
         serverLevel.setBlockAndUpdate(this.placePos, Blocks.LAVA.defaultBlockState());
         this.giveOrDrop(new ItemStack(Items.BUCKET));
         serverLevel.playSound(null, this.placePos, SoundEvents.BUCKET_EMPTY_LAVA, SoundSource.BLOCKS, 1.0F, 1.0F);

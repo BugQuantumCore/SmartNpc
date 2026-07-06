@@ -22,6 +22,7 @@ import java.util.function.Predicate;
 
 public class CookFoodGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 20;
+    private static final double HOME_ACTION_DISTANCE_SQR = 8.0D * 8.0D;
 
     private final PlayerNpcEntity playerNpc;
     private PlayerNpcHomeUtil.HomeArea homeArea;
@@ -43,7 +44,11 @@ public class CookFoodGoal extends Goal {
             return false;
         }
 
-        this.homeArea = PlayerNpcHomeUtil.getOrCreateHome(this.playerNpc, serverLevel);
+        this.homeArea = PlayerNpcHomeUtil.getHome(this.playerNpc).orElse(null);
+        if (this.homeArea == null || !this.isNearHome()) {
+            return false;
+        }
+
         BlockPos furnace = this.findFurnace(serverLevel);
         if (furnace == null) {
             return (InventoryUtils.hasItem(this.playerNpc, Items.FURNACE)
@@ -73,7 +78,7 @@ public class CookFoodGoal extends Goal {
                 || this.takeCookedOutput(serverLevel)
                 || this.fillFurnace(serverLevel);
         if (acted) {
-            this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+            this.playerNpc.triggerMainHandUseAnimation();
         }
 
         this.playerNpc.setCookFoodCooldown(COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 20));
@@ -88,7 +93,7 @@ public class CookFoodGoal extends Goal {
 
         ItemStack furnace = this.playerNpc.consumeInventoryItem(Items.FURNACE, 1).orElse(ItemStack.EMPTY);
         if (furnace.isEmpty()) {
-            if (!PlayerNpcCraftingUtil.tryCraftFurnace(this.playerNpc.getInventory())) {
+            if (!PlayerNpcCraftingUtil.tryCraftFurnace(serverLevel, this.playerNpc.getInventory())) {
                 return false;
             }
             furnace = this.playerNpc.consumeInventoryItem(Items.FURNACE, 1).orElse(ItemStack.EMPTY);
@@ -208,6 +213,15 @@ public class CookFoodGoal extends Goal {
 
     private boolean hasFuel() {
         return InventoryUtils.hasItem(this.playerNpc, this::isFuel);
+    }
+
+    private boolean isNearHome() {
+        if (this.homeArea == null) {
+            return false;
+        }
+
+        BlockPos homeCenter = this.homeArea.origin().offset(this.homeArea.width() / 2, 1, this.homeArea.depth() / 2);
+        return this.playerNpc.distanceToSqr(homeCenter.getX() + 0.5D, homeCenter.getY(), homeCenter.getZ() + 0.5D) <= HOME_ACTION_DISTANCE_SQR;
     }
 
     private boolean isCookableFood(ItemStack stack) {

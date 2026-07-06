@@ -261,7 +261,7 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
         }
 
         serverLevel.setBlockAndUpdate(pos, blockState);
-        this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+        this.playerNpc.triggerMainHandUseAnimation();
         serverLevel.playSound(null, pos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 0.9F, 1.0F);
         return true;
     }
