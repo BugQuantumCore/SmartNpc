@@ -16,7 +16,7 @@
 
 The inspector item is implemented by `InventoryViewerItem`. It stacks to one item.
 
-Right-clicking a `PlayerNpcEntity` sends a server-authoritative `PlayerNpcInspectorPacket` to the interacting `ServerPlayer`. The packet contains the target entity id and a snapshot from `PlayerNpcInspectorData.createSnapshot(...)`.
+Right-clicking a `PlayerNpcEntity` sends a server-authoritative `PlayerNpcInspectorPacket` to the interacting `ServerPlayer`. The packet contains the target entity id, an inventory snapshot from `PlayerNpcInspectorData.createSnapshot(...)`, and server-generated build status text from `PlayerNpcInspectorData.createBuildStatusText(...)`.
 
 Right-clicking a non-Player NPC shows `message.player_npc.inspector.unsupported`. Right-clicking air with the item sends `PlayerNpcInspectorPacket.clear()`, which closes the overlay and also exits inspectator mode if it is active.
 
@@ -41,6 +41,8 @@ The overlay displays:
 - inspected NPC name
 - health and max health
 - synced AI state from `PlayerNpcEntity.getCurrentAiState()`
+- interest profile from `PlayerNpcEntity.getInterestsDisplayText()`
+- build/home status text from the latest inspector packet
 - synced task detail from `PlayerNpcEntity.getCurrentAiDetail()`
 - main-hand item
 - equipment slots

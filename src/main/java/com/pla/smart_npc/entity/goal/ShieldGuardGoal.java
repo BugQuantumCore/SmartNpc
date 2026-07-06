@@ -1,0 +1,172 @@
+package com.pla.smart_npc.entity.goal;
+
+import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.InventoryUtils;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.goal.Goal;
+import net.minecraft.world.item.BowItem;
+import net.minecraft.world.item.CrossbowItem;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ProjectileWeaponItem;
+import net.minecraft.world.item.ShieldItem;
+
+import java.util.EnumSet;
+
+public class ShieldGuardGoal extends Goal {
+    private static final double GUARD_MOVE_SPEED = 0.45D;
+    private static final double APPROACH_DISTANCE_SQR = 7.0D * 7.0D;
+    private static final int MIN_GUARD_TICKS = 24;
+    private static final int MAX_GUARD_TICKS = 56;
+    private static final int COOLDOWN_TICKS = 80;
+
+    private final PlayerNpcEntity playerNpc;
+    private LivingEntity target;
+    private ItemStack previousOffhand = ItemStack.EMPTY;
+    private int guardTicks;
+    private boolean usingTemporaryShield;
+    private boolean wasSprinting;
+
+    public ShieldGuardGoal(PlayerNpcEntity playerNpc) {
+        this.playerNpc = playerNpc;
+        this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
+    }
+
+    @Override
+    public boolean canUse() {
+        if (!(this.playerNpc.level() instanceof ServerLevel)
+                || !this.playerNpc.isAlive()
+                || this.playerNpc.isNoAi()
+                || this.playerNpc.isPassenger()
+                || this.playerNpc.isHealing()
+                || this.playerNpc.getShieldGuardCooldown() > 0
+                || this.playerNpc.tickCount % 8 != 0
+                || !this.hasShield()) {
+            return false;
+        }
+
+        LivingEntity currentTarget = this.playerNpc.getTarget();
+        if (currentTarget == null || !currentTarget.isAlive()) {
+            return false;
+        }
+
+        float chance = this.isRangedThreat(currentTarget) ? 0.62F : 0.18F;
+        if (this.playerNpc.getRandom().nextFloat() > chance) {
+            return false;
+        }
+
+        this.target = currentTarget;
+        return true;
+    }
+
+    @Override
+    public boolean canContinueToUse() {
+        return this.guardTicks > 0
+                && this.target != null
+                && this.target.isAlive()
+                && this.playerNpc.isAlive()
+                && this.isHoldingShield();
+    }
+
+    @Override
+    public void start() {
+        if (!this.equipShieldIfNeeded()) {
+            this.target = null;
+            return;
+        }
+
+        this.guardTicks = MIN_GUARD_TICKS + this.playerNpc.getRandom().nextInt(MAX_GUARD_TICKS - MIN_GUARD_TICKS + 1);
+        this.wasSprinting = this.playerNpc.isSprinting();
+        this.playerNpc.setSprinting(false);
+        this.playerNpc.setCurrentAiState("ai.player_npc.shield_guarding");
+        if (this.target != null) {
+            this.playerNpc.setCurrentAiDetail(this.target.getDisplayName().getString());
+        }
+        this.playerNpc.startUsingItem(InteractionHand.OFF_HAND);
+        this.updateMovement();
+    }
+
+    @Override
+    public void tick() {
+        this.guardTicks--;
+        this.playerNpc.setSprinting(false);
+        if (!this.playerNpc.isUsingItem() || this.playerNpc.getUsedItemHand() != InteractionHand.OFF_HAND) {
+            this.playerNpc.startUsingItem(InteractionHand.OFF_HAND);
+        }
+        this.updateMovement();
+    }
+
+    @Override
+    public void stop() {
+        this.playerNpc.stopUsingItem();
+        if (this.usingTemporaryShield) {
+            ItemStack shield = this.playerNpc.getOffhandItem().copy();
+            if (!shield.isEmpty() && shield.getItem() instanceof ShieldItem && !InventoryUtils.addItem(this.playerNpc, shield)) {
+                this.playerNpc.spawnAtLocation(shield);
+            }
+            this.playerNpc.setItemInHand(InteractionHand.OFF_HAND, this.previousOffhand.copy());
+        }
+
+        this.playerNpc.setSprinting(this.wasSprinting);
+        this.wasSprinting = false;
+        this.target = null;
+        this.previousOffhand = ItemStack.EMPTY;
+        this.guardTicks = 0;
+        this.usingTemporaryShield = false;
+        this.playerNpc.setShieldGuardCooldown(COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 8));
+        this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+    }
+
+    private void updateMovement() {
+        if (this.target == null) {
+            this.playerNpc.getNavigation().stop();
+            return;
+        }
+
+        this.playerNpc.getLookControl().setLookAt(this.target, 70.0F, 70.0F);
+        if (this.playerNpc.distanceToSqr(this.target) > APPROACH_DISTANCE_SQR) {
+            this.playerNpc.getNavigation().moveTo(this.target, GUARD_MOVE_SPEED);
+        } else {
+            this.playerNpc.getNavigation().stop();
+        }
+    }
+
+    private boolean hasShield() {
+        return this.playerNpc.getOffhandItem().getItem() instanceof ShieldItem
+                || InventoryUtils.hasItem(this.playerNpc, stack -> stack.getItem() instanceof ShieldItem);
+    }
+
+    private boolean isHoldingShield() {
+        return this.playerNpc.getOffhandItem().getItem() instanceof ShieldItem;
+    }
+
+    private boolean equipShieldIfNeeded() {
+        if (this.playerNpc.getOffhandItem().getItem() instanceof ShieldItem) {
+            return true;
+        }
+
+        ItemStack shield = this.playerNpc.consumeInventoryItem(stack -> stack.getItem() instanceof ShieldItem, 1).orElse(ItemStack.EMPTY);
+        if (shield.isEmpty()) {
+            return false;
+        }
+
+        this.previousOffhand = this.playerNpc.getOffhandItem().copy();
+        this.usingTemporaryShield = true;
+        this.playerNpc.setItemInHand(InteractionHand.OFF_HAND, shield);
+        return true;
+    }
+
+    private boolean isRangedThreat(LivingEntity entity) {
+        return entity.isUsingItem() && this.isRangedWeapon(entity.getUseItem())
+                || this.isRangedWeapon(entity.getMainHandItem())
+                || this.isRangedWeapon(entity.getOffhandItem());
+    }
+
+    private boolean isRangedWeapon(ItemStack stack) {
+        return !stack.isEmpty()
+                && (stack.getItem() instanceof BowItem
+                || stack.getItem() instanceof CrossbowItem
+                || stack.getItem() instanceof ProjectileWeaponItem);
+    }
+}

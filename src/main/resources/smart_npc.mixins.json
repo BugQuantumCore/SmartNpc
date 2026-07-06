@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "package": "com.pla.smart_npc.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "MonsterMixin"
+  ],
+  "client": [
+    "CameraMixin",
+    "GuiMixin",
+    "PlayerRendererMixin"
+  ],
+  "refmap": "smart_npc.mixins.refmap.json",
+  "minVersion": "0.8"
+}

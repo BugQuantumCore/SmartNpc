@@ -1,0 +1,827 @@
+package com.pla.smart_npc.entity.goal;
+
+import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
+import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
+import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
+import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.SimpleContainer;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.ai.goal.Goal;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.PickaxeItem;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.pathfinder.Path;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.List;
+
+public class CookFoodGoal extends Goal {
+    public static final String TEMP_FURNACE_X = "PlayerNpcTemporaryFurnaceX";
+    public static final String TEMP_FURNACE_Y = "PlayerNpcTemporaryFurnaceY";
+    public static final String TEMP_FURNACE_Z = "PlayerNpcTemporaryFurnaceZ";
+
+    private static final int COOLDOWN_TICKS = 20 * 20;
+    private static final int FAIL_COOLDOWN_TICKS = 20 * 4;
+    private static final int FURNACE_SCAN_RADIUS = 5;
+    private static final double HOME_ACTION_DISTANCE_SQR = 8.0D * 8.0D;
+    private static final double FURNACE_USE_DISTANCE_SQR = 2.25D * 2.25D;
+    private static final double FURNACE_STAND_REACHED_SQR = 1.25D * 1.25D;
+    private static final double RECOVER_FURNACE_BREAK_DISTANCE_SQR = 3.0D * 3.0D;
+    private static final double RECOVER_FURNACE_MOVE_SPEED = 1.0D;
+    private static final int ACTION_DELAY_TICKS = 12;
+    private static final int MAX_RECOVER_FURNACE_TICKS = 20 * 10;
+
+    private final PlayerNpcEntity playerNpc;
+    private PlayerNpcHomeUtil.HomeArea homeArea;
+    private BlockPos furnacePos;
+    private BlockPos furnaceStandPos;
+    private Mode mode = Mode.INTERACT;
+    private ItemStack previousMainHand = ItemStack.EMPTY;
+    private int actionDelayTicks;
+    private int recoveryBreakTicks;
+    private boolean finished;
+    private boolean acted;
+    private boolean temporaryFurnace;
+    private boolean usingTemporaryTool;
+    private boolean returnTemporaryMainHandOnRestore;
+
+    public CookFoodGoal(PlayerNpcEntity playerNpc) {
+        this.playerNpc = playerNpc;
+        this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
+    }
+
+    @Override
+    public boolean canUse() {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || !this.playerNpc.isAlive()
+                || this.playerNpc.isNoAi()
+                || this.playerNpc.isPassenger()
+                || this.playerNpc.isHealing()
+                || this.playerNpc.getTarget() != null
+                || this.playerNpc.getCookFoodCooldown() > 0) {
+            return false;
+        }
+
+        this.resetPlan();
+        this.homeArea = PlayerNpcHomeUtil.getHome(this.playerNpc).orElse(null);
+
+        BlockPos temporary = this.getTemporaryFurnacePos();
+        if (temporary != null) {
+            if (serverLevel.getBlockState(temporary).is(Blocks.FURNACE)
+                    && serverLevel.getBlockEntity(temporary) instanceof FurnaceBlockEntity furnace) {
+                if (this.hasFurnaceWork(furnace)) {
+                    return this.planInteraction(serverLevel, temporary, true);
+                }
+                if (this.isFurnaceEmpty(furnace)) {
+                    return this.planRecovery(serverLevel, temporary);
+                }
+                return false;
+            }
+            this.clearTemporaryFurnace();
+        }
+
+        if (this.homeArea != null && this.isNearHome()) {
+            BlockPos homeFurnace = this.findHomeFurnace(serverLevel);
+            if (homeFurnace != null && serverLevel.getBlockEntity(homeFurnace) instanceof FurnaceBlockEntity furnace) {
+                return this.hasFurnaceWork(furnace) && this.planInteraction(serverLevel, homeFurnace, false);
+            }
+
+            BlockPos placement = this.findHomeFurnacePlacement(serverLevel);
+            if (placement != null && this.shouldPlaceFurnaceForWork()) {
+                return this.planPlacement(serverLevel, placement, Mode.PLACE_HOME, false);
+            }
+            return false;
+        }
+
+        BlockPos nearbyFurnace = this.findNearbyFurnace(serverLevel);
+        if (nearbyFurnace != null && serverLevel.getBlockEntity(nearbyFurnace) instanceof FurnaceBlockEntity furnace) {
+            return this.hasFurnaceWork(furnace) && this.planInteraction(serverLevel, nearbyFurnace, false);
+        }
+
+        if (!this.shouldPlaceFurnaceForWork()) {
+            return false;
+        }
+
+        BlockPos placement = this.findTemporaryFurnacePlacement(serverLevel);
+        return placement != null && this.planPlacement(serverLevel, placement, Mode.PLACE_TEMPORARY, true);
+    }
+
+    @Override
+    public boolean canContinueToUse() {
+        return !this.finished
+                && this.furnacePos != null
+                && this.playerNpc.isAlive()
+                && !this.playerNpc.isNoAi()
+                && !this.playerNpc.isPassenger()
+                && !this.playerNpc.isHealing()
+                && this.playerNpc.getTarget() == null;
+    }
+
+    @Override
+    public void start() {
+        this.actionDelayTicks = 0;
+        this.recoveryBreakTicks = 0;
+        this.finished = false;
+        this.acted = false;
+        this.playerNpc.setCurrentAiState("ai.player_npc.cooking");
+        if (this.mode == Mode.RECOVER_TEMPORARY) {
+            this.equipPickaxeOrEmptyForRecovery();
+        }
+        this.updateDetail(null);
+    }
+
+    @Override
+    public void tick() {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || this.furnacePos == null) {
+            this.finished = true;
+            return;
+        }
+
+        if (this.mode == Mode.RECOVER_TEMPORARY) {
+            this.tickRecoverTemporaryFurnace(serverLevel);
+            return;
+        }
+
+        if (this.mode == Mode.PLACE_HOME || this.mode == Mode.PLACE_TEMPORARY) {
+            this.tickPlaceFurnace(serverLevel);
+            return;
+        }
+
+        if (!serverLevel.getBlockState(this.furnacePos).is(Blocks.FURNACE)
+                || !(serverLevel.getBlockEntity(this.furnacePos) instanceof FurnaceBlockEntity furnace)) {
+            this.finished = true;
+            return;
+        }
+
+        if (!this.ensureFurnaceStand(serverLevel)) {
+            this.finished = true;
+            return;
+        }
+
+        this.lookAtFurnace();
+        if (!this.isAtFurnaceStand()) {
+            this.playerNpc.setCurrentAiDetail("walking to furnace");
+            this.moveToFurnaceStand();
+            return;
+        }
+
+        this.playerNpc.getNavigation().stop();
+        if (this.actionDelayTicks++ < ACTION_DELAY_TICKS) {
+            this.updateDetail(serverLevel);
+            return;
+        }
+        this.actionDelayTicks = 0;
+
+        boolean moved = this.takeCookedOutput(serverLevel, furnace) || this.fillFurnace(serverLevel, furnace);
+        this.acted |= moved;
+        if (moved) {
+            this.playerNpc.triggerMainHandUseAnimation();
+        }
+        this.finished = true;
+    }
+
+    @Override
+    public void stop() {
+        this.playerNpc.clearBlockBreakProgress(this.furnacePos);
+        this.restorePreviousMainHand();
+        int cooldown = this.acted
+                ? COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 20)
+                : FAIL_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 4);
+        this.playerNpc.setCookFoodCooldown(cooldown);
+        this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+        this.playerNpc.setCurrentAiDetail("");
+        this.resetPlan();
+    }
+
+    private boolean planInteraction(ServerLevel serverLevel, BlockPos pos, boolean temporary) {
+        BlockPos stand = this.findFurnaceStand(serverLevel, pos);
+        if (stand == null) {
+            return false;
+        }
+        this.mode = Mode.INTERACT;
+        this.furnacePos = pos.immutable();
+        this.furnaceStandPos = stand;
+        this.temporaryFurnace = temporary;
+        return true;
+    }
+
+    private boolean planPlacement(ServerLevel serverLevel, BlockPos pos, Mode mode, boolean temporary) {
+        BlockPos stand = this.findFurnaceStand(serverLevel, pos);
+        if (stand == null) {
+            return false;
+        }
+        this.mode = mode;
+        this.furnacePos = pos.immutable();
+        this.furnaceStandPos = stand;
+        this.temporaryFurnace = temporary;
+        return true;
+    }
+
+    private boolean planRecovery(ServerLevel serverLevel, BlockPos pos) {
+        this.mode = Mode.RECOVER_TEMPORARY;
+        this.furnacePos = pos.immutable();
+        this.furnaceStandPos = this.findFurnaceStand(serverLevel, pos);
+        this.temporaryFurnace = true;
+        return this.furnaceStandPos != null;
+    }
+
+    private void tickPlaceFurnace(ServerLevel serverLevel) {
+        if (!this.ensureFurnaceStand(serverLevel)) {
+            this.finished = true;
+            return;
+        }
+
+        this.lookAtFurnace();
+        if (!this.isAtFurnaceStand()) {
+            this.playerNpc.setCurrentAiDetail("walking to furnace placement");
+            this.moveToFurnaceStand();
+            return;
+        }
+
+        this.playerNpc.getNavigation().stop();
+        if (this.actionDelayTicks++ < ACTION_DELAY_TICKS) {
+            this.playerNpc.setCurrentAiDetail("preparing furnace");
+            return;
+        }
+        this.actionDelayTicks = 0;
+
+        ItemStack furnace = this.takeOrCraftFurnace();
+        if (furnace.isEmpty()) {
+            this.finished = true;
+            return;
+        }
+
+        if (!this.canPlaceFurnaceAt(serverLevel, this.furnacePos)) {
+            this.returnStack(furnace);
+            this.finished = true;
+            return;
+        }
+
+        this.showPlacementItem(furnace);
+        serverLevel.setBlockAndUpdate(this.furnacePos, Blocks.FURNACE.defaultBlockState());
+        if (this.temporaryFurnace) {
+            this.saveTemporaryFurnace(this.furnacePos);
+        }
+        serverLevel.playSound(null, this.furnacePos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
+        this.playerNpc.triggerMainHandUseAnimation();
+        this.acted = true;
+        this.mode = Mode.INTERACT;
+        this.actionDelayTicks = 0;
+        this.furnaceStandPos = this.findFurnaceStand(serverLevel, this.furnacePos);
+        if (this.furnaceStandPos == null) {
+            this.finished = true;
+        }
+    }
+
+    private void tickRecoverTemporaryFurnace(ServerLevel serverLevel) {
+        BlockState state = serverLevel.getBlockState(this.furnacePos);
+        if (!state.is(Blocks.FURNACE)) {
+            this.playerNpc.clearBlockBreakProgress(this.furnacePos);
+            this.clearTemporaryFurnace();
+            this.acted = true;
+            this.finished = true;
+            return;
+        }
+
+        if (serverLevel.getBlockEntity(this.furnacePos) instanceof FurnaceBlockEntity furnace && !this.isFurnaceEmpty(furnace)) {
+            this.finished = true;
+            return;
+        }
+
+        this.equipPickaxeOrEmptyForRecovery();
+        this.lookAtFurnace();
+        if (this.playerNpc.distanceToSqr(
+                this.furnacePos.getX() + 0.5D,
+                this.furnacePos.getY() + 0.5D,
+                this.furnacePos.getZ() + 0.5D
+        ) > RECOVER_FURNACE_BREAK_DISTANCE_SQR) {
+            this.playerNpc.clearBlockBreakProgress(this.furnacePos);
+            this.playerNpc.getNavigation().moveTo(
+                    this.furnacePos.getX() + 0.5D,
+                    this.furnacePos.getY(),
+                    this.furnacePos.getZ() + 0.5D,
+                    RECOVER_FURNACE_MOVE_SPEED
+            );
+            this.updateDetail(serverLevel);
+            return;
+        }
+
+        this.playerNpc.getNavigation().stop();
+        if (this.recoveryBreakTicks % 8 == 0) {
+            this.playerNpc.triggerMainHandAttackAnimation();
+            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, this.furnacePos, state, this.playerNpc);
+        }
+
+        this.recoveryBreakTicks++;
+        int requiredBreakTicks = this.getRequiredBreakTicks(serverLevel, this.furnacePos, state);
+        this.playerNpc.showBlockBreakProgress(this.furnacePos, this.recoveryBreakTicks, requiredBreakTicks);
+        this.updateDetail(serverLevel);
+        if (this.recoveryBreakTicks < requiredBreakTicks) {
+            return;
+        }
+
+        BlockPos recoveredPos = this.furnacePos;
+        if (!serverLevel.destroyBlock(recoveredPos, false, this.playerNpc)) {
+            this.playerNpc.clearBlockBreakProgress(recoveredPos);
+            this.clearTemporaryFurnace();
+            this.finished = true;
+            return;
+        }
+        this.playerNpc.clearBlockBreakProgress(recoveredPos);
+        this.playerNpc.hurtMainHandItem(1);
+        this.returnStack(new ItemStack(Items.FURNACE));
+        this.clearTemporaryFurnace();
+        this.acted = true;
+        this.finished = true;
+    }
+
+    private boolean takeCookedOutput(ServerLevel serverLevel, FurnaceBlockEntity furnace) {
+        ItemStack output = furnace.getItem(2);
+        if (output.isEmpty()) {
+            return false;
+        }
+
+        ItemStack moved = output.copy();
+        furnace.setItem(2, ItemStack.EMPTY);
+        furnace.setChanged();
+        if (!InventoryUtils.addItem(this.playerNpc, moved)) {
+            this.playerNpc.spawnAtLocation(moved);
+        }
+        serverLevel.playSound(null, this.furnacePos, SoundEvents.ITEM_PICKUP, SoundSource.BLOCKS, 0.4F, 1.0F);
+        this.playerNpc.setCurrentAiDetail("taking furnace output");
+        return true;
+    }
+
+    private boolean fillFurnace(ServerLevel serverLevel, FurnaceBlockEntity furnace) {
+        boolean movedAny = false;
+        if (furnace.getItem(0).isEmpty()) {
+            ItemStack input = this.takeGlassSandInput(serverLevel)
+                    .or(() -> this.playerNpc.consumeInventoryItem(this::isCookableFood, 1))
+                    .or(() -> this.playerNpc.consumeInventoryItem(this::isSmeltableMaterial, 1))
+                    .orElse(ItemStack.EMPTY);
+            if (!input.isEmpty()) {
+                furnace.setItem(0, input);
+                movedAny = true;
+            }
+        }
+
+        if (furnace.getItem(1).isEmpty()) {
+            ItemStack fuel = this.playerNpc.consumeInventoryItem(this::isFuel, 1).orElse(ItemStack.EMPTY);
+            if (!fuel.isEmpty()) {
+                furnace.setItem(1, fuel);
+                movedAny = true;
+            }
+        }
+
+        if (movedAny) {
+            furnace.setChanged();
+            serverLevel.playSound(null, this.furnacePos, SoundEvents.WOOD_PLACE, SoundSource.BLOCKS, 0.5F, 1.0F);
+            this.playerNpc.setCurrentAiDetail("loading furnace");
+        }
+        return movedAny;
+    }
+
+    private java.util.Optional<ItemStack> takeGlassSandInput(ServerLevel serverLevel) {
+        int missingGlass = PlayerNpcBuildMaterialUtil.missingGlassForProduction(serverLevel, this.playerNpc);
+        if (missingGlass <= 0) {
+            return java.util.Optional.empty();
+        }
+
+        return this.playerNpc.consumeInventoryItem(
+                PlayerNpcBuildMaterialUtil::isGlassSmeltingInput,
+                Math.min(missingGlass, 64)
+        );
+    }
+
+    private BlockPos findHomeFurnace(ServerLevel serverLevel) {
+        if (this.homeArea == null) {
+            return null;
+        }
+
+        for (BlockPos pos : BlockPos.betweenClosed(
+                this.homeArea.origin(),
+                this.homeArea.origin().offset(this.homeArea.width() - 1, 3, this.homeArea.depth() - 1))) {
+            if (serverLevel.getBlockState(pos).is(Blocks.FURNACE)) {
+                return pos.immutable();
+            }
+        }
+        return null;
+    }
+
+    private BlockPos findNearbyFurnace(ServerLevel serverLevel) {
+        BlockPos origin = this.playerNpc.blockPosition();
+        for (BlockPos pos : BlockPos.betweenClosed(
+                origin.offset(-FURNACE_SCAN_RADIUS, -2, -FURNACE_SCAN_RADIUS),
+                origin.offset(FURNACE_SCAN_RADIUS, 2, FURNACE_SCAN_RADIUS))) {
+            if (serverLevel.getBlockState(pos).is(Blocks.FURNACE)) {
+                return pos.immutable();
+            }
+        }
+        return null;
+    }
+
+    private BlockPos findHomeFurnacePlacement(ServerLevel serverLevel) {
+        if (this.homeArea == null) {
+            return null;
+        }
+
+        BlockPos preferred = PlayerNpcHomeUtil.interiorPos(this.homeArea, this.homeArea.width() - 2, this.homeArea.depth() - 2);
+        if (this.canPlaceFurnaceAt(serverLevel, preferred)) {
+            return preferred;
+        }
+
+        for (int x = 1; x < this.homeArea.width() - 1; x++) {
+            for (int z = 1; z < this.homeArea.depth() - 1; z++) {
+                BlockPos pos = PlayerNpcHomeUtil.interiorPos(this.homeArea, x, z);
+                if (this.canPlaceFurnaceAt(serverLevel, pos)) {
+                    return pos;
+                }
+            }
+        }
+        return null;
+    }
+
+    private BlockPos findTemporaryFurnacePlacement(ServerLevel serverLevel) {
+        BlockPos center = this.playerNpc.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            candidates.add(center.relative(direction));
+        }
+        candidates.add(center.above());
+        candidates.sort(Comparator.comparingDouble(center::distSqr));
+
+        for (BlockPos candidate : candidates) {
+            BlockPos immutable = candidate.immutable();
+            if (this.canPlaceFurnaceAt(serverLevel, immutable) && this.findFurnaceStand(serverLevel, immutable) != null) {
+                return immutable;
+            }
+        }
+        return null;
+    }
+
+    private boolean canPlaceFurnaceAt(ServerLevel serverLevel, BlockPos pos) {
+        if (!serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+            return false;
+        }
+        if (this.homeArea != null && PlayerNpcHomeUtil.isInside(this.homeArea, pos)) {
+            return PlayerNpcHomeUtil.isReplaceableForNpcBuild(serverLevel, pos)
+                    && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+        }
+        return serverLevel.getBlockState(pos).canBeReplaced()
+                && serverLevel.getFluidState(pos).isEmpty()
+                && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+    }
+
+    private BlockPos findFurnaceStand(ServerLevel serverLevel, BlockPos pos) {
+        List<BlockPos> candidates = new ArrayList<>();
+        candidates.add(this.playerNpc.blockPosition());
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            candidates.add(pos.relative(direction));
+        }
+
+        BlockPos center = this.playerNpc.blockPosition();
+        candidates.sort(Comparator.comparingDouble(center::distSqr));
+        for (BlockPos candidate : candidates) {
+            BlockPos immutable = candidate.immutable();
+            if (!this.canStandAt(serverLevel, immutable)
+                    || this.distanceToFurnaceSqr(immutable, pos) > FURNACE_USE_DISTANCE_SQR) {
+                continue;
+            }
+            if (immutable.equals(center)) {
+                return immutable;
+            }
+            Path path = this.playerNpc.getNavigation().createPath(immutable, 0);
+            if (path != null && path.canReach()) {
+                return immutable;
+            }
+        }
+        return null;
+    }
+
+    private boolean ensureFurnaceStand(ServerLevel serverLevel) {
+        if (this.furnaceStandPos != null && this.canStandAt(serverLevel, this.furnaceStandPos)) {
+            return true;
+        }
+
+        this.furnaceStandPos = this.findFurnaceStand(serverLevel, this.furnacePos);
+        return this.furnaceStandPos != null;
+    }
+
+    private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
+        return serverLevel.isInWorldBounds(pos)
+                && serverLevel.getWorldBorder().isWithinBounds(pos)
+                && serverLevel.getBlockState(pos).isAir()
+                && serverLevel.getBlockState(pos.above()).isAir()
+                && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+    }
+
+    private boolean isAtFurnaceStand() {
+        return this.furnaceStandPos != null
+                && this.playerNpc.distanceToSqr(this.furnaceStandPos.getX() + 0.5D, this.furnaceStandPos.getY(), this.furnaceStandPos.getZ() + 0.5D) <= FURNACE_STAND_REACHED_SQR
+                && this.distanceToFurnaceSqr(this.playerNpc.blockPosition(), this.furnacePos) <= FURNACE_USE_DISTANCE_SQR + 1.0D;
+    }
+
+    private boolean moveToFurnaceStand() {
+        if (this.furnaceStandPos == null) {
+            return false;
+        }
+        Path path = this.playerNpc.getNavigation().createPath(this.furnaceStandPos, 0);
+        if (path == null || !path.canReach()) {
+            return false;
+        }
+        return this.playerNpc.getNavigation().moveTo(path, 1.0D);
+    }
+
+    private double distanceToFurnaceSqr(BlockPos standPos, BlockPos pos) {
+        if (pos == null) {
+            return Double.MAX_VALUE;
+        }
+        double dx = standPos.getX() + 0.5D - (pos.getX() + 0.5D);
+        double dy = standPos.getY() + 0.5D - (pos.getY() + 0.5D);
+        double dz = standPos.getZ() + 0.5D - (pos.getZ() + 0.5D);
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private boolean hasFurnaceWork(FurnaceBlockEntity furnace) {
+        if (!furnace.getItem(2).isEmpty()) {
+            return true;
+        }
+
+        boolean hasInput = !furnace.getItem(0).isEmpty();
+        boolean hasFuelInFurnace = !furnace.getItem(1).isEmpty();
+        boolean hasInventoryInput = this.hasCookableFood() || this.hasSmeltableMaterial();
+        boolean hasInventoryFuel = this.hasFuel();
+        return hasInput && !hasFuelInFurnace && hasInventoryFuel
+                || !hasInput && hasInventoryInput && (hasFuelInFurnace || hasInventoryFuel);
+    }
+
+    private boolean shouldPlaceFurnaceForWork() {
+        return (InventoryUtils.hasItem(this.playerNpc, Items.FURNACE)
+                || PlayerNpcCraftingUtil.canCraftFurnace(this.playerNpc.getInventory()))
+                && (this.hasCookableFood() || this.hasSmeltableMaterial())
+                && this.hasFuel();
+    }
+
+    private boolean isFurnaceEmpty(FurnaceBlockEntity furnace) {
+        return furnace.getItem(0).isEmpty()
+                && furnace.getItem(1).isEmpty()
+                && furnace.getItem(2).isEmpty();
+    }
+
+    private ItemStack takeOrCraftFurnace() {
+        ItemStack furnace = this.playerNpc.consumeInventoryItem(Items.FURNACE, 1).orElse(ItemStack.EMPTY);
+        if (!furnace.isEmpty()) {
+            return furnace;
+        }
+
+        if (!PlayerNpcCraftingUtil.tryCraftFurnace(this.playerNpc.getInventory())) {
+            return ItemStack.EMPTY;
+        }
+        return this.playerNpc.consumeInventoryItem(Items.FURNACE, 1).orElse(ItemStack.EMPTY);
+    }
+
+    private boolean hasCookableFood() {
+        return InventoryUtils.hasItem(this.playerNpc, this::isCookableFood);
+    }
+
+    private boolean hasSmeltableMaterial() {
+        return InventoryUtils.hasItem(this.playerNpc, this::isSmeltableMaterial);
+    }
+
+    private boolean hasFuel() {
+        return InventoryUtils.hasItem(this.playerNpc, this::isFuel);
+    }
+
+    private boolean isNearHome() {
+        if (this.homeArea == null) {
+            return false;
+        }
+
+        BlockPos homeCenter = this.homeArea.origin().offset(this.homeArea.width() / 2, 1, this.homeArea.depth() / 2);
+        return this.playerNpc.distanceToSqr(homeCenter.getX() + 0.5D, homeCenter.getY(), homeCenter.getZ() + 0.5D) <= HOME_ACTION_DISTANCE_SQR;
+    }
+
+    private boolean isCookableFood(ItemStack stack) {
+        return stack.is(Items.BEEF)
+                || stack.is(Items.PORKCHOP)
+                || stack.is(Items.CHICKEN)
+                || stack.is(Items.MUTTON)
+                || stack.is(Items.RABBIT)
+                || stack.is(Items.COD)
+                || stack.is(Items.SALMON)
+                || stack.is(Items.POTATO);
+    }
+
+    private boolean isSmeltableMaterial(ItemStack stack) {
+        return stack.is(Items.COBBLESTONE)
+                || stack.is(Items.COBBLED_DEEPSLATE)
+                || this.shouldSmeltSandForGlass(stack)
+                || stack.is(Items.RAW_IRON)
+                || stack.is(Items.RAW_COPPER)
+                || stack.is(Items.RAW_GOLD)
+                || stack.is(Items.IRON_ORE)
+                || stack.is(Items.DEEPSLATE_IRON_ORE)
+                || stack.is(Items.COPPER_ORE)
+                || stack.is(Items.DEEPSLATE_COPPER_ORE)
+                || stack.is(Items.GOLD_ORE)
+                || stack.is(Items.DEEPSLATE_GOLD_ORE);
+    }
+
+    private boolean shouldSmeltSandForGlass(ItemStack stack) {
+        return this.playerNpc.level() instanceof ServerLevel serverLevel
+                && PlayerNpcBuildMaterialUtil.isGlassSmeltingInput(stack)
+                && PlayerNpcBuildMaterialUtil.needsGlassSmelting(serverLevel, this.playerNpc);
+    }
+
+    private boolean isFuel(ItemStack stack) {
+        return !stack.isEmpty() && AbstractFurnaceBlockEntity.isFuel(stack);
+    }
+
+    private BlockPos getTemporaryFurnacePos() {
+        if (!this.playerNpc.getPersistentData().contains(TEMP_FURNACE_X)) {
+            return null;
+        }
+
+        return new BlockPos(
+                this.playerNpc.getPersistentData().getInt(TEMP_FURNACE_X),
+                this.playerNpc.getPersistentData().getInt(TEMP_FURNACE_Y),
+                this.playerNpc.getPersistentData().getInt(TEMP_FURNACE_Z)
+        );
+    }
+
+    private void saveTemporaryFurnace(BlockPos pos) {
+        this.playerNpc.getPersistentData().putInt(TEMP_FURNACE_X, pos.getX());
+        this.playerNpc.getPersistentData().putInt(TEMP_FURNACE_Y, pos.getY());
+        this.playerNpc.getPersistentData().putInt(TEMP_FURNACE_Z, pos.getZ());
+    }
+
+    private void clearTemporaryFurnace() {
+        this.playerNpc.getPersistentData().remove(TEMP_FURNACE_X);
+        this.playerNpc.getPersistentData().remove(TEMP_FURNACE_Y);
+        this.playerNpc.getPersistentData().remove(TEMP_FURNACE_Z);
+    }
+
+    private void lookAtFurnace() {
+        this.playerNpc.getLookControl().setLookAt(
+                this.furnacePos.getX() + 0.5D,
+                this.furnacePos.getY() + 0.5D,
+                this.furnacePos.getZ() + 0.5D,
+                40.0F,
+                40.0F
+        );
+    }
+
+    private void showPlacementItem(ItemStack stack) {
+        this.setTemporaryMainHand(stack, false);
+    }
+
+    private void equipPickaxeOrEmptyForRecovery() {
+        if (this.playerNpc.getMainHandItem().getItem() instanceof PickaxeItem) {
+            return;
+        }
+
+        ItemStack pickaxe = this.playerNpc.consumeInventoryItem(stack -> stack.getItem() instanceof PickaxeItem, 1)
+                .orElse(ItemStack.EMPTY);
+        this.setTemporaryMainHand(pickaxe, true);
+    }
+
+    private void setTemporaryMainHand(ItemStack stack, boolean returnCurrentOnRestore) {
+        ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
+        if (!this.usingTemporaryTool) {
+            this.previousMainHand = currentMainHand;
+            this.usingTemporaryTool = true;
+            this.returnTemporaryMainHandOnRestore = returnCurrentOnRestore;
+        } else if (!currentMainHand.isEmpty()
+                && this.returnTemporaryMainHandOnRestore
+                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)
+                && !InventoryUtils.addItem(this.playerNpc, currentMainHand)) {
+            this.playerNpc.spawnAtLocation(currentMainHand);
+        }
+
+        ItemStack held = stack.copy();
+        held.setCount(Math.min(1, held.getCount()));
+        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, held);
+    }
+
+    private void restorePreviousMainHand() {
+        if (!this.usingTemporaryTool) {
+            return;
+        }
+
+        ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
+        if (!currentMainHand.isEmpty()
+                && this.returnTemporaryMainHandOnRestore
+                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)
+                && !InventoryUtils.addItem(this.playerNpc, currentMainHand)) {
+            this.playerNpc.spawnAtLocation(currentMainHand);
+        }
+
+        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
+        this.previousMainHand = ItemStack.EMPTY;
+        this.usingTemporaryTool = false;
+        this.returnTemporaryMainHandOnRestore = false;
+    }
+
+    private int getRequiredBreakTicks(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        float hardness = state.getDestroySpeed(serverLevel, pos);
+        if (hardness < 0.0F) {
+            return MAX_RECOVER_FURNACE_TICKS;
+        }
+
+        ItemStack heldStack = this.playerNpc.getMainHandItem();
+        float toolSpeed = heldStack.isEmpty() ? 1.0F : heldStack.getDestroySpeed(state);
+        if (toolSpeed <= 0.0F) {
+            toolSpeed = 1.0F;
+        }
+
+        boolean correctTool = !state.requiresCorrectToolForDrops() || heldStack.isCorrectToolForDrops(state);
+        float progressPerTick = toolSpeed / hardness / (correctTool ? 30.0F : 100.0F);
+        if (progressPerTick <= 0.0F) {
+            return MAX_RECOVER_FURNACE_TICKS;
+        }
+
+        return Math.min(MAX_RECOVER_FURNACE_TICKS, Math.max(1, (int) Math.ceil(1.0F / progressPerTick)));
+    }
+
+    private void updateDetail(ServerLevel serverLevel) {
+        if (this.furnacePos == null) {
+            this.playerNpc.setCurrentAiDetail("");
+            return;
+        }
+
+        if (this.mode == Mode.RECOVER_TEMPORARY && serverLevel != null) {
+            BlockState state = serverLevel.getBlockState(this.furnacePos);
+            int requiredTicks = this.getRequiredBreakTicks(serverLevel, this.furnacePos, state);
+            boolean inBreakRange = this.playerNpc.distanceToSqr(
+                    this.furnacePos.getX() + 0.5D,
+                    this.furnacePos.getY() + 0.5D,
+                    this.furnacePos.getZ() + 0.5D
+            ) <= RECOVER_FURNACE_BREAK_DISTANCE_SQR;
+            this.playerNpc.setCurrentAiDetail(String.format(
+                    java.util.Locale.ROOT,
+                    "recovering furnace @ %d %d %d %s",
+                    this.furnacePos.getX(),
+                    this.furnacePos.getY(),
+                    this.furnacePos.getZ(),
+                    inBreakRange ? String.format(java.util.Locale.ROOT, "%d/%dt", Math.min(this.recoveryBreakTicks, requiredTicks), requiredTicks) : "walking"
+            ));
+            return;
+        }
+
+        String action = switch (this.mode) {
+            case PLACE_HOME, PLACE_TEMPORARY -> "placing furnace";
+            case RECOVER_TEMPORARY -> "recovering furnace";
+            case INTERACT -> "using furnace";
+        };
+        this.playerNpc.setCurrentAiDetail(String.format(
+                java.util.Locale.ROOT,
+                "%s @ %d %d %d",
+                action,
+                this.furnacePos.getX(),
+                this.furnacePos.getY(),
+                this.furnacePos.getZ()
+        ));
+    }
+
+    private void returnStack(ItemStack stack) {
+        if (!stack.isEmpty() && !InventoryUtils.addItem(this.playerNpc, stack)) {
+            this.playerNpc.spawnAtLocation(stack);
+        }
+    }
+
+    private void resetPlan() {
+        this.homeArea = null;
+        this.furnacePos = null;
+        this.furnaceStandPos = null;
+        this.mode = Mode.INTERACT;
+        this.previousMainHand = ItemStack.EMPTY;
+        this.actionDelayTicks = 0;
+        this.recoveryBreakTicks = 0;
+        this.finished = false;
+        this.acted = false;
+        this.temporaryFurnace = false;
+        this.usingTemporaryTool = false;
+        this.returnTemporaryMainHandOnRestore = false;
+    }
+
+    private enum Mode {
+        PLACE_HOME,
+        PLACE_TEMPORARY,
+        INTERACT,
+        RECOVER_TEMPORARY
+    }
+}

@@ -13,6 +13,9 @@ Project knowledge to consult first:
 - .codex/knowledge/player_npc_alerts_and_movement.md
 - .codex/knowledge/player_npc_item_durability.md
 - .codex/knowledge/player_npc_chat.md
+- .codex/knowledge/build_layouts.md
+- .codex/knowledge/player_npc_interests.md
+- .codex/knowledge/player_npc_structure_building_references.md
 - .codex/knowledge/goals/*.md
 
 Collaboration rules:
@@ -20,6 +23,7 @@ Collaboration rules:
 - Keep changes scoped to Player NPC behavior unless the user explicitly asks for broader mod behavior.
 - Preserve user changes and do not revert unrelated files.
 - Explain important tradeoffs briefly, but do not stop at a proposal when the request clearly asks for a code change.
+- For building AI work, use `.codex/knowledge/player_npc_structure_building_references.md` before changing structure loading, build placement, home repair, material auditing, or daily-plan goal selection.
 
 Cooldown rule:
 - For any `PlayerNpcEntity` goal that needs a cooldown, do not use ad hoc NBT/persistent-data timestamp tags such as `getPersistentData().putLong("PlayerNpc...Cooldown", gameTime + ticks)`.

@@ -7,15 +7,15 @@
 
 ## Purpose
 
-Gives early Player NPCs a direct stone progression path after they have enough wood/planks and a pickaxe, without relying only on visible surface stone or cave ore targets.
+Gives early Player NPCs a direct stone progression path after they have a pickaxe and their raw-log reserve, without relying only on visible surface stone or cave ore targets.
 
 ## Activation
 
 - Server side only.
 - NPC must be idle with no combat target and not healing.
 - Requires a pickaxe in hand or inventory.
-- Requires at least 16 plank-equivalent wood supply.
-- Skips if the NPC already has at least 16 cobblestone/cobbled deepslate.
+- Requires the NPC's raw-log reserve to be met, but does not require extra plank-equivalent wood beyond that reserve.
+- Skips if the NPC already has at least its per-NPC cobblestone/cobbled deepslate target.
 - Uses `gatherCooldown` as its retry cooldown.
 
 ## Behavior

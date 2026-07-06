@@ -23,7 +23,7 @@
 
 `FakePlayer` extends `PathfinderMob`, so Player NPC uses normal pathfinder mob spawning and navigation behavior instead of zombie-specific surface-spawn behavior.
 
-`PlayerNpcEntity` persists custom state such as inventory, cooldowns, target type, main/offhand weapon snapshots, bow usage, owned home chest position, block projectile chance, and disarmed state.
+`PlayerNpcEntity` persists custom state such as inventory, cooldowns, per-NPC raw-log/wood/cobble reserve targets, main/offhand weapon snapshots, bow usage, owned home chest position, block projectile chance, and disarmed state.
 
 AI cooldowns are explicit integer fields on `PlayerNpcEntity`, saved with the entity and decremented every server tick. Player NPC goals should not use ad hoc persistent-data timestamp tags for `PlayerNpc...Cooldown` values.
 
@@ -78,6 +78,8 @@ Username/profile data is saved to NBT:
 - complete `Profile`, when available
 
 On load, `FakePlayer` restores `Username`, restores `Profile` when present, or chooses a hardcoded name server-side when no username exists.
+
+Hardcoded names also carry Player NPC interests such as `BUILDING`, `FISHING`, `MINING`, `HUNT_MONSTERS`, `HUNT_ANIMALS`, `HUNT_PLAYERS`, `HUNT_VILLAGERS`, `EXPLORING`, `LOOTING`, `FARMING`, and `CAUTIOUS`. Log gathering, baseline stone gathering, basic crafting, and gear upgrading are baseline AI rather than personality interests. See `.codex/knowledge/player_npc_interests.md`.
 
 ## Minecraft Profile, Skin, Cape, And Elytra Fetch
 
@@ -286,16 +288,17 @@ Inventory-backed actions:
 - eating requires one available food item and consumes it only after the eating animation completes,
 - item burning requires flint and steel or a lava bucket in inventory,
 - chest looting skips the NPC's owned home chest, requires an adjacent standing position, opens/closes the chest, and moves acceptable world-chest items sequentially into the custom inventory,
-- cave ore exploration can mine cave-adjacent iron/coal/copper ore with a pickaxe, craft torches from coal/charcoal and sticks, and randomly place torches in dark cave spots while not mid-break,
-- cooking can place/craft a home furnace, insert raw food or smeltable ore/fuel, and collect cooked output,
-- iron gear crafting can turn iron ingots into iron tools and armor near a crafting table,
+- cave ore exploration is a `MINING` interest behavior that can mine cave-adjacent iron/coal/copper ore with a pickaxe, clear local path obstructions, craft torches from coal/charcoal and sticks, and randomly place torches in dark cave spots while not mid-break,
+- cooking is baseline AI; it can place/craft a home furnace, place/recover a temporary furnace when away from home, insert raw food, smeltable ore, cobblestone/cobbled deepslate, and fuel, and collect cooked output,
+- home supply checking is baseline AI; once per Minecraft day near home, the NPC checks its chest first and furnace second for needed food, wood, fuel, arrows, blocks, utility supplies, and furnace output before falling back to gathering/exploring,
+- gear upgrading can turn cobblestone/cobbled deepslate into stone tools, iron ingots into iron tools/armor, and diamonds into diamond tools/armor near a crafting table,
 - farming can harvest mature crops and plant a small wheat patch near the home,
 - sapling planting can place carried saplings on valid ground,
-- biome log exploration can move a low-supply or raw-log-starved NPC far in one chosen direction when no logs are within 48 blocks, then yield immediately once logs enter scan range so material gathering can harvest a connected tree in 4-8 log batches, refill a 4-12 raw-log reserve, and use dirt-only pillaring for high connected logs,
+- biome log exploration can move a low-supply or raw-log-starved NPC in one chosen direction when no logs are within 48 blocks, then yield immediately once logs enter scan range so material gathering can harvest a connected tree in 4-8 log batches, refill a 4-12 raw-log reserve, and use dirt-only pillaring for high connected logs,
 - boat collector NPCs can stock 2-3 boats near a crafting table,
 - boat trap combat can place a boat on monster targets only, never players or Player NPCs,
 - jukebox dancing can place a home jukebox, insert a disc, sneak/jump dance near active jukeboxes, and rarely disturb another dancing NPC,
-- troll hit can hit a player or Player NPC once, clear the target, then run away instead of trying to kill them,
+- troll hit can rarely hit any valid nearby living non-allied target except creative players, clear the target, then run away instead of trying to kill them,
 - combat fishing can temporarily put a fishing rod in the offhand during vanilla replacement combat and pull the current target,
 - shield crafting can consume six planks and one iron ingot near a crafting table to craft a shield,
 - shield guard can temporarily put a shield in the offhand during vanilla replacement combat, slow movement, block incoming damage, and consume shield durability,
@@ -307,7 +310,7 @@ Inventory-backed actions:
 
 Player NPC death loot is inventory-backed. `PlayerNpcEntity.dropCustomDeathLoot` drops only remaining container contents, and the old delayed `PlayerNpcDeadEvent` generated item drops are skipped for Player NPC.
 
-`PlayerNpcEntity.equipBetterGearFromInventory()` upgrades armor and main-hand gear from the custom inventory. It is called after nearby item pickup and after chest loot transfers, so looted chestplates, swords, tools, bows, and similar gear can be equipped when better than current gear. Main-hand auto-upgrades are paused while `PlayerNpcEntity.isHealing()` is true or while temporary main-hand goals such as material gathering, cave ore mining, hole escape, and home management are active, so food/tools/placement blocks are not replaced before the goal finishes. High-priority weapon recovery is also blocked while healing.
+`PlayerNpcEntity.equipBetterGearFromInventory()` upgrades armor and main-hand gear from the custom inventory. It is called after nearby item pickup, after chest loot transfers, and after gear crafting produces a better tool, so looted or crafted chestplates, swords, tools, bows, and similar gear can be equipped when better than current gear. Main-hand auto-upgrades are paused while `PlayerNpcEntity.isHealing()` is true or while temporary main-hand goals such as material gathering, cave ore mining, hole escape, and home management are active, so food/tools/placement blocks are not replaced before the goal finishes. High-priority weapon recovery is also blocked while healing.
 
 `PickupNearbyItemGoal` actively pathfinds to useful dropped items in a short 8 block radius when the NPC is idle and not healing or fighting. This covers nearby loot without letting item collection starve material gathering. Useful dropped supplies are defined by `InventoryUtils.isInventoryBackedSupplyDrop(...)`, which includes food, placeable blocks, utility materials, saplings, and common animal drops. When an animal target dies, `PlayerNpcEntity` stores a short post-kill loot priority at the death position, clears the animal target, and lets pickup briefly search a wider local area around the kill site until drops spawn. `PlayerNpcSmartTargetGoal` and `HuntSheepForBedGoal` yield new animal targets while collectable supply drops are nearby, and `BurnNearbyItemGoal` reserves those supply drops from burning when they cannot be picked up.
 
@@ -321,6 +324,11 @@ Gradual Player NPC block-breaking goals should call `PlayerNpcEntity.showBlockBr
 
 `PlayerNpcEntity` syncs both a broad AI state and a free-form AI detail string to clients. The inspector overlay renders the state as `AI playing:` and the detail as `Task:`.
 
+The inspector also shows name interests and build status:
+
+- `Interests:` comes from the hardcoded fake-player name definition.
+- `Build:` comes from `PlayerNpcBuildStatusUtil` through the inspector snapshot packet.
+
 `GatherMaterialsGoal` uses the detail field to show the block id and coordinates it is trying to mine, for example `minecraft:oak_log @ 12 64 -8`.
 
 `PlayerNpcInspectorOverlay` renders from `RenderGuiEvent.Post` once per HUD frame and caches formatted display text for 500 ms, similar to Minecraft's F3-style throttled debug text updates. Network refreshes still use the 10 tick server request interval.
@@ -329,13 +337,15 @@ The inspector item, inventory snapshot packets, inspectator camera mode, and Shi
 
 ## Home And Build Data
 
-`PlayerNpcHomeUtil` stores a per-NPC home origin plus width/depth in persistent entity data. `BuildHouseGoal` chooses a clear, flat layout footprint before saving the home area, and `ManageHomeBaseGoal` uses that home for crafting table, bed, chest, and storage behavior. The saved home area is also a protected resource volume, so material gathering and biome log scanning skip house blocks instead of harvesting the NPC's own shelter. `ReturnHomeGoal` can bring a nearby NPC back to that area for storage, crafting, cooking, or sleeping instead of letting those utility goals operate from a distance.
+`PlayerNpcHomeUtil` stores a per-NPC home origin plus width/depth in persistent entity data. `BuildHouseGoal` chooses a clear, flat layout footprint before saving the home area, and `ManageHomeBaseGoal` uses that home for crafting table, bed, chest, and storage behavior. The saved home area is also a protected resource volume, so material gathering and biome log scanning skip house blocks instead of harvesting the NPC's own shelter. Local resource goals also stay within a 96 block home radius when the NPC has a home and does not have `EXPLORING`; NPCs without a home, or NPCs with `EXPLORING`, can range freely. `ReturnHomeGoal` can bring a nearby NPC back to that area for storage, crafting, cooking, or sleeping instead of letting those utility goals operate from a distance.
 
-The `workers-1.20.1-2.0.3_decompiled` reference uses compressed NBT scan files through `StructureManager` (`scanStructure`, `saveStructureToFile`, `loadScanNbt`, and default `structures/*.nbt` resources). Player NPC uses its own data-pack JSON path at `src/main/resources/data/player_npc/builds/` instead of copying that implementation.
+For first-build bootstrap, Player NPCs roll raw-log, wood, and cobblestone targets from 12, 16, 20, 24, or 32. A BUILDING NPC should gather raw logs to its target, craft axe/pickaxe, gather cobble to its target, then select a `.blueprint` and begin construction.
 
-`PlayerNpcBuildLayoutLoader` now loads JSON build layouts from the `builds` resource folder. The repository contains 1000 generated rectangular layouts plus the original example resource. Layouts are role-based, not material-locked, so `BuildHouseGoal` can substitute any valid building block in the NPC inventory instead of requiring a specific block palette.
+The `workers-1.20.1-2.0.3_decompiled` reference uses compressed NBT scan files through `StructureManager` (`scanStructure`, `saveStructureToFile`, `loadScanNbt`, and default `structures/*.nbt` resources). Player NPC building now uses Structurize `.blueprint` resources under `src/main/resources/data/player_npc/builds/` or datapack `data/<namespace>/builds/`.
 
-Generated footprints are rectangles only: 5x5, 6x6, 7x7, 8x8, 9x9, 10x10, 5x6, 6x7, 7x8, 8x9, and 9x10. L-shaped generated layouts were removed. Every generated layout includes a door role, plus optional roles such as torches, fence windows, trapdoors, and roof stairs. `BuildHouseGoal` checks every footprint cell for solid support underneath and clear air through the layout height before the NPC starts building.
+`PlayerNpcBuildLayoutLoader` loads `.blueprint` files through `PlayerNpcBlueprintLayoutReader`, which unpacks Structurize v1 compressed-NBT `palette` and `blocks` data into canonical `PlayerNpcBuildLayout.RelativeBlock` entries. The old 1000 generated role-based JSON resources and the hand-authored JSON example were removed. The JSON parser remains only as a compatibility path for old local packs.
+
+`BuildHouseGoal` compares target block states against the world through `PlayerNpcBuildMaterialUtil`, so exact blocks and accepted material-family substitutes both count as built. It clears safe conflicts including blueprint air volume, consumes or crafts target block items or accepted substitutes, applies scanned block entity NBT after placement, and stops early on missing required materials. Multi-block items such as bed heads and upper door halves do not require a second item and derive their material from the first half when possible. `FarmCropGoal` treats the house as finished when all required layout blocks are satisfied by exact states or accepted substitutes.
 
 Player NPC now clears stale combat AI state when its target is gone, so a dead or removed target should not leave the inspector stuck on melee/engaging forever.
 

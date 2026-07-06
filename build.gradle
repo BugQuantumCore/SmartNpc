@@ -11,7 +11,7 @@ version = mod_version
 group = mod_group_id
 
 base {
-    archivesName = "PlayerNpc-1.20.1"
+    archivesName = "SmartNpc-1.20.1"
 }
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
@@ -68,8 +68,8 @@ repositories {
 }
 
 mixin {
-    add sourceSets.main, 'player_npc.mixins.refmap.json'
-    config 'player_npc.mixins.json'
+    add sourceSets.main, 'smart_npc.mixins.refmap.json'
+    config 'smart_npc.mixins.json'
 }
 
 dependencies {

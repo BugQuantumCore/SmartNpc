@@ -24,8 +24,3 @@
 
 ## License & Use
 GNU GENERAL PUBLIC LICENSE
-
-## Credit
-- Credit to Player Mob mod for the fetching Player Skin from Minecraft API algorithm
-- Git Repo: https://github.com/GoryMoon/PlayerMobs
-- Owner: GoryMoon

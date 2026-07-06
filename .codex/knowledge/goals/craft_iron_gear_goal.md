@@ -7,12 +7,16 @@
 
 ## Purpose
 
-Lets Player NPCs turn smelted iron ingots into better tools and armor.
+Lets Player NPCs turn smelted iron ingots and diamonds into better tools and armor.
 
 ## Behavior
 
-Requires a nearby crafting table, no combat target, and enough iron/stick materials. The goal crafts one item per activation, preferring iron pickaxe, axe, sword, shovel, then iron armor upgrades. Armor is equipped directly if it improves the slot; replaced armor is moved into inventory or dropped if inventory is full.
+Requires a nearby crafting table, no combat target, and enough material/stick ingredients. This is baseline AI for every Player NPC, not gated by mining or hunting interests.
 
-Uses `PlayerNpcCraftingUtil` for plank-to-stick handling and iron ingot consumption.
+The goal crafts one item per activation. It tries diamond pickaxe, sword, axe, and shovel first, then diamond armor, then iron pickaxe, axe, sword, shovel, and iron armor. Tool crafting uses `PlayerNpcGearUtil` tier checks, so it only crafts a tool when that target tier is better than the best matching tool the NPC already owns. This prevents crafting an iron pickaxe after the NPC already owns a diamond pickaxe.
+
+Armor is equipped directly if it improves the slot; replaced armor is moved into inventory or dropped if inventory is full. Tools are placed into the custom inventory and then passed through `PlayerNpcEntity.equipBetterGearFromInventory()` so the best main-hand gear can be equipped immediately.
+
+Uses `PlayerNpcCraftingUtil` for plank-to-stick handling, recipe matching, and material consumption.
 
 Cooldown uses `PlayerNpcEntity.ironGearCooldown`.

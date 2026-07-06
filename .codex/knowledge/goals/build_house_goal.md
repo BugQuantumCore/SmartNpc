@@ -3,35 +3,60 @@
 ## Source
 
 - `src/main/java/com/pla/player_npc/entity/goal/BuildHouseGoal.java`
-- Registered from `PlayerNpcEntity.registerGoals()`.
+- Registered from `PlayerNpcEntity.registerGoals()` through `InterestGatedGoal`.
 
 ## Purpose
 
-Provides first-pass block-by-block building behavior for Player NPCs.
+Builds structures loaded from Structurize `.blueprint` datapack resources:
+
+```text
+data/<namespace>/builds/*.blueprint
+```
+
+The old randomly generated role-based shelter system and its generated JSON files were removed. New custom builds should be scanned/exported as Structurize blueprints.
 
 ## Activation
 
 - Server side only.
-- NPC must be idle with no combat target.
-- Requires enough non-utility block items or plank-equivalent wood supply for a loaded build layout.
-- Chooses a clear, flat footprint before starting the house.
-- Uses the Player NPC home area stored by `PlayerNpcHomeUtil`.
+- NPC must have the `BUILDING` interest.
+- NPC must be alive, idle, not healing, not riding, and not in combat.
+- Requires the NPC's per-NPC raw-log reserve and cobblestone/cobbled-deepslate reserve to be met before selecting a first home. These reserves are randomized on the entity from 12, 16, 20, 24, or 32.
+- Requires at least 16 available build/plank-equivalent blocks before starting a new home.
+- Existing unfinished homes can resume from the saved `PlayerNpcHomeUtil` home area and layout id.
 - Cooldown uses `PlayerNpcEntity.buildHouseCooldown`.
+
+## Layout Loading
+
+`PlayerNpcBuildLayoutLoader` loads `.blueprint` files and converts their compressed-NBT palette/block arrays into `PlayerNpcBuildLayout.RelativeBlock` entries. The reader is implemented in `PlayerNpcBlueprintLayoutReader` and is based on Structurize GPL v1 blueprint serialization logic.
+
+The JSON parser still exists only as a compatibility path for older local packs. Do not add new JSON build resources.
 
 ## Behavior
 
-Builds a compact starter shelter from whatever non-utility block items or plank-equivalent wood supply the NPC has. The selected layout is loaded from data resources under `src/main/resources/data/player_npc/builds/`.
+The goal scans around the NPC for a supported footprint, saves the home area through `PlayerNpcHomeUtil`, places a build-site crafting table just outside the selected footprint when possible, and then walks the exact block list bottom-up.
 
-The goal can start an initial base when the NPC has at least 16 buildable/plank-equivalent blocks and can afford the layout floor/foundation roles, even if it cannot yet pay for the whole shelter. If materials run out mid-build, the goal stops with a short retry cooldown instead of waiting the full house cooldown, so later gathering can continue the base.
+For each target block:
 
-The build layout provides positions and block roles such as `floor`, `wall`, `roof`, `door`, `torch`, `window_fence`, `window_trapdoor`, and `roof_stair`; it does not require exact block ids for generic structure blocks. The goal consumes valid building blocks from the NPC inventory, while preserving utility blocks such as crafting tables, chests, furnaces, and beds for home management. Raw logs are not treated as direct building blocks here; wood is counted as plank-equivalent so the NPC can convert logs/planks into actual build materials.
+1. If the world state already equals the target state, or matches an accepted material-family substitute, skip it.
+2. If a conflicting block exists and can be safely cleared, mine it first.
+3. If the target state is air, keep the space clear.
+4. If the required item can be crafted but is not already carried, walk to the build-site crafting table and craft the material into inventory first.
+5. If the NPC lacks the required item and cannot craft it, stop early with a short material retry cooldown.
+6. Otherwise consume the required item or an accepted substitute, preview it in the main hand, place the target/substitute state, apply block entity NBT if present, play the block place sound, and continue.
 
-Floor/foundation roles use full build blocks or planks. The goal no longer crafts or prefers slabs for the base because slab floors made the generated houses look wrong.
+`PlayerNpcBuildMaterialUtil` keeps the blueprint target as the canonical design while allowing biome-local substitutions. It preserves shared state properties on replacement blocks, such as stair facing/half/shape, door half/facing/hinge/open state, slab type, log axis, and bed facing/part. Multiblock second halves such as bed heads and upper door halves do not consume a second item; they derive their material from the already placed first half when possible.
 
-Door/torch/fence/trapdoor/stair roles are optional utility placements. The goal tries to use matching items from inventory or craft simple oak versions from planks/sticks/coal when possible. Torch crafting uses the vanilla-sized one coal/charcoal plus one stick to four torches helper. If the NPC lacks the resources, it skips the optional role instead of aborting the whole build.
+Building material crafting uses raw-log reserve `0` after the home build is committed. The reserve is a bootstrap readiness threshold, not a protected material pool during construction.
 
-Before building, the goal scans around the NPC for a clear footprint. Every footprint cell must have solid support underneath and air through the layout height. Existing home utility blocks are allowed only when the layout is reusing the saved home area.
+The goal updates AI detail with layout name, placement/clearing state, and progress. The inspector also shows a build-status line from `PlayerNpcBuildStatusUtil`.
 
-The chosen area is saved as the NPC home so `ManageHomeBaseGoal` can place/use the crafting table, bed, and chest in the same base. When a build attempt stops, the manage-home cooldown is cleared so home utilities can be placed in the built zone quickly.
+## Current Limits
 
-There are 1000 generated rectangular layouts plus the original example resource. Generated sizes include 5x5, 6x6, 7x7, 8x8, 9x9, 10x10, 5x6, 6x7, 7x8, 8x9, and 9x10. L-shaped generated layouts were removed. Every generated layout includes a door role.
+- No full Structurize hologram/build-tool UI yet.
+- Rotation/mirror is not implemented; scans should already face the direction the NPC should build.
+- The PlayerNpc home origin is the blueprint minimum corner, not the Structurize anchor block.
+- `.schematic`, `.schem`, and vanilla structure `.nbt` are not loaded by this goal.
+
+## Reference Direction
+
+MineColonies delegates low-level placement to Structurize `StructurePlacer` and a colony-specific `BuildingStructureHandler`. PlayerNpc ports the compatible file-reading part and keeps the placement AI native, because MineColonies' handler depends on colony, citizen, work-order, and request systems that PlayerNpc does not have.

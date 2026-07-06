@@ -47,3 +47,5 @@ playerNpc.getPersistentData().putLong("PlayerNpcSomeCooldown", serverLevel.getGa
 - `shieldGuardCooldown`: `ShieldGuardGoal`.
 
 Old non-PlayerNpc helper code can still have its own legacy timer tags, but Player NPC AI goals should use the entity fields above.
+
+Daily state markers are allowed when they are not tick cooldowns. `CheckHomeSuppliesGoal` uses persistent day markers (`PlayerNpcLastHomeChestCheckDay` and `PlayerNpcLastHomeFurnaceCheckDay`) so a home chest/furnace is checked at most once per Minecraft day and naturally becomes eligible again when `serverLevel.getDayTime() / 24000L` changes.

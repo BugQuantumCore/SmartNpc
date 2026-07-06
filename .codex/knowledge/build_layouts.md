@@ -4,84 +4,65 @@
 
 - `src/main/java/com/pla/player_npc/util/PlayerNpcBuildLayout.java`
 - `src/main/java/com/pla/player_npc/util/PlayerNpcBuildLayoutLoader.java`
-- `src/main/java/com/pla/player_npc/event/NpcGearLoadEvent.java`
-- `src/main/resources/data/player_npc/builds/*.json`
+- `src/main/java/com/pla/player_npc/util/PlayerNpcBuildMaterialUtil.java`
+- `src/main/java/com/pla/player_npc/util/PlayerNpcBlueprintLayoutReader.java`
+- `src/main/java/com/pla/player_npc/entity/goal/BuildHouseGoal.java`
+- `src/main/resources/data/player_npc/builds/*.blueprint`
 
-## Loader
+## Blueprint Format
 
-`PlayerNpcBuildLayoutLoader` is a `SimpleJsonResourceReloadListener` rooted at:
-
-```text
-builds
-```
-
-It is registered from `NpcGearLoadEvent` alongside `EquipmentDataLoader`.
-
-Each loaded JSON becomes a `PlayerNpcBuildLayout` with:
-
-- id from the resource location,
-- width, height, and depth from `size`,
-- shape string,
-- relative blocks from `blocks[]`,
-- footprint cells inferred from blocks at `y = 0` or roles named `floor`/`foundation`.
-
-## JSON Format
-
-Example block entry:
-
-```json
-{
-  "pos": [0, 1, 0],
-  "role": "wall"
-}
-```
-
-The loader currently needs:
-
-- `size.width`
-- `size.height`
-- `size.depth`
-- `blocks[].pos`
-- `blocks[].role`
-
-Other metadata, such as markers, can exist in the file for future use and is ignored by the current loader.
-
-## Generated Data
-
-The repository contains 1000 generated build layouts:
+PlayerNpc now reads Structurize v1 `.blueprint` files directly from datapacks/resource packs:
 
 ```text
-src/main/resources/data/player_npc/builds/generated_0000.json
-...
-src/main/resources/data/player_npc/builds/generated_0999.json
+data/<namespace>/builds/<layout_id>.blueprint
 ```
 
-The generated library intentionally uses role-based blocks instead of material ids. `BuildHouseGoal` selects a layout by required generic block count, then substitutes any valid building blocks the NPC actually has, such as cobblestone, dirt, sand, logs, planks, or deepslate.
+The reader uses the core Structurize compressed-NBT layout:
 
-Every generated layout includes a `door` role. Many also include optional roles such as `torch`, `window_fence`, `window_trapdoor`, and `roof_stair`. These roles are optional at build time and can be skipped if the NPC lacks matching materials.
+- `version`
+- `size_x`, `size_y`, `size_z`
+- `palette`
+- packed `blocks`
+- optional `tile_entities`
+- optional `required_mods`
 
-The generated footprints are rectangles only. L-shaped starter builds were removed. Current footprint sizes are:
+The unpacking logic is based on the GPL-licensed Structurize `BlueprintUtil` implementation. PlayerNpc converts each blueprint block into `PlayerNpcBuildLayout.RelativeBlock` so the existing NPC inventory, crafting, clearing, and placement behavior can stay PlayerNpc-native.
 
-- 5x5
-- 6x6
-- 7x7
-- 8x8
-- 9x9
-- 10x10
-- 5x6
-- 6x7
-- 7x8
-- 8x9
-- 9x10
+## Authoring Workflow
 
-Base/floor roles use full build blocks or planks. Do not generate slab bases for Player NPC houses unless the design changes again.
+Use Structurize's Scan Tool to scan the build and save a `.blueprint`, then place that file in a datapack under:
 
-## Placement Rule
+```text
+data/player_npc/builds/<name>.blueprint
+```
 
-`BuildHouseGoal` scans nearby origins before choosing a layout. A valid build site has:
+Do not rename scanned files after scanning if you still want Structurize/MineColonies style-pack compatibility. For PlayerNpc-only datapacks, the file path becomes the layout id, for example `data/player_npc/builds/houses/oak_house.blueprint` becomes `player_npc:houses/oak_house`.
 
-- solid support under every footprint cell,
-- clear air from the floor through the layout height,
-- no blocked footprint cells except allowed existing home utility blocks when reusing a saved home.
+## Runtime Behavior
 
-This prevents NPCs from starting houses inside cluttered terrain and lets them prefer flat, buildable areas.
+- Blueprints are selected randomly from loaded layouts.
+- The NPC treats the saved home origin as the blueprint minimum corner.
+- The blueprint stores canonical target `BlockState`s, but build completion and placement use `PlayerNpcBuildMaterialUtil` to accept compatible equivalent material families.
+- Air blocks from the blueprint are kept, so the builder can clear safe conflicting blocks inside the scanned volume.
+- Block entity NBT is applied after placement with local scan coordinates rewritten to the world position.
+- Missing required mods are logged; missing mod blocks may load as air.
+
+Accepted material substitutions include:
+
+- Any plank/log variant for scanned planks/logs.
+- Any matching wooden door, trapdoor, fence, fence gate, stair, or slab for scanned wooden variants.
+- Any bed color for scanned beds, and any carpet color for scanned carpets.
+- Cobblestone-like blocks can be replaced by cobblestone, mossy cobblestone, cobbled deepslate, blackstone, sandstone, or red sandstone.
+- Loose fill blocks can be replaced by dirt, coarse/rooted dirt, grass block, sand, red sand, gravel, or mud.
+- Stone masonry blocks can be replaced by stone, smooth stone, stone bricks, bricks, polished stone families, deepslate brick families, tuff, calcite, and sandstone masonry variants.
+- Stone stairs/slabs can be replaced by another stone-family stair/slab while preserving shared orientation/shape properties.
+
+## Legacy JSON
+
+The old generated shelter JSON library and the hand-authored `player_npc:structure_v1` example were removed. The JSON parser remains in `PlayerNpcBuildLayoutLoader` only as a compatibility path for older local test packs; new builds should be `.blueprint`.
+
+## Inspector Status
+
+The inspector shows a `Build:` line from `PlayerNpcBuildStatusUtil`, including whether a builder has no selected build, has a missing layout, has a finished layout, or has required blocks still missing.
+
+This is not a full Structurize hologram/build-tool UI yet. It is server-authoritative progress/missing-block status attached to the existing PlayerNpc inspector.
