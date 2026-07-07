@@ -1,8 +1,10 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
+import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -19,7 +21,6 @@ import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.animal.Animal;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.AxeItem;
-import net.minecraft.world.item.BedItem;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -204,10 +205,10 @@ public class PickupNearbyItemGoal extends Goal {
         }
 
         closePickupWaitTicks = 0;
-        if (playerNpc.level() instanceof ServerLevel serverLevel && tickPickupPillar(serverLevel)) {
+        if (tickPathObstruction()) {
             return;
         }
-        if (tickPathObstruction()) {
+        if (playerNpc.level() instanceof ServerLevel serverLevel && tickPickupPillar(serverLevel)) {
             return;
         }
         if (playerNpc.level() instanceof ServerLevel serverLevel && tryActivePickupApproach(serverLevel)) {
@@ -834,6 +835,10 @@ public class PickupNearbyItemGoal extends Goal {
             return true;
         }
 
+        if (!InventoryUtils.hasItem(playerNpc, this::isPickupPillarBlock)) {
+            PlayerNpcCraftingUtil.tryConvertOneLogToPlanks(playerNpc.getInventory(), 0);
+        }
+
         ItemStack block = playerNpc.consumeInventoryItem(this::isPickupPillarBlock, 1)
                 .orElse(ItemStack.EMPTY);
         if (block.isEmpty()) {
@@ -845,25 +850,58 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private boolean isPickupPillarBlock(ItemStack stack) {
-        if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem blockItem)) {
+        if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem blockItem) || stack.is(ItemTags.LOGS)) {
             return false;
         }
-        if (stack.is(Items.DIRT) || stack.is(Items.COBBLESTONE)) {
-            return true;
-        }
-        if (stack.is(ItemTags.LOGS)
-                || stack.is(ItemTags.SAPLINGS)
-                || stack.is(Items.CRAFTING_TABLE)
-                || stack.is(Items.CHEST)
-                || stack.is(Items.FURNACE)
-                || stack.getItem() instanceof BedItem) {
-            return false;
-        }
-
         BlockState state = blockItem.getBlock().defaultBlockState();
-        return !state.is(Blocks.TORCH)
-                && !state.is(BlockTags.LEAVES)
-                && !state.getCollisionShape(playerNpc.level(), BlockPos.ZERO).isEmpty();
+        return !state.isAir()
+                && state.getFluidState().isEmpty()
+                && !state.canBeReplaced()
+                && (isDirtPillarBlock(stack)
+                        || stack.is(ItemTags.PLANKS)
+                        || isStonePillarBlock(state));
+    }
+
+    private static boolean isDirtPillarBlock(ItemStack stack) {
+        return stack.is(Items.DIRT)
+                || stack.is(Items.GRASS_BLOCK)
+                || stack.is(Items.COARSE_DIRT)
+                || stack.is(Items.ROOTED_DIRT)
+                || stack.is(Items.PODZOL);
+    }
+
+    private static boolean isStonePillarBlock(BlockState state) {
+        return state.is(BlockTags.BASE_STONE_OVERWORLD)
+                || state.is(BlockTags.BASE_STONE_NETHER)
+                || state.is(Blocks.COBBLESTONE)
+                || state.is(Blocks.MOSSY_COBBLESTONE)
+                || state.is(Blocks.DEEPSLATE)
+                || state.is(Blocks.COBBLED_DEEPSLATE)
+                || state.is(Blocks.ANDESITE)
+                || state.is(Blocks.DIORITE)
+                || state.is(Blocks.GRANITE)
+                || state.is(Blocks.TUFF)
+                || state.is(Blocks.CALCITE)
+                || state.is(Blocks.DRIPSTONE_BLOCK)
+                || state.is(Blocks.STONE_BRICKS)
+                || state.is(Blocks.MOSSY_STONE_BRICKS)
+                || state.is(Blocks.CRACKED_STONE_BRICKS)
+                || state.is(Blocks.CHISELED_STONE_BRICKS)
+                || state.is(Blocks.POLISHED_DEEPSLATE)
+                || state.is(Blocks.DEEPSLATE_BRICKS)
+                || state.is(Blocks.CRACKED_DEEPSLATE_BRICKS)
+                || state.is(Blocks.DEEPSLATE_TILES)
+                || state.is(Blocks.CRACKED_DEEPSLATE_TILES)
+                || state.is(Blocks.BLACKSTONE)
+                || state.is(Blocks.POLISHED_BLACKSTONE)
+                || state.is(Blocks.POLISHED_BLACKSTONE_BRICKS)
+                || state.is(Blocks.CRACKED_POLISHED_BLACKSTONE_BRICKS)
+                || state.is(Blocks.CHISELED_POLISHED_BLACKSTONE)
+                || state.is(Blocks.BASALT)
+                || state.is(Blocks.SMOOTH_BASALT)
+                || state.is(Blocks.END_STONE)
+                || state.is(Blocks.SANDSTONE)
+                || state.is(Blocks.RED_SANDSTONE);
     }
 
     private int countPickupPillarBlocks() {
@@ -875,7 +913,7 @@ public class PickupNearbyItemGoal extends Goal {
                 count += stack.getCount();
             }
         }
-        return count;
+        return count + PlayerNpcCraftingUtil.countLogs(playerNpc.getInventory()) * 4;
     }
 
     private void lookDownAt(BlockPos pos) {
@@ -921,6 +959,9 @@ public class PickupNearbyItemGoal extends Goal {
             return false;
         }
 
+        if (obstruction.equals(pathObstructionPos)) {
+            return tickPathObstruction();
+        }
         pathObstructionPos = obstruction;
         obstructionMineTicks = 0;
         playerNpc.getNavigation().stop();
@@ -974,7 +1015,7 @@ public class PickupNearbyItemGoal extends Goal {
         }
 
         BlockPos clearedPos = pathObstructionPos;
-        if (obstructionMineTicks >= requiredMineTicks && serverLevel.destroyBlock(clearedPos, true, playerNpc)) {
+        if (obstructionMineTicks >= requiredMineTicks && PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, clearedPos, state, playerNpc)) {
             playerNpc.hurtMainHandItem(1);
             failedPathTicks = 0;
             repathTicks = 0;
@@ -1065,6 +1106,7 @@ public class PickupNearbyItemGoal extends Goal {
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && (blocksMovement || replaceableClutter)
                 && state.getFluidState().isEmpty()
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(playerNpc, serverLevel, pos)
                 && !isProtectedHomeBlock(pos)
                 && serverLevel.getBlockEntity(pos) == null
                 && hasRequiredToolFor(state);

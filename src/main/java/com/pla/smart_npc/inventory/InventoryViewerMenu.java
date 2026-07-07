@@ -1,7 +1,7 @@
 package com.pla.smart_npc.inventory;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
-import com.pla.smart_npc.init.PlayerNpcModMenus;
+import com.pla.smart_npc.init.SmartNpcModMenus;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.Container;
 import net.minecraft.world.SimpleContainer;
@@ -56,7 +56,7 @@ public class InventoryViewerMenu extends AbstractContainerMenu {
     }
 
     private InventoryViewerMenu(int containerId, Inventory playerInventory, LivingEntity target, Container equipmentInventory, SimpleContainer npcInventory) {
-        super(PlayerNpcModMenus.INVENTORY_VIEWER.get(), containerId);
+        super(SmartNpcModMenus.INVENTORY_VIEWER.get(), containerId);
         this.target = target;
         checkContainerSize(equipmentInventory, EQUIPMENT_SIZE);
         checkContainerSize(npcInventory, CUSTOM_INVENTORY_SIZE);

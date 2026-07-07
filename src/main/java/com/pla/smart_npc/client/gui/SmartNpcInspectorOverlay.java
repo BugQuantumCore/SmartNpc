@@ -1,11 +1,12 @@
 package com.pla.smart_npc.client.gui;
 
-import com.pla.smart_npc.PlayerNpc;
+import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.network.PlayerNpcGoalTracePacket;
 import com.pla.smart_npc.network.PlayerNpcInspectatorModePacket;
 import com.pla.smart_npc.network.PlayerNpcInspectorPacket;
 import com.pla.smart_npc.network.PlayerNpcInspectorRequestPacket;
-import com.pla.smart_npc.network.PlayerNpcNetwork;
+import com.pla.smart_npc.network.SmartNpcNetwork;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.ChatFormatting;
 import net.minecraft.Util;
@@ -16,6 +17,8 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.Entity;
@@ -38,10 +41,10 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
-@Mod.EventBusSubscriber(modid = PlayerNpc.MODID, value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
-public class PlayerNpcInspectorOverlay {
+@Mod.EventBusSubscriber(modid = SmartNpc.MODID, value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
+public class SmartNpcInspectorOverlay {
     private static final int PANEL_WIDTH = 196;
-    private static final int PANEL_HEIGHT = 266;
+    private static final int PANEL_HEIGHT = 294;
     private static final int SLOT_SIZE = 18;
     private static final int TASK_DETAIL_MAX_LINES = 3;
     private static final int REFRESH_INTERVAL_TICKS = 10;
@@ -55,6 +58,8 @@ public class PlayerNpcInspectorOverlay {
     private static int inspectedEntityId = -1;
     private static List<ItemStack> snapshot = List.of();
     private static String snapshotBuildStatusText = "";
+    private static String snapshotPerformanceText = "";
+    private static boolean snapshotTraceEnabled;
     private static long lastRefreshGameTime = Long.MIN_VALUE;
     private static long lastDisplayCacheMillis = Long.MIN_VALUE;
     private static boolean inspectatorActive;
@@ -66,12 +71,15 @@ public class PlayerNpcInspectorOverlay {
     private static boolean previousInspectatorToggleDown;
     private static boolean previousCycleLeftDown;
     private static boolean previousCycleRightDown;
+    private static boolean previousTraceToggleDown;
     private static Component cachedTitle = Component.empty();
     private static Component cachedHealthText = Component.empty();
     private static int cachedHealthColor = 0xFF74E291;
     private static Component cachedAiText = Component.empty();
     private static String cachedInterestsText = "";
     private static String cachedBuildStatusText = "";
+    private static String cachedPerformanceText = "";
+    private static String cachedTraceText = "";
     private static Component cachedTaskLabel = Component.empty();
     private static int cachedTaskLabelWidth = 0;
     private static List<String> cachedTaskValueLines = List.of("");
@@ -80,11 +88,14 @@ public class PlayerNpcInspectorOverlay {
 
     public static void handlePacket(PlayerNpcInspectorPacket packet) {
         if (packet.entityId() < 0) {
+            disableTraceIfNeeded();
             stopInspectator(Minecraft.getInstance(), true);
         }
         inspectedEntityId = packet.entityId();
         snapshot = packet.items();
         snapshotBuildStatusText = packet.buildStatusText();
+        snapshotPerformanceText = packet.performanceText();
+        snapshotTraceEnabled = packet.traceEnabled();
         lastDisplayCacheMillis = Long.MIN_VALUE;
     }
 
@@ -115,7 +126,7 @@ public class PlayerNpcInspectorOverlay {
                 && entity.getId() == inspectatorEntityId;
     }
 
-    public static Vec3 getInspectatorCameraEyePosition(float partialTick) {
+    public static InspectatorCameraTransform getInspectatorCameraTransform(float partialTick) {
         Minecraft minecraft = Minecraft.getInstance();
         if (!inspectatorActive
                 || minecraft.level == null
@@ -127,7 +138,20 @@ public class PlayerNpcInspectorOverlay {
         if (!(entity instanceof PlayerNpcEntity playerNpc) || !playerNpc.isAlive()) {
             return null;
         }
-        return playerNpc.getEyePosition(partialTick);
+        return new InspectatorCameraTransform(
+                playerNpc.getEyePosition(partialTick),
+                playerNpc.getViewYRot(partialTick),
+                playerNpc.getViewXRot(partialTick)
+        );
+    }
+
+    public static boolean shouldSuppressInspectatorRotationPacket(Packet<?> packet) {
+        if (!inspectatorActive
+                || Minecraft.getInstance().options.getCameraType() != CameraType.FIRST_PERSON
+                || !(packet instanceof ServerboundMovePlayerPacket movePacket)) {
+            return false;
+        }
+        return movePacket.hasRotation() && !movePacket.hasPosition();
     }
 
     @SubscribeEvent
@@ -221,7 +245,7 @@ public class PlayerNpcInspectorOverlay {
         }
 
         lastRefreshGameTime = gameTime;
-        PlayerNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
+        SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
     }
 
     private static void refreshDisplayCache(Font font, PlayerNpcEntity playerNpc) {
@@ -255,6 +279,21 @@ public class PlayerNpcInspectorOverlay {
         cachedBuildStatusText = trimToWidth(
                 font,
                 Component.translatable("gui.player_npc.inspector.build", snapshotBuildStatusText).getString(),
+                PANEL_WIDTH - 16
+        );
+        cachedPerformanceText = trimToWidth(
+                font,
+                Component.translatable("gui.player_npc.inspector.performance", snapshotPerformanceText).getString(),
+                PANEL_WIDTH - 16
+        );
+        cachedTraceText = trimToWidth(
+                font,
+                Component.translatable(
+                        "gui.player_npc.inspector.trace",
+                        Component.translatable(snapshotTraceEnabled
+                                ? "gui.player_npc.inspector.trace_on"
+                                : "gui.player_npc.inspector.trace_off")
+                ).getString(),
                 PANEL_WIDTH - 16
         );
 
@@ -295,13 +334,15 @@ public class PlayerNpcInspectorOverlay {
         guiGraphics.drawString(font, cachedAiText, x + 8, y + 35, 0xFFB7C9E2, false);
         guiGraphics.drawString(font, cachedInterestsText, x + 8, y + 49, 0xFFB7C9E2, false);
         guiGraphics.drawString(font, cachedBuildStatusText, x + 8, y + 63, 0xFFB7C9E2, false);
+        guiGraphics.drawString(font, cachedPerformanceText, x + 8, y + 77, 0xFFB7C9E2, false);
+        guiGraphics.drawString(font, cachedTraceText, x + 8, y + 91, snapshotTraceEnabled ? 0xFF74E291 : 0xFFB7C9E2, false);
 
-        renderTaskDetail(guiGraphics, font, x + 8, y + 78);
+        renderTaskDetail(guiGraphics, font, x + 8, y + 106);
 
-        guiGraphics.drawString(font, cachedMainHandText, x + 8, y + 112, 0xFFD6E4FF, false);
+        guiGraphics.drawString(font, cachedMainHandText, x + 8, y + 140, 0xFFD6E4FF, false);
 
-        renderEquipment(guiGraphics, font, x + 8, y + 142);
-        renderInventory(guiGraphics, font, x + 8, y + 176);
+        renderEquipment(guiGraphics, font, x + 8, y + 170);
+        renderInventory(guiGraphics, font, x + 8, y + 204);
         guiGraphics.drawString(font, cachedInspectatorHint, x + 8, y + PANEL_HEIGHT - 15, 0xFF94A3B8, false);
     }
 
@@ -425,6 +466,7 @@ public class PlayerNpcInspectorOverlay {
             resetInspectatorToggle();
             previousCycleLeftDown = false;
             previousCycleRightDown = false;
+            previousTraceToggleDown = false;
             inspectatorZoomRepeatTicks = 0;
             return;
         }
@@ -439,12 +481,15 @@ public class PlayerNpcInspectorOverlay {
             resetInspectatorToggle();
             previousCycleLeftDown = false;
             previousCycleRightDown = false;
+            previousTraceToggleDown = false;
             inspectatorZoomRepeatTicks = 0;
             if (inspectatorActive) {
                 tickActiveInspectator(minecraft, playerNpc, false);
             }
             return;
         }
+
+        handleTraceToggleInput(minecraft, inspectedEntityId);
 
         boolean toggleDown = isInspectatorToggleDown(minecraft);
         if (toggleDown && !previousInspectatorToggleDown) {
@@ -471,11 +516,14 @@ public class PlayerNpcInspectorOverlay {
             previousCameraType = minecraft.options.getCameraType();
             previousCameraEntity = minecraft.getCameraEntity();
         }
+        if (inspectatorEntityId != playerNpc.getId()) {
+            snapshotTraceEnabled = false;
+        }
 
         inspectatorActive = true;
         inspectatorEntityId = playerNpc.getId();
         lastDisplayCacheMillis = Long.MIN_VALUE;
-        PlayerNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectatorModePacket(true, inspectatorEntityId));
+        SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectatorModePacket(true, inspectatorEntityId));
         if (startingFresh) {
             minecraft.options.setCameraType(CameraType.THIRD_PERSON_FRONT);
             inspectatorCameraDistance = INSPECTATOR_CAMERA_DISTANCE_DEFAULT;
@@ -507,9 +555,11 @@ public class PlayerNpcInspectorOverlay {
         boolean wasActive = inspectatorActive;
         inspectatorActive = false;
         inspectatorEntityId = -1;
+        snapshotTraceEnabled = false;
         resetInspectatorToggle();
         previousCycleLeftDown = false;
         previousCycleRightDown = false;
+        previousTraceToggleDown = false;
         inspectatorZoomRepeatTicks = 0;
         lastDisplayCacheMillis = Long.MIN_VALUE;
 
@@ -526,7 +576,7 @@ public class PlayerNpcInspectorOverlay {
         previousCameraEntity = null;
         previousCameraType = null;
         if (notifyServer && wasActive) {
-            PlayerNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectatorModePacket(false, -1));
+            SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectatorModePacket(false, -1));
         }
     }
 
@@ -557,6 +607,16 @@ public class PlayerNpcInspectorOverlay {
         previousCycleRightDown = rightDown;
         minecraft.options.keyLeft.setDown(false);
         minecraft.options.keyRight.setDown(false);
+    }
+
+    private static void handleTraceToggleInput(Minecraft minecraft, int entityId) {
+        boolean traceDown = isPhysicalKeyDown(minecraft, GLFW.GLFW_KEY_Z);
+        if (traceDown && !previousTraceToggleDown && entityId >= 0) {
+            snapshotTraceEnabled = !snapshotTraceEnabled;
+            lastDisplayCacheMillis = Long.MIN_VALUE;
+            SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcGoalTracePacket(entityId, snapshotTraceEnabled));
+        }
+        previousTraceToggleDown = traceDown;
     }
 
     private static void handleInspectatorZoomInput(Minecraft minecraft) {
@@ -620,9 +680,10 @@ public class PlayerNpcInspectorOverlay {
         PlayerNpcEntity nextNpc = nearby.get(nextIndex);
         inspectedEntityId = nextNpc.getId();
         snapshot = List.of();
+        snapshotTraceEnabled = false;
         lastRefreshGameTime = Long.MIN_VALUE;
         lastDisplayCacheMillis = Long.MIN_VALUE;
-        PlayerNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
+        SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
         startInspectator(minecraft, nextNpc);
     }
 
@@ -662,12 +723,12 @@ public class PlayerNpcInspectorOverlay {
     }
 
     private static ItemStack getHoveredItem(int panelX, int panelY, int mouseX, int mouseY) {
-        ItemStack equipment = getHoveredItemInGrid(panelX + 8, panelY + 94, 6, 1, mouseX, mouseY, 0);
+        ItemStack equipment = getHoveredItemInGrid(panelX + 8, panelY + 170, 6, 1, mouseX, mouseY, 0);
         if (!equipment.isEmpty()) {
             return equipment;
         }
 
-        return getHoveredItemInGrid(panelX + 8, panelY + 128, 9, 3, mouseX, mouseY, 6);
+        return getHoveredItemInGrid(panelX + 8, panelY + 204, 9, 3, mouseX, mouseY, 6);
     }
 
     private static ItemStack getHoveredItemInGrid(
@@ -698,19 +759,36 @@ public class PlayerNpcInspectorOverlay {
     }
 
     private static void clear() {
+        disableTraceIfNeeded();
         stopInspectator(Minecraft.getInstance(), true);
         inspectedEntityId = -1;
         snapshot = new ArrayList<>();
+        snapshotBuildStatusText = "";
+        snapshotPerformanceText = "";
+        snapshotTraceEnabled = false;
         lastRefreshGameTime = Long.MIN_VALUE;
         lastDisplayCacheMillis = Long.MIN_VALUE;
         cachedTitle = Component.empty();
         cachedHealthText = Component.empty();
         cachedHealthColor = 0xFF74E291;
         cachedAiText = Component.empty();
+        cachedInterestsText = "";
+        cachedBuildStatusText = "";
+        cachedPerformanceText = "";
+        cachedTraceText = "";
         cachedTaskLabel = Component.empty();
         cachedTaskLabelWidth = 0;
         cachedTaskValueLines = List.of("");
         cachedMainHandText = Component.empty();
         cachedInspectatorHint = "";
     }
+
+    private static void disableTraceIfNeeded() {
+        if (snapshotTraceEnabled && inspectedEntityId >= 0) {
+            SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcGoalTracePacket(inspectedEntityId, false));
+        }
+        snapshotTraceEnabled = false;
+    }
+
+    public record InspectatorCameraTransform(Vec3 eyePosition, float yRot, float xRot) {}
 }

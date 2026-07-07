@@ -82,9 +82,7 @@ public class BuildHouseGoal extends Goal {
         }
 
         Optional<PlayerNpcBuildLayout> layout = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc)
-                .flatMap(layoutId -> PlayerNpcBuildLayoutLoader.getLayouts().stream()
-                        .filter(candidate -> candidate.id().equals(layoutId))
-                        .findFirst());
+                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
         if (layout.isEmpty()) {
             return false;
         }
@@ -93,7 +91,6 @@ public class BuildHouseGoal extends Goal {
         PlayerNpcHomeUtil.HomeArea homeArea = existingHome.get();
         return layout.get().width() == homeArea.width()
                 && layout.get().depth() == homeArea.depth()
-                && checker.canBuildAt(serverLevel, layout.get(), homeArea.origin(), true)
                 && checker.hasUnfinishedPlacement(serverLevel, layout.get(), homeArea.origin())
                 && checker.hasMaterialForNextPlacement(serverLevel, layout.get(), homeArea.origin());
     }
@@ -259,13 +256,10 @@ public class BuildHouseGoal extends Goal {
         if (existingHome.isPresent()) {
             PlayerNpcHomeUtil.HomeArea homeArea = existingHome.get();
             Optional<PlayerNpcBuildLayout> homeLayout = PlayerNpcHomeUtil.getHomeLayoutId(this.playerNpc)
-                    .flatMap(layoutId -> PlayerNpcBuildLayoutLoader.getLayouts().stream()
-                            .filter(layout -> layout.id().equals(layoutId))
-                            .findFirst());
+                    .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
             if (homeLayout.isPresent()
                     && homeLayout.get().width() == homeArea.width()
                     && homeLayout.get().depth() == homeArea.depth()
-                    && this.canBuildAt(serverLevel, homeLayout.get(), homeArea.origin(), true)
                     && this.hasUnfinishedPlacement(serverLevel, homeLayout.get(), homeArea.origin())) {
                 return new BuildSelection(homeLayout.get(), homeArea.origin());
             }
@@ -728,6 +722,7 @@ public class BuildHouseGoal extends Goal {
         return !state.isAir()
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && state.getFluidState().isEmpty()
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
                 && serverLevel.getBlockEntity(pos) == null
                 && (state.canBeReplaced()
                 || state.is(BlockTags.MINEABLE_WITH_SHOVEL)

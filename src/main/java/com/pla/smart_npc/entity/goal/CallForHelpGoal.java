@@ -83,6 +83,11 @@ public class CallForHelpGoal extends Goal {
     }
 
     private boolean shouldAvoidInsteadOfFight(LivingEntity threat) {
+        if (this.playerNpc.shouldSmartNpcFleeFromTarget(threat)
+                || this.playerNpc.isSmartNpcCompatHighDangerThreat(threat)) {
+            return true;
+        }
+
         float healthRatio = this.playerNpc.getHealth() / this.playerNpc.getMaxHealth();
         return healthRatio < 0.65F || this.powerScore(threat) > this.powerScore(this.playerNpc) + 5.0D;
     }

@@ -1,6 +1,6 @@
 package com.pla.smart_npc.client.gui;
 
-import com.pla.smart_npc.PlayerNpc;
+import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.inventory.InventoryViewerMenu;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
@@ -10,7 +10,7 @@ import net.minecraft.world.entity.player.Inventory;
 import org.jetbrains.annotations.NotNull;
 
 public class InventoryViewerScreen extends AbstractContainerScreen<InventoryViewerMenu> {
-    private static final ResourceLocation ARMOR_EDITOR_TEXTURE = ResourceLocation.fromNamespaceAndPath(PlayerNpc.MODID , "textures/gui/armor.png");
+    private static final ResourceLocation ARMOR_EDITOR_TEXTURE = ResourceLocation.fromNamespaceAndPath(SmartNpc.MODID , "textures/gui/armor.png");
 
     public InventoryViewerScreen(InventoryViewerMenu menu, Inventory inventory, Component title) {
         super(menu, inventory, title);

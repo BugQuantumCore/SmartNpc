@@ -2,6 +2,7 @@ package com.pla.smart_npc.network;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcBuildStatusUtil;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
@@ -30,5 +31,9 @@ public final class PlayerNpcInspectorData {
 
     public static String createBuildStatusText(PlayerNpcEntity playerNpc) {
         return PlayerNpcBuildStatusUtil.describe(playerNpc);
+    }
+
+    public static String createPerformanceText() {
+        return PlayerNpcPerformanceMonitor.createInspectorText();
     }
 }

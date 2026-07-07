@@ -10,24 +10,29 @@ import net.minecraftforge.network.PacketDistributor;
 
 import java.util.function.Supplier;
 
-public class PlayerNpcInspectorRequestPacket {
-    private static final double MAX_REFRESH_DISTANCE_SQR = 64.0D * 64.0D;
+public class PlayerNpcGoalTracePacket {
+    private static final double MAX_TRACE_DISTANCE_SQR = 64.0D * 64.0D;
 
     private final int entityId;
+    private final boolean enabled;
 
-    public PlayerNpcInspectorRequestPacket(int entityId) {
+    public PlayerNpcGoalTracePacket(int entityId, boolean enabled) {
         this.entityId = entityId;
+        this.enabled = enabled;
     }
 
-    public static void encode(PlayerNpcInspectorRequestPacket packet, FriendlyByteBuf buffer) {
+    public static void encode(PlayerNpcGoalTracePacket packet, FriendlyByteBuf buffer) {
         buffer.writeVarInt(packet.entityId);
+        buffer.writeBoolean(packet.enabled);
     }
 
-    public static PlayerNpcInspectorRequestPacket decode(FriendlyByteBuf buffer) {
-        return new PlayerNpcInspectorRequestPacket(buffer.readVarInt());
+    public static PlayerNpcGoalTracePacket decode(FriendlyByteBuf buffer) {
+        int entityId = buffer.readVarInt();
+        boolean enabled = buffer.readBoolean();
+        return new PlayerNpcGoalTracePacket(entityId, enabled);
     }
 
-    public static void handle(PlayerNpcInspectorRequestPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
+    public static void handle(PlayerNpcGoalTracePacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
         NetworkEvent.Context context = contextSupplier.get();
         context.enqueueWork(() -> {
             ServerPlayer sender = context.getSender();
@@ -38,14 +43,12 @@ public class PlayerNpcInspectorRequestPacket {
             Entity entity = sender.level().getEntity(packet.entityId);
             if (!(entity instanceof PlayerNpcEntity playerNpc)
                     || !playerNpc.isAlive()
-                    || sender.distanceToSqr(playerNpc) > MAX_REFRESH_DISTANCE_SQR) {
-                SmartNpcNetwork.CHANNEL.send(
-                        PacketDistributor.PLAYER.with(() -> sender),
-                        PlayerNpcInspectorPacket.clear()
-                );
+                    || !canTrace(sender, playerNpc)) {
+                PlayerNpcGoalTraceLogger.stopTrace(sender, "invalid trace target");
                 return;
             }
 
+            PlayerNpcGoalTraceLogger.setTraceEnabled(sender, playerNpc, packet.enabled);
             SmartNpcNetwork.CHANNEL.send(
                     PacketDistributor.PLAYER.with(() -> sender),
                     new PlayerNpcInspectorPacket(
@@ -58,5 +61,14 @@ public class PlayerNpcInspectorRequestPacket {
             );
         });
         context.setPacketHandled(true);
+    }
+
+    private static boolean canTrace(ServerPlayer sender, PlayerNpcEntity playerNpc) {
+        if (sender.distanceToSqr(playerNpc) <= MAX_TRACE_DISTANCE_SQR) {
+            return true;
+        }
+
+        return PlayerNpcInspectatorModePacket.isInspectatorActive(sender)
+                && sender.getVehicle() == playerNpc;
     }
 }

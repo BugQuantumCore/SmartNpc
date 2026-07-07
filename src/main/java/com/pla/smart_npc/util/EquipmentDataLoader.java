@@ -5,7 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.pla.smart_npc.clazz.Difficulty;
-import com.pla.smart_npc.config.PlayerNpcConfig;
+import com.pla.smart_npc.config.SmartNpcConfig;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.packs.resources.ResourceManager;
@@ -70,7 +70,7 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
             JsonObject root = GsonHelper.convertToJsonObject(entry.getValue(), "equipment");
             String modId = fileId.getPath().replace(".json", "");
 
-            if (PlayerNpcConfig.isCompatWeaponBlacklisted(modId)) {
+            if (SmartNpcConfig.isCompatWeaponBlacklisted(modId)) {
                 continue;
             }
             if (!MINECRAFT.equals(modId) && !ModList.get().isLoaded(modId)) {
@@ -123,7 +123,7 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
         return itemName.contains(":") ? itemName : modId + ":" + itemName;
     }
 
-    private static boolean itemExists(String itemId) {
+    public static boolean itemExists(String itemId) {
         return getItem(itemId) != null;
     }
 
@@ -136,7 +136,7 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
         return ForgeRegistries.ITEMS.getValue(ResourceLocation.fromNamespaceAndPath(parts[0], parts[1]));
     }
 
-    private static String getItemId(ItemStack stack) {
+    public static String getItemId(ItemStack stack) {
         ResourceLocation key = ForgeRegistries.ITEMS.getKey(stack.getItem());
         return key == null ? "" : key.toString();
     }
@@ -208,7 +208,7 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
                 .or(() -> getRandomExistingItem(pool));
     }
 
-    private static Optional<String> getRandomExistingItem(List<String> itemIds) {
+    public static Optional<String> getRandomExistingItem(List<String> itemIds) {
         List<String> validItems = itemIds.stream()
                 .filter(EquipmentDataLoader::itemExists)
                 .toList();
@@ -220,17 +220,19 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
         return Optional.of(validItems.get(RANDOM.nextInt(validItems.size())));
     }
 
-    private static Optional<String> getGeneratedOffhandItem(ItemStack mainHandStack, boolean allowOffhandShield) {
-        Item mainHandItem = mainHandStack.getItem();
-        boolean canUseShield = mainHandItem instanceof SwordItem || mainHandItem instanceof AxeItem || mainHandItem instanceof TridentItem;
-        boolean canGenerateShield = canUseShield && allowOffhandShield && itemExists(SHIELD_ITEM_ID);
+    private static Optional<String> getGeneratedOffhandItem(ItemStack mainHandStack, Difficulty difficulty, boolean allowOffhandShield) {
+        String mainHandItemId = getItemId(mainHandStack);
+        Optional<String> compatOffhandItem = getCompatGeneratedOffhandItem(mainHandItemId, mainHandStack, difficulty, allowOffhandShield)
+                .filter(EquipmentDataLoader::itemExists);
+        if (compatOffhandItem.isPresent()) {
+            return compatOffhandItem;
+        }
+
+        boolean canGenerateShield = canUseShield(mainHandStack) && allowOffhandShield && itemExists(SHIELD_ITEM_ID);
 
         if (RANDOM.nextBoolean()) {
             if (canTwoHand(mainHandStack)) {
-                String mainHandItemId = getItemId(mainHandStack);
-                if (itemExists(mainHandItemId)) {
-                    return Optional.of(mainHandItemId);
-                }
+                return getDualWeaponOffhandItem(mainHandItemId, mainHandStack, difficulty);
             } else if (canGenerateShield) {
                 return Optional.of(SHIELD_ITEM_ID);
             }
@@ -238,14 +240,17 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
             if (canGenerateShield) {
                 return Optional.of(SHIELD_ITEM_ID);
             } else if (canTwoHand(mainHandStack)) {
-                String mainHandItemId = getItemId(mainHandStack);
-                if (itemExists(mainHandItemId)) {
-                    return Optional.of(mainHandItemId);
-                }
+                return getDualWeaponOffhandItem(mainHandItemId, mainHandStack, difficulty);
             }
         }
 
         return Optional.empty();
+    }
+
+    private static Optional<String> getDualWeaponOffhandItem(String mainHandItemId, ItemStack mainHandStack, Difficulty difficulty) {
+        return getCompatDualWeaponOffhandItem(mainHandItemId, mainHandStack, difficulty)
+                .filter(EquipmentDataLoader::itemExists)
+                .or(() -> itemExists(mainHandItemId) ? Optional.of(mainHandItemId) : Optional.empty());
     }
 
     private static Optional<String> getRandomOffhandPoolItem(List<String> pool, boolean allowOffhandShield) {
@@ -276,10 +281,39 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
         }
         int namespaceSeparator = itemId.indexOf(':');
         String path = namespaceSeparator >= 0 ? itemId.substring(namespaceSeparator + 1) : itemId;
-        return path.contains("shield");
+        return path.contains("shield") || isCompatShieldItem(itemId);
+    }
+
+    public static boolean canUseShield(ItemStack stack) {
+        return canUseVanillaShield(stack) || canUseCompatShield(stack);
+    }
+
+    private static boolean canUseVanillaShield(ItemStack stack) {
+        Item item = stack.getItem();
+        return item instanceof SwordItem || item instanceof AxeItem || item instanceof TridentItem;
+    }
+
+    public static boolean canUseCompatShield(ItemStack stack) {
+        return false;
     }
 
     public static boolean canTwoHand(ItemStack stack) {
+        return canUseCompatDualWeapon(stack);
+    }
+
+    public static boolean canUseCompatDualWeapon(ItemStack stack) {
+        return false;
+    }
+
+    public static Optional<String> getCompatGeneratedOffhandItem(String mainHandItemId, ItemStack mainHandStack, Difficulty difficulty, boolean allowOffhandShield) {
+        return Optional.empty();
+    }
+
+    public static Optional<String> getCompatDualWeaponOffhandItem(String mainHandItemId, ItemStack mainHandStack, Difficulty difficulty) {
+        return Optional.empty();
+    }
+
+    public static boolean isCompatShieldItem(String itemId) {
         return false;
     }
 
@@ -381,7 +415,7 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
 
             ItemStack itemStack = new ItemStack(item);
             if (slot.equals("MAINHAND")) {
-                generatedOffhandItem = getGeneratedOffhandItem(itemStack, allowOffhandShield).orElse(null);
+                generatedOffhandItem = getGeneratedOffhandItem(itemStack, difficulty, allowOffhandShield).orElse(null);
             }
             if (isArmorSlot(slot)) {
                 previousArmorItemId = itemId;

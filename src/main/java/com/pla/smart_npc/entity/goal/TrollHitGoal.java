@@ -161,6 +161,7 @@ public class TrollHitGoal extends Goal {
                 && !entity.isSpectator()
                 && !this.playerNpc.isAlliedTo(entity)
                 && !entity.isAlliedTo(this.playerNpc)
+                && !this.playerNpc.shouldSmartNpcAvoidTrollHitTarget(entity)
                 && this.isAllowedVictimType(entity)
                 && (!(entity instanceof Player player) || !player.isCreative());
     }
@@ -170,7 +171,10 @@ public class TrollHitGoal extends Goal {
                 || entity instanceof AbstractGolem
                 || entity instanceof AbstractVillager
                 || entity instanceof Player
-                || entity instanceof PlayerNpcEntity;
+                || entity instanceof PlayerNpcEntity
+                || this.playerNpc.isSmartNpcCompatMonsterTarget(entity)
+                || this.playerNpc.isSmartNpcCompatVillagerTarget(entity)
+                || this.playerNpc.isSmartNpcCompatPlayerLikeTarget(entity);
     }
 
     private Vec3 findFleePos() {

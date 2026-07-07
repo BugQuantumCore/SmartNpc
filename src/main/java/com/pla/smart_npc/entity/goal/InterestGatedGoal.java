@@ -19,6 +19,10 @@ public class InterestGatedGoal extends Goal {
         this.setFlags(delegate.getFlags());
     }
 
+    public Goal getDelegateGoal() {
+        return this.delegate;
+    }
+
     @Override
     public boolean canUse() {
         return this.playerNpc.hasAnyInterest(this.interests) && this.delegate.canUse();

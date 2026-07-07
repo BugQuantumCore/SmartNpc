@@ -196,12 +196,13 @@ public class CraftIronGearGoal extends Goal {
     }
 
     private ToolTier bestToolTier(ToolKind kind) {
-        return PlayerNpcGearUtil.bestToolTier(
+        ToolTier best = PlayerNpcGearUtil.bestToolTier(
                 this.playerNpc.getMainHandItem(),
                 this.playerNpc.getOffhandItem(),
                 this.playerNpc.getInventory(),
                 kind
         );
+        return best;
     }
 
     private boolean hasNearbyCraftingTable(ServerLevel serverLevel) {

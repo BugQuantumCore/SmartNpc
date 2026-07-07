@@ -18,6 +18,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
+import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.EnumSet;
 import java.util.Optional;
@@ -27,6 +28,7 @@ public class ReturnHomeGoal extends Goal {
     private static final double STOP_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double UTILITY_RETURN_DISTANCE_SQR = 48.0D * 48.0D;
     private static final int MAX_RETURN_TICKS = 20 * 20;
+    private static final int UPWARD_ESCAPE_REQUEST_TICKS = 20 * 8;
     private static final int HOME_WORK_AREA_MARGIN = 4;
 
     private final PlayerNpcEntity playerNpc;
@@ -162,7 +164,17 @@ public class ReturnHomeGoal extends Goal {
 
     private void moveHome() {
         if (this.homeCenter != null) {
-            this.playerNpc.getNavigation().moveTo(this.homeCenter.getX() + 0.5D, this.homeCenter.getY(), this.homeCenter.getZ() + 0.5D, this.speed);
+            Path path = this.playerNpc.getNavigation().createPath(this.homeCenter, 0);
+            if (path != null && path.canReach()) {
+                this.playerNpc.getNavigation().moveTo(path, this.speed);
+                return;
+            }
+
+            if (this.playerNpc.level() instanceof ServerLevel serverLevel
+                    && this.homeCenter.getY() > this.playerNpc.blockPosition().getY() + 2
+                    && !serverLevel.canSeeSky(this.playerNpc.blockPosition().above())) {
+                this.playerNpc.requestUpwardEscapeTo(this.homeCenter, UPWARD_ESCAPE_REQUEST_TICKS);
+            }
         }
     }
 

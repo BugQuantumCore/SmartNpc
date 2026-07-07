@@ -4,6 +4,7 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.clazz.FakePlayer;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
+import com.pla.smart_npc.entity.goal.AfkAtHomeGoal;
 import com.pla.smart_npc.entity.goal.BuildHouseGoal;
 import com.pla.smart_npc.entity.goal.BreakTargetObstructionGoal;
 import com.pla.smart_npc.entity.goal.BurnNearbyItemGoal;
@@ -52,11 +53,12 @@ import com.pla.smart_npc.entity.goal.ThrowEnderPearlGoal;
 import com.pla.smart_npc.entity.goal.TerraformBuildSiteGoal;
 import com.pla.smart_npc.entity.goal.TrollHitGoal;
 import com.pla.smart_npc.entity.goal.UtilityCraftingGoal;
+import com.pla.smart_npc.entity.goal.UseFlintAndSteelGoal;
 import com.pla.smart_npc.entity.goal.UseLavaBucketGoal;
 import com.pla.smart_npc.entity.goal.UseWaterBucketGoal;
 import com.pla.smart_npc.entity.goal.UseSpyglassGoal;
 import com.pla.smart_npc.entity.goal.WaterEnderPearlEscapeGoal;
-import com.pla.smart_npc.init.PlayerNpcModEntities;
+import com.pla.smart_npc.init.SmartNpcModEntities;
 import com.pla.smart_npc.util.*;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -83,16 +85,10 @@ import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.*;
 import net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal;
-import net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal;
 import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
 import net.minecraft.world.entity.animal.Animal;
-import net.minecraft.world.entity.animal.IronGolem;
 import net.minecraft.world.entity.item.ItemEntity;
-import net.minecraft.world.entity.monster.AbstractIllager;
-import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.monster.RangedAttackMob;
-import net.minecraft.world.entity.npc.Villager;
-import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.entity.projectile.ProjectileUtil;
 import net.minecraft.world.item.*;
@@ -128,6 +124,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int[] RAW_LOG_RESERVE_OPTIONS = {12, 16, 20, 24, 32};
     private static final int[] WOOD_SUPPLY_TARGET_OPTIONS = {12, 16, 20, 24, 32};
     private static final int[] COBBLESTONE_SUPPLY_TARGET_OPTIONS = {12, 16, 20, 24, 32};
+    private static final int STARTUP_IDLE_WAKE_TICKS = 20 * 4;
+    private static final int TASKLESS_IDLE_WAKE_TICKS = 20;
     public static final String AI_IDLE = "ai.player_npc.idle";
     private static final List<ItemLike> REGULAR_FOODS = List.of(
             Items.COOKED_BEEF,
@@ -175,6 +173,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private final SimpleContainer inventory = new SimpleContainer(27);
     private int gapCooldown = 0;
     private int bucketCooldown = 0;
+    private int flintAndSteelCooldown = 0;
     private int enderPearlCooldown = 0;
     private int swapToBowCooldown = 0;
     private int helpAlertCooldown = 0;
@@ -217,18 +216,21 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private boolean useBow = true;
     @Nullable
     private BlockPos ownedChestPos;
+    @Nullable
+    private BlockPos upwardEscapeTarget;
+    private int upwardEscapeRequestTicks = 0;
     private double placeBlockToParryChance;
     private int placeBlockParryCooldown = 0;
     private int stunEscapeCooldown = 0;
     private int playingIdleCooldown = new Random().nextInt(600, 1200);
     private int tasklessIdleTicks = 0;
+    private int startupIdleWakeTicks = STARTUP_IDLE_WAKE_TICKS;
     private int staleTargetTicks = 0;
     private int staleTargetEntityId = -1;
     private int lastCombatProgressTick = 0;
     private int animalLootPriorityTicks = 0;
     @Nullable
     private BlockPos animalLootPriorityPos;
-    private static final String EPICFIGHT_PLAYER_NPC_MODID = "epicfight_player_npc";
 
     public int getPlayingIdleCooldown() {
         return playingIdleCooldown;
@@ -264,6 +266,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public int getBucketCooldown() {
         return bucketCooldown;
+    }
+
+    public int getFlintAndSteelCooldown() {
+        return flintAndSteelCooldown;
     }
 
     public int getEnderPearlCooldown() {
@@ -390,6 +396,37 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return shieldGuardCooldown;
     }
 
+    public int getStunEscapeCooldown() {
+        return stunEscapeCooldown;
+    }
+
+    public void setStunEscapeCooldown(int stunEscapeCooldown) {
+        this.stunEscapeCooldown = stunEscapeCooldown;
+    }
+
+
+    @Nullable
+    public BlockPos getUpwardEscapeTarget() {
+        return this.upwardEscapeRequestTicks > 0 && this.upwardEscapeTarget != null
+                ? this.upwardEscapeTarget
+                : null;
+    }
+
+    public void requestUpwardEscapeTo(@Nullable BlockPos target, int ticks) {
+        if (target == null || ticks <= 0) {
+            return;
+        }
+
+        this.upwardEscapeTarget = target.immutable();
+        this.upwardEscapeRequestTicks = Math.max(this.upwardEscapeRequestTicks, normalizeCooldown(ticks));
+        this.holeEscapeCooldown = 0;
+    }
+
+    public void clearUpwardEscapeTarget() {
+        this.upwardEscapeTarget = null;
+        this.upwardEscapeRequestTicks = 0;
+    }
+
     @Nullable
     public BlockPos getOwnedChestPos() {
         return this.ownedChestPos;
@@ -458,6 +495,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public void resetBucketCooldown() {this.bucketCooldown = 0; }
+
+    public void setFlintAndSteelCooldown() {
+        this.flintAndSteelCooldown = random.nextInt(140, 260);
+    }
 
     public void setEnderPearlCooldown() {
         this.enderPearlCooldown = random.nextInt(100, 300);
@@ -757,7 +798,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public PlayerNpcEntity(PlayMessages.SpawnEntity spawnentity, Level level) {
-        this(PlayerNpcModEntities.PLAYER_NPC.get(), level);
+        this(SmartNpcModEntities.PLAYER_NPC.get(), level);
     }
 
     public ItemStack getMainWeaponItem() {
@@ -770,6 +811,25 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (!this.mainWeaponItem.isEmpty()) {
             this.mainWeaponDisarmed = false;
         }
+    }
+
+    private void materializeCachedMainWeaponAfterLoad() {
+        if (this.mainWeaponItem.isEmpty() || !this.getMainHandItem().isEmpty()) {
+            return;
+        }
+
+        ItemStack weapon = this.mainWeaponItem.copy();
+        weapon.setCount(1);
+        if (InventoryUtils.addItem(this.inventory, weapon)) {
+            this.inventory.setChanged();
+            this.mainWeaponItem = ItemStack.EMPTY;
+            this.mainWeaponDisarmed = false;
+            return;
+        }
+
+        this.setItemSlot(EquipmentSlot.MAINHAND, weapon.copy());
+        this.mainWeaponItem = weapon.copy();
+        this.mainWeaponDisarmed = false;
     }
 
     public ItemStack getOffWeaponItem() { return offWeaponItem; }
@@ -819,6 +879,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         tag.put("Inventory", this.inventory.createTag());
         tag.putInt("GapCooldown", this.gapCooldown);
         tag.putInt("BucketCooldown", this.bucketCooldown);
+        tag.putInt("FlintAndSteelCooldown", this.flintAndSteelCooldown);
         tag.putInt("EnderPearlCooldown", this.enderPearlCooldown);
         tag.putInt("SwapToBowCooldown", this.swapToBowCooldown);
         tag.putInt("HelpAlertCooldown", this.helpAlertCooldown);
@@ -885,6 +946,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
         this.gapCooldown = tag.getInt("GapCooldown");
         this.bucketCooldown = tag.getInt("BucketCooldown");
+        this.flintAndSteelCooldown = tag.getInt("FlintAndSteelCooldown");
         this.enderPearlCooldown = tag.getInt("EnderPearlCooldown");
         this.swapToBowCooldown = tag.getInt("SwapToBowCooldown");
         this.helpAlertCooldown = tag.getInt("HelpAlertCooldown");
@@ -959,6 +1021,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
         PlayerNpcHomeUtil.readHomeFromTag(this, tag);
         this.mainWeaponDisarmed = tag.getBoolean("MainWeaponDisarmed");
+        this.materializeCachedMainWeaponAfterLoad();
     }
 
     @Override
@@ -1018,6 +1081,62 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return NetworkHooks.getEntitySpawningPacket(this);
     }
 
+    public boolean isSmartNpcCompatPlayerLikeTarget(LivingEntity target) {
+        return false;
+    }
+
+    public boolean isSmartNpcCompatMonsterTarget(LivingEntity target) {
+        return false;
+    }
+
+    public boolean isSmartNpcCompatVillagerTarget(LivingEntity target) {
+        return false;
+    }
+
+    public boolean isSmartNpcCompatAnimalTarget(LivingEntity target) {
+        return false;
+    }
+
+    public boolean isSmartNpcCompatHighDangerThreat(LivingEntity target) {
+        return false;
+    }
+
+    public boolean shouldSmartNpcAvoidTrollHitTarget(LivingEntity target) {
+        return target != null && this.isSmartNpcCompatHighDangerThreat(target);
+    }
+
+    public float getSmartNpcTargetAttackChance(LivingEntity target, float baseChance) {
+        float chance = Math.max(0.0F, Math.min(1.0F, baseChance));
+        if (target != null && this.isSmartNpcCompatHighDangerThreat(target)) {
+            chance = Math.min(chance, 0.15F);
+        }
+        return chance;
+    }
+
+    public float getSmartNpcFleeHealthRatio(LivingEntity threat, float baseHealthRatio) {
+        float ratio = Math.max(0.0F, Math.min(1.0F, baseHealthRatio));
+        if (threat != null && this.isSmartNpcCompatHighDangerThreat(threat)) {
+            ratio = Math.max(ratio, 0.85F);
+        }
+        return ratio;
+    }
+
+    public boolean shouldSmartNpcAttackTarget(LivingEntity target) {
+        if (target == null || !target.isAlive()) {
+            return false;
+        }
+        if (this.shouldSmartNpcFleeFromTarget(target)) {
+            return false;
+        }
+        return this.getRandom().nextFloat() <= this.getSmartNpcTargetAttackChance(target, 1.0F);
+    }
+
+    public boolean shouldSmartNpcFleeFromTarget(LivingEntity threat) {
+        return threat != null
+                && threat.isAlive()
+                && this.getHealth() / this.getMaxHealth() <= this.getSmartNpcFleeHealthRatio(threat, 0.0F);
+    }
+
     protected void registerGoals() {
         this.goalSelector.addGoal(-2, new RecoverWeaponInCombatGoal(this, 1.0D, 10.0D));
         this.goalSelector.addGoal(-1, new EscapeWaterCurrentGoal(this));
@@ -1046,9 +1165,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, this.gated(new ManageHomeBaseGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new CheckHomeSuppliesGoal(this));
-        this.goalSelector.addGoal(6, new GatherMaterialsGoal(this, 1.0D));
-        this.goalSelector.addGoal(6, new DigDownForStoneGoal(this, 1.0D));
+        this.goalSelector.addGoal(5, new GatherMaterialsGoal(this, 1.0D));
+        this.goalSelector.addGoal(6, new AfkAtHomeGoal(this, 1.0D));
         this.goalSelector.addGoal(6, new ExploreBiomeForLogsGoal(this, 1.0D));
+        this.goalSelector.addGoal(6, new DigDownForStoneGoal(this, 1.0D));
         this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, new CraftIronGearGoal(this));
         this.goalSelector.addGoal(6, new CookFoodGoal(this));
@@ -1071,7 +1191,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(8, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS, PlayerNpcInterest.EXPLORING));
         this.goalSelector.addGoal(8, this.gated(new ScaredHideGoal(this), PlayerNpcInterest.CAUTIOUS));
         this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
-        if (!ModList.get().isLoaded(EPICFIGHT_PLAYER_NPC_MODID)) {
+            if (!ModList.get().isLoaded("epicfight_smart_npc")) {
             this.registerVanillaCombatReplacementGoals();
         }
         ((GroundPathNavigation) this.getNavigation()).setCanOpenDoors(true);
@@ -1093,6 +1213,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(2, new PlayerNpcRangedBowAttackGoal(this, 1.0D, 20, 18.0F));
         this.goalSelector.addGoal(3, new CombatFishingRodGoal(this));
         this.goalSelector.addGoal(3, new ThrowEnderPearlGoal(this));
+        this.goalSelector.addGoal(4, new UseFlintAndSteelGoal(this));
         this.goalSelector.addGoal(4, new UseLavaBucketGoal(this));
         this.goalSelector.addGoal(8, new FillWaterBucketGoal(this, 1.0D));
     }
@@ -1289,6 +1410,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || "ai.player_npc.gathering_materials".equals(state)
                 || "ai.player_npc.exploring_cave".equals(state)
                 || "ai.player_npc.escaping_hole".equals(state)
+                || "ai.player_npc.pillaring_up".equals(state)
                 || "ai.player_npc.escaping_water_current".equals(state)
                 || "ai.player_npc.breaking_target_obstruction".equals(state)
                 || "ai.player_npc.managing_home".equals(state)
@@ -1573,14 +1695,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         int originalCount = remaining.getCount();
 
         for (int i = 0; i < inventory.getContainerSize() && !remaining.isEmpty(); i++) {
-            if (remaining.isEmpty()) break;
             ItemStack slotStack = this.inventory.getItem(i);
 
-            if (slotStack.isEmpty()) {
-                this.inventory.setItem(i, remaining);
-                remaining = ItemStack.EMPTY;
-                break;
-            } else if (ItemStack.isSameItemSameTags(slotStack, remaining) &&
+            if (!slotStack.isEmpty()
+                    && ItemStack.isSameItemSameTags(slotStack, remaining) &&
                     slotStack.getCount() < slotStack.getMaxStackSize()) {
                 int transferable = Math.min(
                         remaining.getCount(),
@@ -1589,6 +1707,18 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 slotStack.grow(transferable);
                 remaining.shrink(transferable);
             }
+        }
+
+        for (int i = 0; i < inventory.getContainerSize() && !remaining.isEmpty(); i++) {
+            ItemStack slotStack = this.inventory.getItem(i);
+            if (!slotStack.isEmpty()) {
+                continue;
+            }
+
+            ItemStack inserted = remaining.copy();
+            inserted.setCount(Math.min(remaining.getCount(), remaining.getMaxStackSize()));
+            this.inventory.setItem(i, inserted);
+            remaining.shrink(inserted.getCount());
         }
 
         if (remaining.getCount() == originalCount) {
@@ -1625,6 +1755,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (!(this.level() instanceof ServerLevel)) return;
 
         this.tickAiCooldowns();
+        this.clearStaleHealingState();
+        this.tickStartupIdleWake();
         this.cleanupStaleCombatState();
         this.tickTasklessActivityWatchdog();
 
@@ -1640,6 +1772,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private void tickAiCooldowns() {
         this.gapCooldown = tickCooldown(this.gapCooldown);
         this.bucketCooldown = tickCooldown(this.bucketCooldown);
+        this.flintAndSteelCooldown = tickCooldown(this.flintAndSteelCooldown);
         this.enderPearlCooldown = tickCooldown(this.enderPearlCooldown);
         this.swapToBowCooldown = tickCooldown(this.swapToBowCooldown);
         this.helpAlertCooldown = tickCooldown(this.helpAlertCooldown);
@@ -1678,10 +1811,60 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.placeBlockParryCooldown = tickCooldown(this.placeBlockParryCooldown);
         this.stunEscapeCooldown = tickCooldown(this.stunEscapeCooldown);
         this.playingIdleCooldown = tickCooldown(this.playingIdleCooldown);
+        this.upwardEscapeRequestTicks = tickCooldown(this.upwardEscapeRequestTicks);
+        if (this.upwardEscapeRequestTicks <= 0) {
+            this.upwardEscapeTarget = null;
+        }
     }
 
     private static int tickCooldown(int cooldown) {
         return cooldown > 0 ? cooldown - 1 : 0;
+    }
+
+    private void clearStaleHealingState() {
+        if (!this.healing) {
+            return;
+        }
+
+        boolean healingGoalRunning = this.goalSelector.getRunningGoals()
+                .map(WrappedGoal::getGoal)
+                .anyMatch(EatHealingFoodGoal.class::isInstance);
+        if (healingGoalRunning
+                || ("ai.player_npc.eating".equals(this.getCurrentAiState())
+                && this.isUsingItem()
+                && this.getMainHandItem().isEdible())) {
+            return;
+        }
+
+        this.healing = false;
+        if (AI_IDLE.equals(this.getCurrentAiState())) {
+            this.wakeUpIdleWork();
+        }
+    }
+
+    private void tickStartupIdleWake() {
+        if (this.startupIdleWakeTicks <= 0) {
+            return;
+        }
+
+        this.startupIdleWakeTicks--;
+        if (!this.isAlive()
+                || this.isNoAi()
+                || this.isPassenger()
+                || this.isHealing()
+                || this.getTarget() != null
+                || this.isSleeping()
+                || this.hasRunningAiGoals()) {
+            return;
+        }
+
+        String state = this.getCurrentAiState();
+        if (!AI_IDLE.equals(state) && !"ai.player_npc.looking_for_work".equals(state)) {
+            return;
+        }
+
+        this.wakeUpIdleWork();
+        this.clearStaleIdleNavigation();
     }
 
     private void tickTasklessActivityWatchdog() {
@@ -1702,12 +1885,45 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return;
         }
 
+        if ("ai.player_npc.looking_for_work".equals(state) && !this.hasRunningAiGoals()) {
+            this.setCurrentAiState(AI_IDLE);
+        }
+
         this.tasklessIdleTicks++;
-        if (this.tasklessIdleTicks >= 20) {
-            this.wakeUpIdleWork();
-            if (this.tasklessIdleTicks > 80) {
-                this.tasklessIdleTicks = 20;
+        if (this.tasklessIdleTicks >= TASKLESS_IDLE_WAKE_TICKS) {
+            if (!this.hasActiveIdleWorkCooldown()) {
+                this.wakeUpIdleWork();
             }
+            if (!this.hasRunningAiGoals()) {
+                this.clearStaleIdleNavigation();
+            }
+            if (this.tasklessIdleTicks > TASKLESS_IDLE_WAKE_TICKS * 4) {
+                this.tasklessIdleTicks = TASKLESS_IDLE_WAKE_TICKS;
+            }
+        }
+    }
+
+    private boolean hasActiveIdleWorkCooldown() {
+        return this.buildHouseCooldown > 0
+                || this.craftGearCooldown > 0
+                || this.manageHomeCooldown > 0
+                || this.returnHomeCooldown > 0
+                || this.craftCooldown > 0
+                || this.farmCooldown > 0
+                || this.gatherCooldown > 0
+                || this.biomeExploreCooldown > 0
+                || this.oreMiningCooldown > 0
+                || this.saplingPlantCooldown > 0;
+    }
+
+    private boolean hasRunningAiGoals() {
+        return this.goalSelector.getRunningGoals().findAny().isPresent()
+                || this.targetSelector.getRunningGoals().findAny().isPresent();
+    }
+
+    private void clearStaleIdleNavigation() {
+        if (this.getNavigation().isDone() || this.getNavigation().isStuck()) {
+            this.getNavigation().stop();
         }
     }
 

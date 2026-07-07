@@ -396,6 +396,45 @@ public final class PlayerNpcCraftingUtil {
         return tryCraft(serverLevel, inventory, Items.TORCH, false);
     }
 
+    public static boolean canCraftFlintAndSteel(SimpleContainer inventory) {
+        SimpleContainer copy = copyContainer(inventory);
+        return countItem(copy, stack -> stack.is(Items.FLINT)) > 0
+                && countItem(copy, stack -> stack.is(Items.IRON_INGOT)) > 0
+                && consumeItem(copy, stack -> stack.is(Items.FLINT), 1)
+                && consumeItem(copy, stack -> stack.is(Items.IRON_INGOT), 1)
+                && InventoryUtils.addItem(copy, new ItemStack(Items.FLINT_AND_STEEL));
+    }
+
+    public static boolean tryCraftFlintAndSteel(SimpleContainer inventory) {
+        if (!canCraftFlintAndSteel(inventory)
+                || !consumeItem(inventory, stack -> stack.is(Items.FLINT), 1)
+                || !consumeItem(inventory, stack -> stack.is(Items.IRON_INGOT), 1)) {
+            return false;
+        }
+        return InventoryUtils.addItem(inventory, new ItemStack(Items.FLINT_AND_STEEL));
+    }
+
+    public static boolean canCraftArrows(SimpleContainer inventory, int rawLogReserve) {
+        SimpleContainer copy = copyContainer(inventory);
+        return countItem(copy, stack -> stack.is(Items.FLINT)) > 0
+                && countItem(copy, stack -> stack.is(Items.FEATHER)) > 0
+                && canProvidePlanksAndSticks(copy, 0, 1, rawLogReserve)
+                && tryConsumePlanksAndSticks(copy, 0, 1, rawLogReserve)
+                && consumeItem(copy, stack -> stack.is(Items.FLINT), 1)
+                && consumeItem(copy, stack -> stack.is(Items.FEATHER), 1)
+                && InventoryUtils.addItem(copy, new ItemStack(Items.ARROW, 4));
+    }
+
+    public static boolean tryCraftArrows(SimpleContainer inventory, int rawLogReserve) {
+        if (!canCraftArrows(inventory, rawLogReserve)
+                || !tryConsumePlanksAndSticks(inventory, 0, 1, rawLogReserve)
+                || !consumeItem(inventory, stack -> stack.is(Items.FLINT), 1)
+                || !consumeItem(inventory, stack -> stack.is(Items.FEATHER), 1)) {
+            return false;
+        }
+        return InventoryUtils.addItem(inventory, new ItemStack(Items.ARROW, 4));
+    }
+
     public static boolean canCraftFences(SimpleContainer inventory) {
         return canCraftFences(inventory, 0);
     }

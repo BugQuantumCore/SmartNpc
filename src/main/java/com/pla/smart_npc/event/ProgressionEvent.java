@@ -1,6 +1,6 @@
 package com.pla.smart_npc.event;
 
-import com.pla.smart_npc.PlayerNpc;
+import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.util.ProgressionUtil;
 import net.minecraft.server.level.ServerLevel;
@@ -14,7 +14,7 @@ import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-@Mod.EventBusSubscriber(modid = PlayerNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
+@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class ProgressionEvent {
     private ProgressionEvent() {
     }

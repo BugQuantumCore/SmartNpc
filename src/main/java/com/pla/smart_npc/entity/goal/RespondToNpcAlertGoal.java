@@ -94,6 +94,14 @@ public class RespondToNpcAlertGoal extends Goal {
     }
 
     private boolean shouldAttack(LivingEntity threat) {
+        if (this.playerNpc.shouldSmartNpcFleeFromTarget(threat)) {
+            return false;
+        }
+        if (this.playerNpc.isSmartNpcCompatHighDangerThreat(threat)
+                && !this.playerNpc.shouldSmartNpcAttackTarget(threat)) {
+            return false;
+        }
+
         float healthRatio = this.playerNpc.getHealth() / this.playerNpc.getMaxHealth();
         double myPower = this.powerScore(this.playerNpc);
         double threatPower = this.powerScore(threat);

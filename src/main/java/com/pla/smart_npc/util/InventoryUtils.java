@@ -47,6 +47,7 @@ public class InventoryUtils {
         }
 
         ItemStack remaining = stack.copy();
+        boolean changed = false;
         for (int i = 0; i < inventory.getContainerSize() && !remaining.isEmpty(); i++) {
             ItemStack slotStack = inventory.getItem(i);
             if (slotStack.isEmpty()
@@ -58,6 +59,7 @@ public class InventoryUtils {
             int transferable = Math.min(remaining.getCount(), slotStack.getMaxStackSize() - slotStack.getCount());
             slotStack.grow(transferable);
             remaining.shrink(transferable);
+            changed = true;
         }
 
         for (int i = 0; i < inventory.getContainerSize() && !remaining.isEmpty(); i++) {
@@ -69,8 +71,12 @@ public class InventoryUtils {
             inserted.setCount(Math.min(remaining.getCount(), remaining.getMaxStackSize()));
             inventory.setItem(i, inserted);
             remaining.shrink(inserted.getCount());
+            changed = true;
         }
 
+        if (changed) {
+            inventory.setChanged();
+        }
         return remaining.isEmpty();
     }
 
@@ -180,6 +186,7 @@ public class InventoryUtils {
                 || stack.is(Items.BUCKET)
                 || stack.is(Items.WATER_BUCKET)
                 || stack.is(Items.LAVA_BUCKET)
+                || stack.is(Items.FLINT_AND_STEEL)
                 || isHealingFoodStack(stack)
                 || isPlaceableBlockStack(stack)
                 || isUtilityMaterialStack(stack)
@@ -304,6 +311,7 @@ public class InventoryUtils {
                 || stack.is(Items.RAW_GOLD)
                 || stack.is(Items.DIAMOND)
                 || stack.is(Items.COAL)
+                || stack.is(Items.FLINT)
                 || stack.is(Items.REDSTONE)
                 || stack.is(Items.LAPIS_LAZULI)
                 || stack.is(Items.WHEAT)

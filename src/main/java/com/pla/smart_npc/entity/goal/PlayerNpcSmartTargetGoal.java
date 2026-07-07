@@ -130,12 +130,10 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
                 && !candidate.isSpectator()
                 && !this.playerNpc.isAlliedTo(candidate)
                 && !candidate.isAlliedTo(this.playerNpc)
-                && (candidate instanceof Player
-                || candidate instanceof PlayerNpcEntity
-                || candidate instanceof Monster
-                || candidate instanceof AbstractIllager
-                || candidate instanceof Villager
-                || candidate instanceof Animal);
+                && (this.isPlayerLikeTarget(candidate)
+                || this.isMonsterTarget(candidate)
+                || this.isVillagerTarget(candidate)
+                || this.isAnimalTarget(candidate));
     }
 
     private double scoreTarget(LivingEntity candidate) {
@@ -143,29 +141,37 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
         double distancePenalty = this.playerNpc.distanceTo(candidate) * 0.35D;
         double score = this.playerNpc.getRandom().nextDouble() * 3.0D - distancePenalty;
 
-        if (candidate instanceof Player || candidate instanceof PlayerNpcEntity) {
+        if (this.isPlayerLikeTarget(candidate)) {
             if (!this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_PLAYERS)) {
                 return 0.0D;
             }
             if (this.isClearlyOutmatched(candidate)) {
                 return 0.0D;
             }
-            if (this.playerNpc.getRandom().nextFloat() > RARE_PLAYER_ATTACK_CHANCE) {
+            if (!this.passesAttackChance(candidate, RARE_PLAYER_ATTACK_CHANCE)) {
                 return 0.0D;
             }
             score += 15.0D;
             if (healthRatio < HEALTHY_RATIO) {
                 score -= 6.0D;
             }
-        } else if (candidate instanceof Monster || candidate instanceof AbstractIllager) {
-            if (!this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_MONSTERS)) {
+        } else if (this.isMonsterTarget(candidate)) {
+            boolean highDanger = this.playerNpc.isSmartNpcCompatHighDangerThreat(candidate);
+            float fleeRatio = this.playerNpc.getSmartNpcFleeHealthRatio(candidate, (float) HEALTHY_RATIO);
+            if (!this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_MONSTERS) && (!highDanger || healthRatio > fleeRatio)) {
                 return 0.0D;
             }
-            if (healthRatio < 0.45D && this.powerScore(candidate) > this.powerScore(this.playerNpc)) {
+            if (highDanger && healthRatio <= fleeRatio) {
+                score += 20.0D;
+            } else if (!this.passesAttackChance(candidate, highDanger ? 0.18F : 1.0F)) {
+                return 0.0D;
+            } else {
+                score += highDanger ? 8.0D : 17.0D;
+            }
+            if (!highDanger && healthRatio < 0.45D && this.powerScore(candidate) > this.powerScore(this.playerNpc)) {
                 return 0.0D;
             }
-            score += 17.0D;
-        } else if (candidate instanceof Animal) {
+        } else if (this.isAnimalTarget(candidate)) {
             if (!this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_ANIMALS)) {
                 return 0.0D;
             }
@@ -183,17 +189,44 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
                 return 0.0D;
             }
             score += 17.0D;
-        } else if (candidate instanceof Villager) {
+        } else if (this.isVillagerTarget(candidate)) {
             if (!this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_VILLAGERS)) {
                 return 0.0D;
             }
-            if (this.playerNpc.getRandom().nextFloat() > RARE_VILLAGER_ATTACK_CHANCE) {
+            if (!this.passesAttackChance(candidate, RARE_VILLAGER_ATTACK_CHANCE)) {
                 return 0.0D;
             }
             score += 3.0D;
         }
 
         return Math.max(0.0D, score);
+    }
+
+    private boolean isPlayerLikeTarget(LivingEntity candidate) {
+        return candidate instanceof Player
+                || candidate instanceof PlayerNpcEntity
+                || this.playerNpc.isSmartNpcCompatPlayerLikeTarget(candidate);
+    }
+
+    private boolean isMonsterTarget(LivingEntity candidate) {
+        return candidate instanceof Monster
+                || candidate instanceof AbstractIllager
+                || this.playerNpc.isSmartNpcCompatMonsterTarget(candidate)
+                || this.playerNpc.isSmartNpcCompatHighDangerThreat(candidate);
+    }
+
+    private boolean isVillagerTarget(LivingEntity candidate) {
+        return candidate instanceof Villager
+                || this.playerNpc.isSmartNpcCompatVillagerTarget(candidate);
+    }
+
+    private boolean isAnimalTarget(LivingEntity candidate) {
+        return candidate instanceof Animal
+                || this.playerNpc.isSmartNpcCompatAnimalTarget(candidate);
+    }
+
+    private boolean passesAttackChance(LivingEntity candidate, float baseChance) {
+        return this.playerNpc.getRandom().nextFloat() <= this.playerNpc.getSmartNpcTargetAttackChance(candidate, baseChance);
     }
 
     private boolean hasNearbyCollectableSupplyDrop() {
@@ -250,16 +283,19 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
     }
 
     private String stateFor(LivingEntity candidate) {
-        if (candidate instanceof Player || candidate instanceof PlayerNpcEntity) {
+        if (this.isPlayerLikeTarget(candidate)) {
             return "ai.player_npc.engaging_player_like";
         }
-        if (candidate instanceof Monster || candidate instanceof AbstractIllager) {
+        if (this.playerNpc.isSmartNpcCompatHighDangerThreat(candidate)) {
+            return "ai.player_npc.engaging_high_danger";
+        }
+        if (this.isMonsterTarget(candidate)) {
             return "ai.player_npc.engaging_monster";
         }
-        if (candidate instanceof Animal) {
+        if (this.isAnimalTarget(candidate)) {
             return "ai.player_npc.hunting_animal";
         }
-        if (candidate instanceof Villager) {
+        if (this.isVillagerTarget(candidate)) {
             return "ai.player_npc.engaging_villager";
         }
         return "ai.player_npc.engaging";
@@ -268,6 +304,7 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
     private boolean isTargetCombatState(String state) {
         return "ai.player_npc.engaging".equals(state)
                 || "ai.player_npc.engaging_player_like".equals(state)
+                || "ai.player_npc.engaging_high_danger".equals(state)
                 || "ai.player_npc.engaging_monster".equals(state)
                 || "ai.player_npc.hunting_animal".equals(state)
                 || "ai.player_npc.engaging_villager".equals(state)
@@ -277,6 +314,7 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
                 || "ai.player_npc.combat_fishing".equals(state)
                 || "ai.player_npc.shield_guarding".equals(state)
                 || "ai.player_npc.troll_hit".equals(state)
+                || "ai.player_npc.using_flint_and_steel".equals(state)
                 || "ai.player_npc.using_lava_bucket".equals(state)
                 || "ai.player_npc.blocking_projectile".equals(state);
     }

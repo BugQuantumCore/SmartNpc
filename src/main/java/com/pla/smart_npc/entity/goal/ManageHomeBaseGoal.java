@@ -284,6 +284,9 @@ public class ManageHomeBaseGoal extends Goal {
         if (this.isInsideBuildSiteCraftingTableSearchArea(pos)) {
             return false;
         }
+        if (CraftBasicGearGoal.shouldKeepTemporaryCraftingTableForGear(this.playerNpc, serverLevel)) {
+            return false;
+        }
 
         return (this.homeArea == null || !PlayerNpcHomeUtil.isInside(this.homeArea, pos))
                 && this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) <= 6.0D * 6.0D
@@ -291,21 +294,11 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private BlockPos getTemporaryCraftingTablePos() {
-        if (!this.playerNpc.getPersistentData().contains(CraftBasicGearGoal.TEMP_TABLE_X)) {
-            return null;
-        }
-
-        return new BlockPos(
-                this.playerNpc.getPersistentData().getInt(CraftBasicGearGoal.TEMP_TABLE_X),
-                this.playerNpc.getPersistentData().getInt(CraftBasicGearGoal.TEMP_TABLE_Y),
-                this.playerNpc.getPersistentData().getInt(CraftBasicGearGoal.TEMP_TABLE_Z)
-        );
+        return CraftBasicGearGoal.getTemporaryCraftingTablePos(this.playerNpc);
     }
 
     private void clearTemporaryCraftingTable() {
-        this.playerNpc.getPersistentData().remove(CraftBasicGearGoal.TEMP_TABLE_X);
-        this.playerNpc.getPersistentData().remove(CraftBasicGearGoal.TEMP_TABLE_Y);
-        this.playerNpc.getPersistentData().remove(CraftBasicGearGoal.TEMP_TABLE_Z);
+        CraftBasicGearGoal.clearTemporaryCraftingTable(this.playerNpc);
     }
 
     private boolean needsCraftingTable(ServerLevel serverLevel) {

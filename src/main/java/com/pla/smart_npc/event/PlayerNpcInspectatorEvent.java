@@ -1,6 +1,6 @@
 package com.pla.smart_npc.event;
 
-import com.pla.smart_npc.PlayerNpc;
+import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.network.PlayerNpcInspectatorModePacket;
 import net.minecraft.server.level.ServerPlayer;
@@ -9,7 +9,7 @@ import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-@Mod.EventBusSubscriber(modid = PlayerNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
+@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class PlayerNpcInspectatorEvent {
     @SubscribeEvent
     public static void onEntityMount(EntityMountEvent event) {

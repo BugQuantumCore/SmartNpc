@@ -1,6 +1,7 @@
 package com.pla.smart_npc.network;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
@@ -59,6 +60,8 @@ public class PlayerNpcInspectatorModePacket {
     }
 
     public static void restorePlayer(ServerPlayer player) {
+        PlayerNpcGoalTraceLogger.stopTrace(player);
+
         CompoundTag data = player.getPersistentData();
         boolean wasActive = data.getBoolean(ACTIVE_KEY);
         int originalGameMode = data.contains(ORIGINAL_GAME_MODE_KEY)
@@ -81,6 +84,8 @@ public class PlayerNpcInspectatorModePacket {
     }
 
     private static void beginInspectator(ServerPlayer player, PlayerNpcEntity playerNpc) {
+        PlayerNpcGoalTraceLogger.stopIfTracingDifferentNpc(player, playerNpc);
+
         CompoundTag data = player.getPersistentData();
         if (!data.getBoolean(ACTIVE_KEY)) {
             data.putInt(ORIGINAL_GAME_MODE_KEY, player.gameMode.getGameModeForPlayer().getId());

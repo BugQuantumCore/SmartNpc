@@ -1,7 +1,7 @@
 package com.pla.smart_npc.mixin;
 
 import com.mojang.blaze3d.vertex.PoseStack;
-import com.pla.smart_npc.client.gui.PlayerNpcInspectorOverlay;
+import com.pla.smart_npc.client.gui.SmartNpcInspectorOverlay;
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.player.PlayerRenderer;
@@ -22,7 +22,7 @@ public abstract class PlayerRendererMixin {
             int packedLight,
             CallbackInfo ci
     ) {
-        if (PlayerNpcInspectorOverlay.shouldHideInspectatorLocalPlayer(player)) {
+        if (SmartNpcInspectorOverlay.shouldHideInspectatorLocalPlayer(player)) {
             ci.cancel();
         }
     }

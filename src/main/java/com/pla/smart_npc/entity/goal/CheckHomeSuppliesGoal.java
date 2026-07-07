@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -14,12 +15,16 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.ArrowItem;
+import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.PickaxeItem;
 import net.minecraft.world.item.ProjectileWeaponItem;
+import net.minecraft.world.item.ShovelItem;
+import net.minecraft.world.item.SwordItem;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
@@ -36,11 +41,13 @@ import java.util.function.Predicate;
 public class CheckHomeSuppliesGoal extends Goal {
     private static final String LAST_CHEST_CHECK_DAY = "PlayerNpcLastHomeChestCheckDay";
     private static final String LAST_FURNACE_CHECK_DAY = "PlayerNpcLastHomeFurnaceCheckDay";
+    private static final String LAST_TOOL_CHEST_CHECK_TIME = "PlayerNpcLastToolChestCheckTime";
     private static final double HOME_ACTION_DISTANCE_SQR = 8.0D * 8.0D;
     private static final double CONTAINER_USE_DISTANCE_SQR = 2.25D * 2.25D;
     private static final double CONTAINER_STAND_REACHED_SQR = 1.25D * 1.25D;
     private static final int ACTION_DELAY_TICKS = 8;
     private static final int MAX_WITHDRAW_STACKS = 6;
+    private static final int TOOL_CHEST_RECHECK_TICKS = 20 * 10;
     private static final int FOOD_RESERVE = 6;
     private static final int TORCH_FUEL_RESERVE = 8;
     private static final int GENERAL_FUEL_RESERVE = 4;
@@ -84,10 +91,18 @@ public class CheckHomeSuppliesGoal extends Goal {
             return false;
         }
 
-        if (!this.checkedToday(LAST_CHEST_CHECK_DAY, day)) {
+        boolean urgentChestNeed = this.needsToolSupply();
+        if ((urgentChestNeed && this.canRetryToolChestCheck(serverLevel))
+                || (!urgentChestNeed && !this.checkedToday(LAST_CHEST_CHECK_DAY, day))) {
             BlockPos chest = this.findHomeChest(serverLevel);
-            if (chest != null && this.plan(serverLevel, chest, Mode.CHEST)) {
+            if (chest != null
+                    && serverLevel.getBlockEntity(chest) instanceof Container container
+                    && this.hasWithdrawCandidate(container)
+                    && this.plan(serverLevel, chest, Mode.CHEST)) {
                 return true;
+            }
+            if (urgentChestNeed) {
+                this.markToolChestChecked(serverLevel);
             }
             this.markChecked(LAST_CHEST_CHECK_DAY, day);
         }
@@ -223,6 +238,16 @@ public class CheckHomeSuppliesGoal extends Goal {
         return movedAny;
     }
 
+    private boolean hasWithdrawCandidate(Container container) {
+        for (int slot = 0; slot < container.getContainerSize(); slot++) {
+            ItemStack stack = container.getItem(slot);
+            if (!stack.isEmpty() && this.shouldWithdrawStack(stack)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private boolean takeFurnaceOutput(ServerLevel serverLevel) {
         if (!(serverLevel.getBlockEntity(this.targetPos) instanceof FurnaceBlockEntity furnace)) {
             return false;
@@ -305,8 +330,10 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private boolean hasSupplyNeed(ServerLevel serverLevel) {
-        return this.needsFood()
+        return this.needsToolSupply()
+                || this.needsFood()
                 || this.needsWood()
+                || this.needsToolCraftingMaterials()
                 || this.needsFuel()
                 || this.needsArrows()
                 || this.needsBuildingBlocks()
@@ -317,8 +344,10 @@ public class CheckHomeSuppliesGoal extends Goal {
         if (stack.isEmpty()) {
             return false;
         }
-        return this.needsFood() && stack.isEdible()
+        return this.needsMissingTool(stack)
+                || this.needsFood() && stack.isEdible()
                 || this.needsWood() && this.isWoodSupply(stack)
+                || this.needsToolCraftingMaterials() && this.isToolCraftingSupply(stack)
                 || this.needsFuel() && (this.isTorchFuel(stack) || this.isFuel(stack))
                 || this.needsArrows() && stack.getItem() instanceof ArrowItem
                 || this.needsBuildingBlocks() && this.isBuildingSupply(stack)
@@ -326,6 +355,9 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private int desiredWithdrawCount(ItemStack stack) {
+        if (this.isToolStack(stack)) {
+            return 1;
+        }
         if (stack.isEdible()) {
             return Math.min(stack.getCount(), 8);
         }
@@ -339,6 +371,37 @@ public class CheckHomeSuppliesGoal extends Goal {
             return Math.min(stack.getCount(), 32);
         }
         return Math.min(stack.getCount(), 16);
+    }
+
+    private boolean needsMissingTool(ItemStack stack) {
+        return this.needsTool(AxeItem.class) && stack.getItem() instanceof AxeItem
+                || this.needsTool(PickaxeItem.class) && stack.getItem() instanceof PickaxeItem
+                || this.needsTool(ShovelItem.class) && stack.getItem() instanceof ShovelItem
+                || this.needsTool(SwordItem.class) && stack.getItem() instanceof SwordItem;
+    }
+
+    private boolean isToolStack(ItemStack stack) {
+        return !stack.isEmpty()
+                && (stack.getItem() instanceof AxeItem
+                || stack.getItem() instanceof PickaxeItem
+                || stack.getItem() instanceof ShovelItem
+                || stack.getItem() instanceof SwordItem);
+    }
+
+    private boolean needsToolSupply() {
+        return this.needsTool(AxeItem.class)
+                || this.needsTool(PickaxeItem.class)
+                || this.needsTool(ShovelItem.class);
+    }
+
+    private boolean needsToolCraftingMaterials() {
+        return this.needsTool(AxeItem.class) || this.needsTool(PickaxeItem.class);
+    }
+
+    private boolean needsTool(Class<?> toolClass) {
+        return !toolClass.isInstance(this.playerNpc.getMainHandItem().getItem())
+                && !toolClass.isInstance(this.playerNpc.getOffhandItem().getItem())
+                && !InventoryUtils.hasItem(this.playerNpc, stack -> toolClass.isInstance(stack.getItem()));
     }
 
     private boolean needsFood() {
@@ -406,6 +469,14 @@ public class CheckHomeSuppliesGoal extends Goal {
         return stack.is(ItemTags.LOGS)
                 || stack.is(ItemTags.PLANKS)
                 || stack.is(Items.STICK);
+    }
+
+    private boolean isToolCraftingSupply(ItemStack stack) {
+        return this.isWoodSupply(stack)
+                || stack.is(Items.COBBLESTONE)
+                || stack.is(Items.COBBLED_DEEPSLATE)
+                || stack.is(Items.IRON_INGOT)
+                || stack.is(Items.DIAMOND);
     }
 
     private boolean isTorchFuel(ItemStack stack) {
@@ -549,6 +620,15 @@ public class CheckHomeSuppliesGoal extends Goal {
 
     private long currentDay(ServerLevel serverLevel) {
         return serverLevel.getDayTime() / 24000L;
+    }
+
+    private boolean canRetryToolChestCheck(ServerLevel serverLevel) {
+        return !this.playerNpc.getPersistentData().contains(LAST_TOOL_CHEST_CHECK_TIME, Tag.TAG_LONG)
+                || serverLevel.getGameTime() - this.playerNpc.getPersistentData().getLong(LAST_TOOL_CHEST_CHECK_TIME) >= TOOL_CHEST_RECHECK_TICKS;
+    }
+
+    private void markToolChestChecked(ServerLevel serverLevel) {
+        this.playerNpc.getPersistentData().putLong(LAST_TOOL_CHEST_CHECK_TIME, serverLevel.getGameTime());
     }
 
     private boolean checkedToday(String key, long day) {

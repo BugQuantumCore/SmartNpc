@@ -3,10 +3,12 @@
   "package": "com.pla.smart_npc.mixin",
   "compatibilityLevel": "JAVA_17",
   "mixins": [
-    "MonsterMixin"
+    "MonsterMixin",
+    "BoatMixin"
   ],
   "client": [
     "CameraMixin",
+    "ClientPacketListenerMixin",
     "GuiMixin",
     "PlayerRendererMixin"
   ],

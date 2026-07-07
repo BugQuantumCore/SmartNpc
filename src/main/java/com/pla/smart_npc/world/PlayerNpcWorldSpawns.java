@@ -1,8 +1,8 @@
 package com.pla.smart_npc.world;
 
-import com.pla.smart_npc.PlayerNpc;
-import com.pla.smart_npc.config.PlayerNpcConfig;
-import com.pla.smart_npc.init.PlayerNpcModEntities;
+import com.pla.smart_npc.SmartNpc;
+import com.pla.smart_npc.config.SmartNpcConfig;
+import com.pla.smart_npc.init.SmartNpcModEntities;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
@@ -17,13 +17,13 @@ public final class PlayerNpcWorldSpawns {
 
     private PlayerNpcWorldSpawns() {}
     public static void addBiomeSpawns(ModifiableBiomeInfo.BiomeInfo.Builder builder) {
-        PlayerNpcConfig.SpawnConfig spawnConfig = PlayerNpcConfig.getPlayerNpcSpawnConfig();
-        addSpawn(builder, ResourceLocation.fromNamespaceAndPath(PlayerNpc.MODID, PlayerNpcModEntities.PLAYER_NPC_ID), spawnConfig);
+        SmartNpcConfig.SpawnConfig spawnConfig = SmartNpcConfig.getPlayerNpcSpawnConfig();
+        addSpawn(builder, ResourceLocation.fromNamespaceAndPath(SmartNpc.MODID, SmartNpcModEntities.PLAYER_NPC_ID), spawnConfig);
     }
 
     private static void addSpawn(ModifiableBiomeInfo.BiomeInfo.Builder builder,
                                  ResourceLocation entityId,
-                                 PlayerNpcConfig.SpawnConfig spawnConfig) {
+                                 SmartNpcConfig.SpawnConfig spawnConfig) {
 
         if (spawnConfig.weight() <= 0) return;
         EntityType<?> rawType = ForgeRegistries.ENTITY_TYPES.getValue(entityId);

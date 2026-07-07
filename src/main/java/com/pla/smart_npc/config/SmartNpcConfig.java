@@ -4,7 +4,7 @@ import net.minecraftforge.common.ForgeConfigSpec;
 
 import java.util.List;
 
-public class PlayerNpcConfig {
+public class SmartNpcConfig {
     public record SpawnConfig(int weight, int minCount, int maxCount) {}
 
     public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
@@ -14,6 +14,11 @@ public class PlayerNpcConfig {
     public static ForgeConfigSpec.ConfigValue<Boolean> TURN_ON_NPC_CHAT;
     public static ForgeConfigSpec.ConfigValue<List<? extends Number>> PLAYER_NPC_SPAWN;
     public static ForgeConfigSpec.ConfigValue<List<? extends String>> BLACKLIST_COMPAT_MOD_WEAPON;
+    public static ForgeConfigSpec.ConfigValue<Boolean> PERFORMANCE_MONITOR_ENABLED;
+    public static ForgeConfigSpec.DoubleValue PERFORMANCE_WARNING_AVERAGE_MSPT;
+    public static ForgeConfigSpec.DoubleValue PERFORMANCE_WARNING_SPIKE_MSPT;
+    public static ForgeConfigSpec.IntValue PERFORMANCE_WARNING_COOLDOWN_TICKS;
+    public static ForgeConfigSpec.IntValue PERFORMANCE_WARNING_NPC_TRACE_LIMIT;
 
     static {
         TURN_ON_NPC_CHAT = BUILDER.comment(
@@ -31,6 +36,24 @@ public class PlayerNpcConfig {
         BLACKLIST_COMPAT_MOD_WEAPON = BUILDER.comment(
                         "Mod ids whose mobs_equipment JSON should not distribute weapons to Player NPC")
                 .defineList("blacklistCompatModWeapon", List.of(), element -> element instanceof String);
+
+        BUILDER.push("performanceMonitor");
+        PERFORMANCE_MONITOR_ENABLED = BUILDER.comment(
+                        "Log Smart NPC scoped TPS/MSPT warnings and show current server TPS in the Player NPC inspector")
+                .define("enabled", true);
+        PERFORMANCE_WARNING_AVERAGE_MSPT = BUILDER.comment(
+                        "Warn when the rolling 5-second average server tick time is at least this many milliseconds. 50 ms is 20 TPS")
+                .defineInRange("averageMsptWarningThreshold", 75.0D, 50.0D, 1000.0D);
+        PERFORMANCE_WARNING_SPIKE_MSPT = BUILDER.comment(
+                        "Warn immediately when one server tick takes at least this many milliseconds")
+                .defineInRange("spikeMsptWarningThreshold", 200.0D, 50.0D, 10000.0D);
+        PERFORMANCE_WARNING_COOLDOWN_TICKS = BUILDER.comment(
+                        "Minimum server ticks between Smart NPC performance warning log entries")
+                .defineInRange("warningCooldownTicks", 200, 20, 72000);
+        PERFORMANCE_WARNING_NPC_TRACE_LIMIT = BUILDER.comment(
+                        "Maximum active Player NPC goal trace lines to include per performance warning")
+                .defineInRange("npcTraceLimit", 8, 0, 64);
+        BUILDER.pop();
 
         SPEC = BUILDER.build();
     }

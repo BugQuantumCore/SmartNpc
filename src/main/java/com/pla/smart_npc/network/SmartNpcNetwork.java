@@ -1,14 +1,14 @@
 package com.pla.smart_npc.network;
 
-import com.pla.smart_npc.PlayerNpc;
+import com.pla.smart_npc.SmartNpc;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
-public class PlayerNpcNetwork {
-    private static final String PROTOCOL_VERSION = "1";
+public class SmartNpcNetwork {
+    private static final String PROTOCOL_VERSION = "3";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
-            ResourceLocation.fromNamespaceAndPath(PlayerNpc.MODID, "main"),
+            ResourceLocation.fromNamespaceAndPath(SmartNpc.MODID, "main"),
             () -> PROTOCOL_VERSION,
             PROTOCOL_VERSION::equals,
             PROTOCOL_VERSION::equals
@@ -37,6 +37,13 @@ public class PlayerNpcNetwork {
                 PlayerNpcInspectatorModePacket::encode,
                 PlayerNpcInspectatorModePacket::decode,
                 PlayerNpcInspectatorModePacket::handle
+        );
+        CHANNEL.registerMessage(
+                packetId++,
+                PlayerNpcGoalTracePacket.class,
+                PlayerNpcGoalTracePacket::encode,
+                PlayerNpcGoalTracePacket::decode,
+                PlayerNpcGoalTracePacket::handle
         );
     }
 }

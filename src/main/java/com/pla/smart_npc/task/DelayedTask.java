@@ -1,6 +1,6 @@
 package com.pla.smart_npc.task;
 
-import com.pla.smart_npc.PlayerNpc;
+import com.pla.smart_npc.SmartNpc;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
@@ -86,7 +86,7 @@ public abstract class DelayedTask {
         try {
             action.run();
         } catch (Exception e) {
-            PlayerNpc.LOGGER.error("[AV MOD DEBUG] {} failed", label, e);
+            SmartNpc.LOGGER.error("[AV MOD DEBUG] {} failed", label, e);
         }
     }
 

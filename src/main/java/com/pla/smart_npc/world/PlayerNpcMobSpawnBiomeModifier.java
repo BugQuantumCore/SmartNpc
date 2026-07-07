@@ -1,7 +1,7 @@
 package com.pla.smart_npc.world;
 
 import com.mojang.serialization.Codec;
-import com.pla.smart_npc.PlayerNpc;
+import com.pla.smart_npc.SmartNpc;
 import net.minecraft.core.Holder;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.BiomeTags;
@@ -14,8 +14,8 @@ import net.minecraftforge.registries.RegistryObject;
 public final class PlayerNpcMobSpawnBiomeModifier implements BiomeModifier {
 
     private static final RegistryObject<Codec<? extends BiomeModifier>> SERIALIZER = RegistryObject
-            .create(ResourceLocation.fromNamespaceAndPath(PlayerNpc.MODID, "player_npc_spawns"),
-                    ForgeRegistries.Keys.BIOME_MODIFIER_SERIALIZERS, PlayerNpc.MODID);
+            .create(ResourceLocation.fromNamespaceAndPath(SmartNpc.MODID, "player_npc_spawns"),
+                    ForgeRegistries.Keys.BIOME_MODIFIER_SERIALIZERS, SmartNpc.MODID);
 
     @Override
     public void modify(Holder<Biome> biomeHolder, Phase phase, ModifiableBiomeInfo.BiomeInfo.Builder builder) {

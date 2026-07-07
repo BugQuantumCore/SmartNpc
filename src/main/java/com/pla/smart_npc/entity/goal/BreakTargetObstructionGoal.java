@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
@@ -37,6 +38,8 @@ public class BreakTargetObstructionGoal extends Goal {
     private static final int REPATH_INTERVAL_TICKS = 12;
     private static final int MAX_GOAL_TICKS = 20 * 10;
     private static final int MAX_MINE_TICKS = 20 * 8;
+    private static final double HIGH_TARGET_PILLAR_HORIZONTAL_DISTANCE_SQR = 12.0D * 12.0D;
+    private static final int HIGH_TARGET_PILLAR_REQUEST_TICKS = 20 * 8;
 
     private final PlayerNpcEntity playerNpc;
     private LivingEntity target;
@@ -67,6 +70,11 @@ public class BreakTargetObstructionGoal extends Goal {
         if (!this.isValidTarget(currentTarget)
                 || this.playerNpc.distanceToSqr(currentTarget) > MAX_TARGET_DISTANCE_SQR
                 || this.playerNpc.hasLineOfSight(currentTarget) && this.canReachTarget(currentTarget)) {
+            return false;
+        }
+
+        if (this.shouldRequestPillarToTarget(currentTarget)) {
+            this.playerNpc.requestUpwardEscapeTo(currentTarget.blockPosition(), HIGH_TARGET_PILLAR_REQUEST_TICKS);
             return false;
         }
 
@@ -167,7 +175,7 @@ public class BreakTargetObstructionGoal extends Goal {
         }
 
         BlockPos brokenPos = this.obstructionPos;
-        if (serverLevel.destroyBlock(brokenPos, true, this.playerNpc)) {
+        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, brokenPos, state, this.playerNpc)) {
             this.playerNpc.hurtMainHandItem(1);
             this.playerNpc.markCombatProgress();
         }
@@ -204,6 +212,23 @@ public class BreakTargetObstructionGoal extends Goal {
     private boolean canReachTarget(LivingEntity target) {
         Path path = this.playerNpc.getNavigation().createPath(target.blockPosition(), 0);
         return path != null && path.canReach();
+    }
+
+    private boolean shouldRequestPillarToTarget(LivingEntity target) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos targetPos = target.blockPosition();
+        if (targetPos.getY() <= feet.getY() + 2 || this.horizontalDistanceSqr(feet, targetPos) > HIGH_TARGET_PILLAR_HORIZONTAL_DISTANCE_SQR) {
+            return false;
+        }
+
+        Path path = this.playerNpc.getNavigation().createPath(targetPos, 0);
+        return path == null || !path.canReach();
+    }
+
+    private double horizontalDistanceSqr(BlockPos from, BlockPos to) {
+        double dx = from.getX() - to.getX();
+        double dz = from.getZ() - to.getZ();
+        return dx * dx + dz * dz;
     }
 
     private BlockPos findTargetObstruction(ServerLevel serverLevel, LivingEntity target) {
@@ -277,6 +302,7 @@ public class BreakTargetObstructionGoal extends Goal {
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && state.getFluidState().isEmpty()
                 && serverLevel.getBlockEntity(pos) == null
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
                 && !this.isProtectedHomeBlock(pos)
                 && this.hasRequiredToolFor(state);
     }

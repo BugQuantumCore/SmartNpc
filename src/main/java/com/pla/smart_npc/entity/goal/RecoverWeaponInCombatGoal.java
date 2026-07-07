@@ -67,16 +67,17 @@ public class RecoverWeaponInCombatGoal extends Goal {
             return false;
         }
 
+        inventoryWeaponSlot = findWeaponSlotInNpcInventory();
+        if (inventoryWeaponSlot >= 0) {
+            restoreCachedWeapon = false;
+            targetItem = null;
+            return true;
+        }
+
         restoreCachedWeapon = !getCachedMainWeapon().isEmpty();
         if (restoreCachedWeapon) {
             targetItem = null;
             inventoryWeaponSlot = -1;
-            return true;
-        }
-
-        inventoryWeaponSlot = findWeaponSlotInNpcInventory();
-        if (inventoryWeaponSlot >= 0) {
-            targetItem = null;
             return true;
         }
 

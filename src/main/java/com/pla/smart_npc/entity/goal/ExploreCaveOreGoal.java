@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
@@ -56,6 +57,8 @@ public class ExploreCaveOreGoal extends Goal {
     private static final float TORCH_PLACE_CHANCE = 0.35F;
     private static final int TORCH_NEARBY_RADIUS = 6;
     private static final int TORCH_LOW_LIGHT_LEVEL = 7;
+    private static final int SURFACE_ESCAPE_SCAN_UP = 96;
+    private static final int UPWARD_ESCAPE_REQUEST_TICKS = 20 * 8;
 
     private final PlayerNpcEntity playerNpc;
     private final double speed;
@@ -98,6 +101,7 @@ public class ExploreCaveOreGoal extends Goal {
 
         OreTarget target = this.findOreTarget(serverLevel);
         if (target == null) {
+            this.requestSurfaceEscapeIfUnderground(serverLevel);
             return false;
         }
 
@@ -218,7 +222,7 @@ public class ExploreCaveOreGoal extends Goal {
         }
 
         BlockPos minedPos = this.targetPos;
-        if (serverLevel.destroyBlock(minedPos, true, this.playerNpc)) {
+        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, minedPos, state, this.playerNpc)) {
             this.minedAnyOre = true;
             this.minedClusterOres.add(minedPos.immutable());
             this.skippedOreTargets.remove(minedPos.immutable());
@@ -298,6 +302,29 @@ public class ExploreCaveOreGoal extends Goal {
                 .comparingInt((OreTarget target) -> this.orePriority(serverLevel.getBlockState(target.targetPos())))
                 .thenComparingDouble(target -> center.distSqr(target.standPos())));
         return candidates.get(this.playerNpc.getRandom().nextInt(Math.min(candidates.size(), 6)));
+    }
+
+    private void requestSurfaceEscapeIfUnderground(ServerLevel serverLevel) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (serverLevel.canSeeSky(feet.above())) {
+            return;
+        }
+
+        BlockPos surfaceTarget = this.findSurfaceEscapeTarget(serverLevel, feet);
+        if (surfaceTarget != null) {
+            this.playerNpc.requestUpwardEscapeTo(surfaceTarget, UPWARD_ESCAPE_REQUEST_TICKS);
+        }
+    }
+
+    private BlockPos findSurfaceEscapeTarget(ServerLevel serverLevel, BlockPos feet) {
+        int scanTop = Math.min(serverLevel.getMaxBuildHeight() - 3, feet.getY() + SURFACE_ESCAPE_SCAN_UP);
+        for (int y = feet.getY() + 3; y <= scanTop; y++) {
+            BlockPos target = new BlockPos(feet.getX(), y, feet.getZ());
+            if (serverLevel.canSeeSky(target.above())) {
+                return target.immutable();
+            }
+        }
+        return null;
     }
 
     private boolean isCaveOre(ServerLevel serverLevel, BlockPos pos) {
@@ -715,7 +742,7 @@ public class ExploreCaveOreGoal extends Goal {
         }
 
         BlockPos clearedPos = this.pathObstructionPos;
-        if (serverLevel.destroyBlock(clearedPos, true, this.playerNpc)) {
+        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, clearedPos, state, this.playerNpc)) {
             this.playerNpc.hurtMainHandItem(1);
             this.failedPathTicks = 0;
             this.repathTicks = 0;
@@ -789,6 +816,7 @@ public class ExploreCaveOreGoal extends Goal {
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && !state.getCollisionShape(serverLevel, pos).isEmpty()
                 && state.getFluidState().isEmpty()
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
                 && !this.isProtectedHomeBlock(pos)
                 && serverLevel.getBlockEntity(pos) == null
                 && (!state.requiresCorrectToolForDrops() || this.hasUsablePickaxeFor(state));

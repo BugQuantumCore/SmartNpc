@@ -20,6 +20,7 @@ public class LowHealthFleeGoal extends Goal {
     private static final int PATH_RECALCULATE_TICKS = 10;
     private static final int MIN_JUMP_COOLDOWN_TICKS = 12;
     private static final int MAX_JUMP_COOLDOWN_TICKS = 28;
+    private static final int POST_FLEE_ESCAPE_COOLDOWN_TICKS = 20 * 5;
 
     private final PlayerNpcEntity playerNpc;
     private LivingEntity threat;
@@ -35,20 +36,22 @@ public class LowHealthFleeGoal extends Goal {
 
     @Override
     public boolean canUse() {
-        if (!this.canFlee()) {
-            return false;
-        }
-
         LivingEntity target = this.playerNpc.getTarget();
         if (target == null || !target.isAlive()) {
             return false;
         }
-
-        double distanceSqr = this.playerNpc.distanceToSqr(target);
-        if (distanceSqr > START_FLEE_DISTANCE_SQR && this.getHealthRatio() > START_HEALTH_RATIO * 0.65F) {
+        if (!this.canFleeFrom(target)) {
             return false;
         }
-        if (InventoryUtils.hasHealingFood(this.playerNpc) && this.playerNpc.getRandom().nextFloat() < 0.45F) {
+
+        double distanceSqr = this.playerNpc.distanceToSqr(target);
+        float startHealthRatio = this.getStartHealthRatio(target);
+        if (distanceSqr > START_FLEE_DISTANCE_SQR && this.getHealthRatio() > startHealthRatio * 0.65F) {
+            return false;
+        }
+        if (!this.isHighDangerThreat(target)
+                && InventoryUtils.hasHealingFood(this.playerNpc)
+                && this.playerNpc.getRandom().nextFloat() < 0.45F) {
             return false;
         }
 
@@ -65,10 +68,10 @@ public class LowHealthFleeGoal extends Goal {
     @Override
     public boolean canContinueToUse() {
         return this.fleeTicks > 0
-                && this.canFlee()
                 && this.threat != null
                 && this.threat.isAlive()
-                && this.getHealthRatio() < STOP_HEALTH_RATIO
+                && this.canMoveForFlee()
+                && this.getHealthRatio() < this.getStopHealthRatio(this.threat)
                 && this.playerNpc.distanceToSqr(this.threat) < STOP_FLEE_DISTANCE_SQR;
     }
 
@@ -77,6 +80,8 @@ public class LowHealthFleeGoal extends Goal {
         this.fleeTicks = MIN_FLEE_TICKS + this.playerNpc.getRandom().nextInt(MAX_FLEE_TICKS - MIN_FLEE_TICKS + 1);
         this.pathRecalculateTicks = 0;
         this.jumpCooldownTicks = this.nextJumpCooldown();
+        this.playerNpc.clearUpwardEscapeTarget();
+        this.playerNpc.setHoleEscapeCooldown(POST_FLEE_ESCAPE_COOLDOWN_TICKS);
         this.playerNpc.setSprinting(true);
         this.playerNpc.setTarget(null);
         this.playerNpc.setCurrentAiState("ai.player_npc.fleeing_low_health");
@@ -91,6 +96,8 @@ public class LowHealthFleeGoal extends Goal {
         this.fleeTicks = 0;
         this.pathRecalculateTicks = 0;
         this.jumpCooldownTicks = 0;
+        this.playerNpc.clearUpwardEscapeTarget();
+        this.playerNpc.setHoleEscapeCooldown(POST_FLEE_ESCAPE_COOLDOWN_TICKS);
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }
 
@@ -119,17 +126,34 @@ public class LowHealthFleeGoal extends Goal {
         this.tryJump();
     }
 
-    private boolean canFlee() {
+    private boolean canFleeFrom(LivingEntity threat) {
+        return this.canMoveForFlee()
+                && this.getHealthRatio() <= this.getStartHealthRatio(threat);
+    }
+
+    private boolean canMoveForFlee() {
         return this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
                 && !this.playerNpc.isPassenger()
                 && !this.playerNpc.isInWaterOrBubble()
-                && !this.playerNpc.isInLava()
-                && this.getHealthRatio() <= START_HEALTH_RATIO;
+                && !this.playerNpc.isInLava();
     }
 
     private float getHealthRatio() {
         return this.playerNpc.getHealth() / this.playerNpc.getMaxHealth();
+    }
+
+    private float getStartHealthRatio(LivingEntity threat) {
+        return this.playerNpc.getSmartNpcFleeHealthRatio(threat, START_HEALTH_RATIO);
+    }
+
+    private float getStopHealthRatio(LivingEntity threat) {
+        float startHealthRatio = this.getStartHealthRatio(threat);
+        return Math.max(STOP_HEALTH_RATIO, Math.min(0.95F, startHealthRatio + 0.15F));
+    }
+
+    private boolean isHighDangerThreat(LivingEntity threat) {
+        return threat != null && this.playerNpc.isSmartNpcCompatHighDangerThreat(threat);
     }
 
     private Vec3 findFleePos(LivingEntity threat) {

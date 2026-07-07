@@ -17,10 +17,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
 
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.EnumSet;
-import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -29,12 +26,14 @@ public class ExploreBiomeForLogsGoal extends Goal {
     private static final int LOCAL_RESOURCE_RADIUS = 96;
     private static final int LOG_SCAN_DOWN = 2;
     private static final int LOG_SCAN_UP = 12;
-    private static final int MAX_LOG_PATH_CHECKS_PER_SCAN = 16;
     private static final int MIN_BUILD_SUPPLY = 24;
-    private static final int MIN_TRAVEL_DISTANCE = 42;
-    private static final int MAX_TRAVEL_DISTANCE = 86;
-    private static final int MAX_LATERAL_OFFSET = 18;
-    private static final int MAX_TARGET_ATTEMPTS = 18;
+    private static final int[][] TRAVEL_RADIUS_BANDS = {
+            {25, 30},
+            {20, 25},
+            {15, 20},
+            {10, 15},
+            {5, 10}
+    };
     private static final int MAX_EXPLORE_TICKS = 20 * 45;
     private static final int REPATH_INTERVAL_TICKS = 20 * 3;
     private static final int LOG_SCAN_INTERVAL_TICKS = 20;
@@ -44,8 +43,6 @@ public class ExploreBiomeForLogsGoal extends Goal {
     private final PlayerNpcEntity playerNpc;
     private final double speed;
     private BlockPos travelTarget;
-    private double directionX;
-    private double directionZ;
     private int exploreTicks;
     private int repathTicks;
     private int logScanTicks;
@@ -59,19 +56,29 @@ public class ExploreBiomeForLogsGoal extends Goal {
 
     @Override
     public boolean canUse() {
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
-                || !this.playerNpc.isAlive()
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+
+        boolean logShortage = this.hasLogShortage();
+        if (!this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.getBiomeExploreCooldown() > 0
-                || this.inventoryIsMostlyFull()
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || (!logShortage && this.playerNpc.getBiomeExploreCooldown() > 0)
+                || this.inventoryCannotAcceptLogs()
                 || !this.needsSearchSupply()) {
             return false;
         }
 
-        this.chooseDirection();
+        if (this.hasNearbyLog(serverLevel)) {
+            this.playerNpc.setGatherCooldown(0);
+            this.playerNpc.setBiomeExploreCooldown(FOUND_LOG_COOLDOWN_TICKS);
+            return false;
+        }
+
         this.travelTarget = this.findTravelTarget(serverLevel);
         if (this.travelTarget == null) {
             this.playerNpc.setBiomeExploreCooldown(20);
@@ -88,8 +95,16 @@ public class ExploreBiomeForLogsGoal extends Goal {
                 && !this.playerNpc.isPassenger()
                 && !this.playerNpc.isHealing()
                 && this.playerNpc.getTarget() == null
+                && this.playerNpc.getUpwardEscapeTarget() == null
                 && !this.foundLog
-                && !this.inventoryIsMostlyFull();
+                && !this.inventoryCannotAcceptLogs()
+                && !this.playerNpc.getNavigation().isDone()
+                && !this.playerNpc.getNavigation().isStuck();
+    }
+
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
     }
 
     @Override
@@ -100,7 +115,9 @@ public class ExploreBiomeForLogsGoal extends Goal {
         this.foundLog = false;
         this.playerNpc.setCurrentAiState("ai.player_npc.exploring_biome");
         this.updateTaskDetail();
-        this.moveToTravelTarget();
+        if (!this.moveToTravelTarget()) {
+            this.travelTarget = null;
+        }
     }
 
     @Override
@@ -120,24 +137,16 @@ public class ExploreBiomeForLogsGoal extends Goal {
             }
         }
 
-        this.playerNpc.getLookControl().setLookAt(
-                this.travelTarget.getX() + 0.5D,
-                this.travelTarget.getY(),
-                this.travelTarget.getZ() + 0.5D,
-                40.0F,
-                40.0F
-        );
+        if (this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            this.travelTarget = null;
+            return;
+        }
 
-        if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
-            if (this.playerNpc.distanceToSqr(this.travelTarget.getX() + 0.5D, this.travelTarget.getY(), this.travelTarget.getZ() + 0.5D) < 6.0D * 6.0D
-                    || this.playerNpc.getNavigation().isDone()
-                    || this.playerNpc.getNavigation().isStuck()) {
-                BlockPos nextTarget = this.findTravelTarget(serverLevel);
-                if (nextTarget != null) {
-                    this.travelTarget = nextTarget;
-                }
+        if (this.repathTicks-- <= 0) {
+            if (!this.moveToTravelTarget()) {
+                this.travelTarget = null;
+                return;
             }
-            this.moveToTravelTarget();
             this.repathTicks = REPATH_INTERVAL_TICKS;
         }
         this.updateTaskDetail();
@@ -150,8 +159,6 @@ public class ExploreBiomeForLogsGoal extends Goal {
             this.playerNpc.setBiomeExploreCooldown(cooldown);
         }
         this.travelTarget = null;
-        this.directionX = 0.0D;
-        this.directionZ = 0.0D;
         this.exploreTicks = 0;
         this.repathTicks = 0;
         this.logScanTicks = 0;
@@ -159,24 +166,15 @@ public class ExploreBiomeForLogsGoal extends Goal {
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }
 
-    private void chooseDirection() {
-        double angle = this.playerNpc.getRandom().nextDouble() * Math.PI * 2.0D;
-        this.directionX = Math.cos(angle);
-        this.directionZ = Math.sin(angle);
-    }
-
     private BlockPos findTravelTarget(ServerLevel serverLevel) {
         BlockPos origin = this.playerNpc.blockPosition();
-        double sideX = -this.directionZ;
-        double sideZ = this.directionX;
-        int distanceRange = MAX_TRAVEL_DISTANCE - MIN_TRAVEL_DISTANCE + 1;
-        int lateralRange = MAX_LATERAL_OFFSET * 2 + 1;
-
-        for (int attempt = 0; attempt < MAX_TARGET_ATTEMPTS; attempt++) {
-            int distance = MIN_TRAVEL_DISTANCE + this.playerNpc.getRandom().nextInt(distanceRange);
-            int lateral = this.playerNpc.getRandom().nextInt(lateralRange) - MAX_LATERAL_OFFSET;
-            int x = (int) Math.floor(origin.getX() + this.directionX * distance + sideX * lateral);
-            int z = (int) Math.floor(origin.getZ() + this.directionZ * distance + sideZ * lateral);
+        for (int[] band : TRAVEL_RADIUS_BANDS) {
+            int minDistance = band[0];
+            int maxDistance = band[1];
+            int distance = minDistance + this.playerNpc.getRandom().nextInt(maxDistance - minDistance + 1);
+            double angle = this.playerNpc.getRandom().nextDouble() * Math.PI * 2.0D;
+            int x = (int) Math.floor(origin.getX() + Math.cos(angle) * distance);
+            int z = (int) Math.floor(origin.getZ() + Math.sin(angle) * distance);
             int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
             BlockPos candidate = new BlockPos(x, y, z);
             if (this.canReachTravelTarget(serverLevel, candidate)) {
@@ -196,20 +194,17 @@ public class ExploreBiomeForLogsGoal extends Goal {
         return path != null && path.canReach();
     }
 
-    private void moveToTravelTarget() {
-        if (this.travelTarget != null) {
-            Path path = this.playerNpc.getNavigation().createPath(this.travelTarget, 0);
-            if (path == null || !path.canReach()) {
-                this.travelTarget = null;
-                return;
-            }
-            this.playerNpc.getNavigation().moveTo(path, this.speed);
+    private boolean moveToTravelTarget() {
+        if (this.travelTarget == null) {
+            return false;
         }
+
+        Path path = this.playerNpc.getNavigation().createPath(this.travelTarget, 0);
+        return path != null && path.canReach() && this.playerNpc.getNavigation().moveTo(path, this.speed);
     }
 
     private boolean hasNearbyLog(ServerLevel serverLevel) {
         BlockPos center = this.playerNpc.blockPosition();
-        List<BlockPos> logCandidates = new ArrayList<>();
         for (BlockPos pos : BlockPos.betweenClosed(
                 center.offset(-LOG_SCAN_RADIUS, -LOG_SCAN_DOWN, -LOG_SCAN_RADIUS),
                 center.offset(LOG_SCAN_RADIUS, LOG_SCAN_UP, LOG_SCAN_RADIUS))) {
@@ -218,45 +213,11 @@ public class ExploreBiomeForLogsGoal extends Goal {
                 continue;
             }
             if (serverLevel.getBlockState(immutable).is(BlockTags.LOGS)) {
-                logCandidates.add(immutable);
-            }
-        }
-
-        logCandidates.sort(Comparator
-                .comparingDouble((BlockPos pos) -> center.distSqr(pos))
-                .thenComparingInt(BlockPos::getY));
-        int checked = 0;
-        for (BlockPos candidate : logCandidates) {
-            if (this.hasAccessibleStandNear(serverLevel, candidate)) {
-                return true;
-            }
-            if (++checked >= MAX_LOG_PATH_CHECKS_PER_SCAN) {
-                break;
-            }
-        }
-        return false;
-    }
-
-    private boolean hasAccessibleStandNear(ServerLevel serverLevel, BlockPos logPos) {
-        for (BlockPos pos : BlockPos.betweenClosed(logPos.offset(-2, -1, -2), logPos.offset(2, 1, 2))) {
-            if (this.canReachStand(serverLevel, pos.immutable())) {
                 return true;
             }
         }
+
         return false;
-    }
-
-    private boolean canReachStand(ServerLevel serverLevel, BlockPos pos) {
-        if (!this.canStandAt(serverLevel, pos)) {
-            return false;
-        }
-
-        if (this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D) <= 2.0D * 2.0D) {
-            return true;
-        }
-
-        Path path = this.playerNpc.getNavigation().createPath(pos, 0);
-        return path != null && path.canReach();
     }
 
     private boolean isProtectedHomeBlock(BlockPos pos) {
@@ -278,15 +239,20 @@ public class ExploreBiomeForLogsGoal extends Goal {
                 || this.countUsableWoodSupply() < this.playerNpc.getWoodSupplyTarget();
     }
 
-    private boolean inventoryIsMostlyFull() {
-        int freeSlots = 0;
+    private boolean hasLogShortage() {
+        return this.countRawLogs() < this.playerNpc.getRawLogReserveTarget()
+                || this.countUsableWoodSupply() < this.playerNpc.getWoodSupplyTarget();
+    }
+
+    private boolean inventoryCannotAcceptLogs() {
         SimpleContainer inventory = this.playerNpc.getInventory();
         for (int i = 0; i < inventory.getContainerSize(); i++) {
-            if (inventory.getItem(i).isEmpty()) {
-                freeSlots++;
+            ItemStack stack = inventory.getItem(i);
+            if (stack.isEmpty() || stack.is(ItemTags.LOGS) && stack.getCount() < stack.getMaxStackSize()) {
+                return false;
             }
         }
-        return freeSlots <= 2;
+        return true;
     }
 
     private int countBuildSupply() {
@@ -350,10 +316,14 @@ public class ExploreBiomeForLogsGoal extends Goal {
 
         this.playerNpc.setCurrentAiDetail(String.format(
                 Locale.ROOT,
-                "searching logs toward %d %d %d",
+                "searching logs toward %d %d %d raw %d/%d wood %d/%d",
                 this.travelTarget.getX(),
                 this.travelTarget.getY(),
-                this.travelTarget.getZ()
+                this.travelTarget.getZ(),
+                this.countRawLogs(),
+                this.playerNpc.getRawLogReserveTarget(),
+                this.countUsableWoodSupply(),
+                this.playerNpc.getWoodSupplyTarget()
         ));
     }
 }

@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
@@ -31,6 +32,7 @@ import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.WallBlock;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -50,11 +52,15 @@ import java.util.Set;
 
 public class GatherMaterialsGoal extends Goal {
     private static final int SEARCH_RADIUS = 8;
-    private static final int LOG_SEARCH_RADIUS = 48;
+    private static final int LOG_SEARCH_RADIUS = 32;
+    private static final int LOCAL_LOG_SEARCH_RADIUS = 16;
     private static final int LOCAL_RESOURCE_RADIUS = 96;
-    private static final int MAX_LOG_TARGET_PATH_CHECKS = 32;
+    private static final int MAX_LOG_TARGET_PATH_CHECKS = 16;
+    private static final int MAX_STAND_PATH_CHECKS_PER_TARGET = 8;
     private static final double BREAK_DISTANCE_SQR = 4.5D * 4.5D;
     private static final int COOLDOWN_TICKS = 20;
+    private static final int EMPTY_TARGET_SEARCH_COOLDOWN_TICKS = 20 * 3;
+    private static final int BUILD_WORK_CHECK_INTERVAL_TICKS = 20;
     private static final int LOG_RETRY_COOLDOWN_TICKS = 5;
     private static final int LOG_BATCH_COOLDOWN_TICKS = 2;
     private static final int MIN_LOG_RESERVE = 4;
@@ -67,9 +73,14 @@ public class GatherMaterialsGoal extends Goal {
     private static final int ACTIVE_FURNACE_COAL_RESERVE_TARGET = 24;
     private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int MAX_GATHER_TICKS = 20 * 20;
+    private static final int UPWARD_ESCAPE_REQUEST_TICKS = 20 * 8;
     private static final int FAILED_GATHER_COOLDOWN_TICKS = 20 * 20;
     private static final int MAX_FAILED_PATH_TICKS = 20 * 3;
     private static final int MAX_TREE_LOGS = 96;
+    private static final int MAX_NON_LOG_TARGET_PATH_CHECKS = 48;
+    private static final int MIN_RAW_LOGS_FOR_STONE_GATHERING = 4;
+    private static final int WOOD_SURFACE_ESCAPE_REQUEST_TICKS = 20 * 30;
+    private static final int MIN_SURFACE_ESCAPE_DEPTH = 4;
     private static final int MAX_TREE_LEAF_CLEARS = 24;
     private static final int TREE_LEAF_CLEAR_RADIUS = 2;
     private static final int TREE_LEAF_DIRECT_SCAN_RADIUS = 3;
@@ -83,10 +94,11 @@ public class GatherMaterialsGoal extends Goal {
     private static final double LOG_PILLAR_FALLBACK_PLACE_CLEARANCE_Y = 0.55D;
     private static final int LOG_PILLAR_FORCE_PLACE_TICKS = 3;
     private static final double LOG_PILLAR_BASE_REACHED_SQR = 1.2D * 1.2D;
+    private static final double LOG_PILLAR_MAX_HORIZONTAL_DISTANCE_SQR = 1.5D * 1.5D;
     private static final int LOG_PILLAR_MIN_VERTICAL_GAP = 3;
     private static final int LOG_PILLAR_MAX_FAILED_STEPS = 2;
     private static final int MAX_DEFERRED_HIGH_LOG_TARGETS = 64;
-    private static final double PATH_OBSTRUCTION_BREAK_DISTANCE_SQR = 3.2D * 3.2D;
+    private static final double PATH_OBSTRUCTION_BREAK_DISTANCE_SQR = BREAK_DISTANCE_SQR;
 
     private final PlayerNpcEntity playerNpc;
     private final double speed;
@@ -115,6 +127,9 @@ public class GatherMaterialsGoal extends Goal {
     private int logPillarPlaceWaitTicks;
     private int logPillarFailedSteps;
     private int deferredHighLogDirtCount = -1;
+    private int buildWorkCheckCooldown;
+    private int remainingStandPathChecks = -1;
+    private boolean cachedReadyBuildWork;
     private boolean usingTemporaryTool;
     private boolean failedToGather;
 
@@ -140,14 +155,25 @@ public class GatherMaterialsGoal extends Goal {
         if (this.shouldCraftBeforeGathering(serverLevel)) {
             return false;
         }
-        if (BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel)
-                && !this.needsBuildMaterialReserves(serverLevel)) {
+        if (this.shouldYieldToReadyBuildWork(serverLevel)) {
             return false;
         }
 
         this.refreshDeferredHighLogTargets();
+        boolean needsWoodBeforeStone = this.shouldGatherWoodBeforeStone();
         this.targetType = this.chooseTargetType(serverLevel);
         GatherTarget target = this.findTargetBlock(serverLevel);
+        if (target == null && this.targetType == MaterialTarget.LOG && needsWoodBeforeStone) {
+            this.logReserveTarget = Math.max(this.logReserveTarget, MIN_RAW_LOGS_FOR_STONE_GATHERING);
+            if (this.requestSurfaceWoodEscapeIfNeeded(serverLevel)) {
+                return false;
+            }
+        }
+        if (target == null && this.targetType == MaterialTarget.LOG && this.shouldYieldMissingLogsToExploration()) {
+            this.playerNpc.setBiomeExploreCooldown(0);
+            this.backOffAfterEmptyTargetSearch();
+            return false;
+        }
         if (target == null && this.targetType == MaterialTarget.LOG) {
             this.ensureDirtPillarReserveTarget();
             if (this.countDirtBlocks() < this.dirtPillarReserveTarget) {
@@ -173,6 +199,11 @@ public class GatherMaterialsGoal extends Goal {
             }
         }
         if (target == null) {
+            this.backOffAfterEmptyTargetSearch();
+            return false;
+        }
+        if (this.shouldRequestCaveEscapeForTarget(serverLevel, target)) {
+            this.playerNpc.requestUpwardEscapeTo(this.upwardEscapeTargetFor(target), UPWARD_ESCAPE_REQUEST_TICKS);
             return false;
         }
 
@@ -187,8 +218,7 @@ public class GatherMaterialsGoal extends Goal {
     @Override
     public boolean canContinueToUse() {
         if (this.playerNpc.level() instanceof ServerLevel serverLevel
-                && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel)
-                && !this.needsBuildMaterialReserves(serverLevel)) {
+                && this.shouldYieldToReadyBuildWork(serverLevel)) {
             return false;
         }
 
@@ -232,6 +262,8 @@ public class GatherMaterialsGoal extends Goal {
                 this.refreshTreeLogs(serverLevel, this.targetPos);
             }
             this.updateTaskDetail(serverLevel);
+            this.moveToTarget();
+            return;
         }
         this.moveToTarget();
     }
@@ -294,6 +326,10 @@ public class GatherMaterialsGoal extends Goal {
             return;
         }
         this.gatherTicks++;
+        if (this.targetType == MaterialTarget.STONE && this.shouldGatherWoodBeforeStone()) {
+            this.pauseStoneGatheringForWood(serverLevel);
+            return;
+        }
         if (this.gatherTicks >= this.getMaxGatherTicks()) {
             this.failGathering(serverLevel, String.format(java.util.Locale.ROOT, "giving up after %ds", this.getMaxGatherSeconds()));
             return;
@@ -413,7 +449,7 @@ public class GatherMaterialsGoal extends Goal {
 
         BlockPos minedPos = this.targetPos;
         BlockState minedState = serverLevel.getBlockState(minedPos);
-        if (!serverLevel.destroyBlock(minedPos, true, this.playerNpc)) {
+        if (!PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, minedPos, minedState, this.playerNpc)) {
             this.playerNpc.clearBlockBreakProgress(minedPos);
             if (this.skipCurrentTreeTargetAndSwitch(serverLevel)) {
                 return;
@@ -459,6 +495,21 @@ public class GatherMaterialsGoal extends Goal {
         this.playerNpc.setCurrentAiDetail(detail);
     }
 
+    private void pauseStoneGatheringForWood(ServerLevel serverLevel) {
+        this.playerNpc.clearBlockBreakProgress(this.targetPos);
+        this.playerNpc.clearBlockBreakProgress(this.pathObstructionPos);
+        this.playerNpc.getNavigation().stop();
+        this.targetType = MaterialTarget.LOG;
+        this.logReserveTarget = Math.max(this.logReserveTarget, MIN_RAW_LOGS_FOR_STONE_GATHERING);
+        this.targetPos = null;
+        this.standPos = null;
+        this.pathObstructionPos = null;
+        this.mineTicks = 0;
+        this.pathObstructionMineTicks = 0;
+        this.requestSurfaceWoodEscapeIfNeeded(serverLevel);
+        this.playerNpc.setCurrentAiDetail("stone paused: raw logs below 4, searching surface wood");
+    }
+
     private boolean moveToTarget() {
         if (this.standPos == null) {
             return false;
@@ -466,9 +517,102 @@ public class GatherMaterialsGoal extends Goal {
 
         Path path = this.playerNpc.getNavigation().createPath(this.standPos, 0);
         if (path == null || !path.canReach()) {
+            if (this.playerNpc.level() instanceof ServerLevel serverLevel
+                    && this.targetPos != null
+                    && this.shouldRequestCaveEscapeForTarget(serverLevel, new GatherTarget(this.targetPos, this.standPos))) {
+                this.playerNpc.requestUpwardEscapeTo(this.upwardEscapeTargetFor(new GatherTarget(this.targetPos, this.standPos)), UPWARD_ESCAPE_REQUEST_TICKS);
+            }
+            return false;
+        }
+        if (this.pathEndsWhereNpcAlreadyStands(path) && !this.isTargetWithinCurrentBreakRange()) {
             return false;
         }
         return this.playerNpc.getNavigation().moveTo(path, this.speed);
+    }
+
+    private boolean pathEndsWhereNpcAlreadyStands(Path path) {
+        BlockPos target = path.getTarget();
+        return target != null
+                && this.playerNpc.distanceToSqr(target.getX() + 0.5D, target.getY(), target.getZ() + 0.5D) <= 1.25D * 1.25D;
+    }
+
+    private boolean isTargetWithinCurrentBreakRange() {
+        return this.targetPos != null
+                && this.playerNpc.distanceToSqr(
+                this.targetPos.getX() + 0.5D,
+                this.targetPos.getY() + 0.5D,
+                this.targetPos.getZ() + 0.5D
+        ) <= BREAK_DISTANCE_SQR;
+    }
+
+    private boolean shouldRequestCaveEscapeForTarget(ServerLevel serverLevel, GatherTarget target) {
+        if (target == null) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos routeTarget = this.upwardEscapeTargetFor(target);
+        if (this.canPathReach(target.standPos())) {
+            return false;
+        }
+
+        if (this.isBelowSurfaceForEscape(serverLevel, feet)
+                && this.isLikelySurfaceTarget(serverLevel, target.targetPos())
+                && this.shouldSurfaceRouteUseEscape(feet, routeTarget)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean requestSurfaceWoodEscapeIfNeeded(ServerLevel serverLevel) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (!this.isBelowSurfaceForEscape(serverLevel, feet)) {
+            return false;
+        }
+
+        BlockPos surface = serverLevel.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, feet).above();
+        if (surface.getY() <= feet.getY() + 1) {
+            return false;
+        }
+
+        this.playerNpc.requestUpwardEscapeTo(surface, WOOD_SURFACE_ESCAPE_REQUEST_TICKS);
+        return true;
+    }
+
+    private boolean shouldSurfaceRouteUseEscape(BlockPos feet, BlockPos routeTarget) {
+        return routeTarget.getY() > feet.getY() + 2
+                || this.horizontalDistanceSqr(feet, routeTarget) > 8.0D * 8.0D;
+    }
+
+    private boolean isBelowSurfaceForEscape(ServerLevel serverLevel, BlockPos feet) {
+        if (serverLevel.canSeeSky(feet.above())) {
+            return false;
+        }
+        BlockPos surface = serverLevel.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, feet);
+        return surface.getY() - feet.getY() >= MIN_SURFACE_ESCAPE_DEPTH;
+    }
+
+    private double horizontalDistanceSqr(BlockPos from, BlockPos to) {
+        double dx = from.getX() - to.getX();
+        double dz = from.getZ() - to.getZ();
+        return dx * dx + dz * dz;
+    }
+
+    private BlockPos upwardEscapeTargetFor(GatherTarget target) {
+        return target.targetPos().getY() >= target.standPos().getY()
+                ? target.targetPos()
+                : target.standPos();
+    }
+
+    private boolean isLikelySurfaceTarget(ServerLevel serverLevel, BlockPos pos) {
+        return serverLevel.canSeeSky(pos.above())
+                || pos.getY() >= serverLevel.getSeaLevel() + 4;
+    }
+
+    private boolean canPathReach(BlockPos pos) {
+        Path path = this.playerNpc.getNavigation().createPath(pos, 0);
+        return path != null && path.canReach();
     }
 
     private boolean tryStartPathObstructionMining(ServerLevel serverLevel) {
@@ -502,7 +646,7 @@ public class GatherMaterialsGoal extends Goal {
             this.clearPathObstruction(serverLevel);
             return false;
         }
-        if (!this.equipToolFor(state)) {
+        if (!this.equipToolForPathObstruction(state)) {
             this.skippedPathObstructions.add(this.pathObstructionPos.immutable());
             this.clearPathObstruction(serverLevel);
             return false;
@@ -530,7 +674,7 @@ public class GatherMaterialsGoal extends Goal {
         }
 
         BlockPos clearedPos = this.pathObstructionPos;
-        if (serverLevel.destroyBlock(clearedPos, true, this.playerNpc)) {
+        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, clearedPos, state, this.playerNpc)) {
             this.playerNpc.hurtMainHandItem(1);
             this.failedPathTicks = 0;
             this.repathTicks = 0;
@@ -589,6 +733,7 @@ public class GatherMaterialsGoal extends Goal {
                 candidates.add(side.above(2));
             }
         }
+        this.addLineObstructionCandidates(candidates, feet, destination);
 
         Set<BlockPos> seen = new HashSet<>();
         candidates.sort(Comparator
@@ -612,6 +757,24 @@ public class GatherMaterialsGoal extends Goal {
         return null;
     }
 
+    private void addLineObstructionCandidates(List<BlockPos> candidates, BlockPos feet, BlockPos destination) {
+        double dx = destination.getX() - feet.getX();
+        double dy = destination.getY() - feet.getY();
+        double dz = destination.getZ() - feet.getZ();
+        double steps = Math.max(1.0D, Math.max(Math.abs(dx), Math.max(Math.abs(dy), Math.abs(dz))));
+        int maxSteps = Math.min(8, (int) Math.ceil(steps));
+        for (int i = 1; i <= maxSteps; i++) {
+            double progress = i / (double) maxSteps;
+            int x = feet.getX() + (int) Math.round(dx * progress);
+            int y = feet.getY() + (int) Math.round(dy * progress);
+            int z = feet.getZ() + (int) Math.round(dz * progress);
+            BlockPos routeFeet = new BlockPos(x, y, z);
+            candidates.add(routeFeet);
+            candidates.add(routeFeet.above());
+            candidates.add(routeFeet.above(2));
+        }
+    }
+
     private boolean isPathObstructionBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
         return !state.isAir()
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
@@ -619,9 +782,18 @@ public class GatherMaterialsGoal extends Goal {
                 || state.is(BlockTags.LEAVES)
                 || state.canBeReplaced())
                 && state.getFluidState().isEmpty()
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
                 && !this.isProtectedHomeBlock(pos)
                 && serverLevel.getBlockEntity(pos) == null
-                && this.hasRequiredToolFor(state);
+                && this.canClearPathObstruction(state);
+    }
+
+    private boolean canClearPathObstruction(BlockState state) {
+        return this.canClearSoftGroundByHand(state) || this.hasRequiredToolFor(state);
+    }
+
+    private boolean canClearSoftGroundByHand(BlockState state) {
+        return this.isShovelBlock(state) && !state.requiresCorrectToolForDrops();
     }
 
     private boolean isFenceLikePathObstruction(BlockState state) {
@@ -633,6 +805,11 @@ public class GatherMaterialsGoal extends Goal {
     private BlockPos findTargetCoverObstruction(ServerLevel serverLevel) {
         if (this.targetPos == null) {
             return null;
+        }
+
+        BlockPos verticalCover = this.findVerticalTargetCoverObstruction(serverLevel);
+        if (verticalCover != null) {
+            return verticalCover;
         }
 
         Vec3 eye = new Vec3(this.playerNpc.getX(), this.playerNpc.getEyeY(), this.playerNpc.getZ());
@@ -658,6 +835,51 @@ public class GatherMaterialsGoal extends Goal {
 
         BlockState state = serverLevel.getBlockState(hitPos);
         return this.isPathObstructionBlock(serverLevel, hitPos, state) ? hitPos : this.findNearbyFenceLikeTargetObstruction(serverLevel);
+    }
+
+    private BlockPos findVerticalTargetCoverObstruction(ServerLevel serverLevel) {
+        if (!this.shouldClearVerticalCoverBeforeTarget(serverLevel.getBlockState(this.targetPos))) {
+            return null;
+        }
+
+        int topY = this.playerNpc.blockPosition().getY();
+        if (this.standPos != null) {
+            topY = Math.max(topY, this.standPos.getY());
+        }
+        topY = Math.min(topY, this.targetPos.getY() + 4);
+        if (topY <= this.targetPos.getY()) {
+            return null;
+        }
+
+        for (int y = topY; y > this.targetPos.getY(); y--) {
+            BlockPos coverPos = new BlockPos(this.targetPos.getX(), y, this.targetPos.getZ()).immutable();
+            if (this.skippedPathObstructions.contains(coverPos)
+                    || !serverLevel.isInWorldBounds(coverPos)
+                    || !serverLevel.getWorldBorder().isWithinBounds(coverPos)) {
+                continue;
+            }
+
+            BlockState coverState = serverLevel.getBlockState(coverPos);
+            if (coverState.isAir() || coverState.getFluidState().isSource()) {
+                continue;
+            }
+            if (this.isPathObstructionBlock(serverLevel, coverPos, coverState)) {
+                return coverPos;
+            }
+            if (!coverState.getCollisionShape(serverLevel, coverPos).isEmpty()) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private boolean shouldClearVerticalCoverBeforeTarget(BlockState targetState) {
+        return this.targetType != MaterialTarget.LOG
+                && (this.isCoalOre(targetState)
+                || this.isStoneBlock(targetState)
+                || this.isShovelBlock(targetState)
+                || this.targetType == MaterialTarget.DIRT
+                || this.targetType == MaterialTarget.SAND);
     }
 
     private BlockPos findNearbyFenceLikeTargetObstruction(ServerLevel serverLevel) {
@@ -695,52 +917,57 @@ public class GatherMaterialsGoal extends Goal {
     }
 
     private GatherTarget findTargetBlock(ServerLevel serverLevel) {
-        List<GatherTarget> candidates = new ArrayList<>();
-        List<GatherTarget> pillarCandidates = new ArrayList<>();
-        List<GatherTarget> leafCandidates = new ArrayList<>();
-        List<BlockPos> logCandidates = new ArrayList<>();
         BlockPos center = this.playerNpc.blockPosition();
-        int searchRadius = this.targetType == MaterialTarget.LOG ? LOG_SEARCH_RADIUS : SEARCH_RADIUS;
-        int searchUp = this.targetType == MaterialTarget.LOG ? 10 : 3;
-
-        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-searchRadius, -2, -searchRadius), center.offset(searchRadius, searchUp, searchRadius))) {
-            BlockPos immutable = pos.immutable();
-            if (this.isProtectedHomeBlock(immutable) || !this.isInsideResourceRadius(immutable)) {
-                continue;
+        if (this.targetType == MaterialTarget.LOG) {
+            GatherTarget localTarget = this.findLogTargetBlock(serverLevel, center, LOCAL_LOG_SEARCH_RADIUS);
+            if (localTarget != null) {
+                return localTarget;
             }
-            BlockState state = serverLevel.getBlockState(immutable);
-            if (this.isWantedBlockForTarget(state) && this.hasRequiredToolFor(state)) {
-                if (this.targetType == MaterialTarget.LOG) {
-                    if (!this.skippedTreeTargets.contains(immutable)
-                            && !this.deferredHighLogTargets.contains(immutable)) {
-                        logCandidates.add(immutable);
-                    }
-                } else {
-                    BlockPos stand = this.findStandPos(serverLevel, immutable);
-                    if (stand != null) {
-                        candidates.add(new GatherTarget(immutable, stand));
-                    }
-                }
+            if (LOCAL_LOG_SEARCH_RADIUS < LOG_SEARCH_RADIUS) {
+                return this.findLogTargetBlock(serverLevel, center, LOG_SEARCH_RADIUS);
             }
+            return null;
         }
 
-        if (this.targetType == MaterialTarget.LOG) {
+        return this.findNonLogTargetBlock(serverLevel, center);
+    }
+
+    private GatherTarget findLogTargetBlock(ServerLevel serverLevel, BlockPos center, int searchRadius) {
+        this.remainingStandPathChecks = MAX_STAND_PATH_CHECKS_PER_TARGET;
+        try {
+            List<GatherTarget> candidates = new ArrayList<>();
+            List<GatherTarget> pillarCandidates = new ArrayList<>();
+            List<GatherTarget> leafCandidates = new ArrayList<>();
+            List<BlockPos> logCandidates = new ArrayList<>();
+            this.collectWantedTargetPositions(serverLevel, center, searchRadius, 10, logCandidates);
+
             logCandidates.sort(Comparator
                     .comparingDouble((BlockPos pos) -> center.distSqr(pos))
                     .thenComparingInt(BlockPos::getY));
             int checked = 0;
             for (BlockPos logCandidate : logCandidates) {
                 BlockPos stand = this.findStandPos(serverLevel, logCandidate);
-                if (stand != null) {
-                    candidates.add(new GatherTarget(logCandidate, stand));
-                } else {
+                boolean addedPillarCandidate = false;
+                if (stand != null && this.shouldPillarForHighLog(stand, logCandidate)) {
                     BlockPos pillarBase = this.findLogPillarBase(serverLevel, logCandidate);
                     if (pillarBase != null) {
                         pillarCandidates.add(new GatherTarget(logCandidate, pillarBase));
+                        addedPillarCandidate = true;
+                    }
+                }
+
+                if (!addedPillarCandidate) {
+                    if (stand != null) {
+                        candidates.add(new GatherTarget(logCandidate, stand));
                     } else {
-                        GatherTarget leafTarget = this.findTreeLeafClearTarget(serverLevel, logCandidate);
-                        if (leafTarget != null) {
-                            leafCandidates.add(leafTarget);
+                        BlockPos pillarBase = this.findLogPillarBase(serverLevel, logCandidate);
+                        if (pillarBase != null) {
+                            pillarCandidates.add(new GatherTarget(logCandidate, pillarBase));
+                        } else {
+                            GatherTarget leafTarget = this.findTreeLeafClearTarget(serverLevel, logCandidate);
+                            if (leafTarget != null) {
+                                leafCandidates.add(leafTarget);
+                            }
                         }
                     }
                 }
@@ -748,92 +975,160 @@ public class GatherMaterialsGoal extends Goal {
                     break;
                 }
             }
-        }
 
-        if (candidates.isEmpty()) {
-            if (this.targetType != MaterialTarget.LOG) {
+            if (candidates.isEmpty()) {
+                if (!pillarCandidates.isEmpty()) {
+                    pillarCandidates.sort(Comparator
+                            .comparingDouble((GatherTarget target) -> center.distSqr(target.standPos()))
+                            .thenComparingInt(target -> target.targetPos().getY()));
+                    return pillarCandidates.get(0);
+                }
+                if (!leafCandidates.isEmpty()) {
+                    leafCandidates.sort(Comparator
+                            .comparingDouble((GatherTarget target) -> this.distanceToBlockCenterSqr(target.targetPos()))
+                            .thenComparingDouble(target -> center.distSqr(target.standPos()))
+                            .thenComparingInt(target -> target.targetPos().getY()));
+                    return leafCandidates.get(0);
+                }
                 return null;
             }
-            if (!pillarCandidates.isEmpty()) {
-                pillarCandidates.sort(Comparator
-                        .comparingDouble((GatherTarget target) -> center.distSqr(target.standPos()))
-                        .thenComparingInt(target -> target.targetPos().getY()));
-                return pillarCandidates.get(0);
-            }
-            if (!leafCandidates.isEmpty()) {
-                leafCandidates.sort(Comparator
-                        .comparingDouble((GatherTarget target) -> this.distanceToBlockCenterSqr(target.targetPos()))
-                        .thenComparingDouble(target -> center.distSqr(target.standPos()))
-                        .thenComparingInt(target -> target.targetPos().getY()));
-                return leafCandidates.get(0);
-            }
-            return null;
-        }
-        candidates.sort(Comparator
-                .comparingDouble((GatherTarget target) -> center.distSqr(target.standPos()))
-                .thenComparingInt(target -> target.targetPos().getY()));
-        if (this.targetType == MaterialTarget.LOG) {
+
+            candidates.sort(Comparator
+                    .comparingDouble((GatherTarget target) -> center.distSqr(target.standPos()))
+                    .thenComparingInt(target -> target.targetPos().getY()));
             return candidates.get(0);
+        } finally {
+            this.remainingStandPathChecks = -1;
         }
-        return candidates.get(this.playerNpc.getRandom().nextInt(Math.min(candidates.size(), 6)));
+    }
+
+    private GatherTarget findNonLogTargetBlock(ServerLevel serverLevel, BlockPos center) {
+        this.remainingStandPathChecks = MAX_STAND_PATH_CHECKS_PER_TARGET;
+        try {
+            List<GatherTarget> candidates = new ArrayList<>();
+            List<BlockPos> blockCandidates = new ArrayList<>();
+            this.collectWantedTargetPositions(serverLevel, center, SEARCH_RADIUS, 3, blockCandidates);
+
+            blockCandidates.sort(Comparator
+                    .comparingDouble((BlockPos pos) -> center.distSqr(pos))
+                    .thenComparingInt(BlockPos::getY));
+            int checked = 0;
+            for (BlockPos blockCandidate : blockCandidates) {
+                BlockPos stand = this.findStandPos(serverLevel, blockCandidate);
+                if (stand != null) {
+                    candidates.add(new GatherTarget(blockCandidate, stand));
+                    if (candidates.size() >= 6) {
+                        break;
+                    }
+                }
+                if (++checked >= MAX_NON_LOG_TARGET_PATH_CHECKS) {
+                    break;
+                }
+            }
+
+            if (candidates.isEmpty()) {
+                return null;
+            }
+            candidates.sort(Comparator
+                    .comparingDouble((GatherTarget target) -> center.distSqr(target.standPos()))
+                    .thenComparingInt(target -> target.targetPos().getY()));
+            return candidates.get(this.playerNpc.getRandom().nextInt(Math.min(candidates.size(), 6)));
+        } finally {
+            this.remainingStandPathChecks = -1;
+        }
+    }
+
+    private void collectWantedTargetPositions(ServerLevel serverLevel, BlockPos center, int searchRadius, int searchUp, List<BlockPos> candidates) {
+        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-searchRadius, -2, -searchRadius), center.offset(searchRadius, searchUp, searchRadius))) {
+            BlockPos immutable = pos.immutable();
+            if (this.isProtectedHomeBlock(immutable) || !this.isInsideResourceRadius(immutable)) {
+                continue;
+            }
+            BlockState state = serverLevel.getBlockState(immutable);
+            if (!this.isWantedBlockForTarget(state) || !this.hasRequiredToolFor(state)) {
+                continue;
+            }
+            if (this.targetType == MaterialTarget.LOG
+                    && (this.skippedTreeTargets.contains(immutable)
+                    || this.deferredHighLogTargets.contains(immutable))) {
+                continue;
+            }
+            candidates.add(immutable);
+        }
     }
 
     private GatherTarget findNextLogInSameTree(ServerLevel serverLevel, BlockPos minedPos) {
-        this.refreshTreeLogs(serverLevel, minedPos);
-        List<GatherTarget> candidates = new ArrayList<>();
-        List<GatherTarget> pillarCandidates = new ArrayList<>();
-        List<GatherTarget> leafCandidates = new ArrayList<>();
+        this.remainingStandPathChecks = MAX_STAND_PATH_CHECKS_PER_TARGET;
+        try {
+            this.refreshTreeLogs(serverLevel, minedPos);
+            List<GatherTarget> candidates = new ArrayList<>();
+            List<GatherTarget> pillarCandidates = new ArrayList<>();
+            List<GatherTarget> leafCandidates = new ArrayList<>();
 
-        for (BlockPos treeLog : this.treeLogs) {
-            if (this.minedTreeLogs.contains(treeLog)
-                    || this.skippedTreeTargets.contains(treeLog)
-                    || this.deferredHighLogTargets.contains(treeLog)
-                    || !this.isInsideResourceRadius(treeLog)
-                    || this.isProtectedHomeBlock(treeLog)
-                    || !serverLevel.getBlockState(treeLog).is(BlockTags.LOGS)) {
-                continue;
-            }
+            for (BlockPos treeLog : this.treeLogs) {
+                if (this.minedTreeLogs.contains(treeLog)
+                        || this.skippedTreeTargets.contains(treeLog)
+                        || this.deferredHighLogTargets.contains(treeLog)
+                        || !this.isInsideResourceRadius(treeLog)
+                        || this.isProtectedHomeBlock(treeLog)
+                        || !serverLevel.getBlockState(treeLog).is(BlockTags.LOGS)) {
+                    continue;
+                }
 
-            BlockPos stand = this.findStandPos(serverLevel, treeLog);
-            if (stand != null) {
-                candidates.add(new GatherTarget(treeLog, stand));
-            } else {
-                BlockPos pillarBase = this.findLogPillarBase(serverLevel, treeLog);
-                if (pillarBase != null) {
-                    pillarCandidates.add(new GatherTarget(treeLog, pillarBase));
-                } else {
-                    GatherTarget leafTarget = this.findTreeLeafClearTarget(serverLevel, treeLog);
-                    if (leafTarget != null) {
-                        leafCandidates.add(leafTarget);
+                BlockPos stand = this.findStandPos(serverLevel, treeLog);
+                boolean addedPillarCandidate = false;
+                if (stand != null && this.shouldPillarForHighLog(stand, treeLog)) {
+                    BlockPos pillarBase = this.findLogPillarBase(serverLevel, treeLog);
+                    if (pillarBase != null) {
+                        pillarCandidates.add(new GatherTarget(treeLog, pillarBase));
+                        addedPillarCandidate = true;
+                    }
+                }
+
+                if (!addedPillarCandidate) {
+                    if (stand != null) {
+                        candidates.add(new GatherTarget(treeLog, stand));
+                    } else {
+                        BlockPos pillarBase = this.findLogPillarBase(serverLevel, treeLog);
+                        if (pillarBase != null) {
+                            pillarCandidates.add(new GatherTarget(treeLog, pillarBase));
+                        } else {
+                            GatherTarget leafTarget = this.findTreeLeafClearTarget(serverLevel, treeLog);
+                            if (leafTarget != null) {
+                                leafCandidates.add(leafTarget);
+                            }
+                        }
                     }
                 }
             }
-        }
 
-        if (candidates.isEmpty()) {
-            if (!pillarCandidates.isEmpty()) {
-                pillarCandidates.sort(Comparator
-                        .comparingInt((GatherTarget target) -> target.targetPos().getY())
-                        .thenComparingDouble(target -> minedPos.distSqr(target.targetPos()))
-                        .thenComparingDouble(target -> this.playerNpc.blockPosition().distSqr(target.standPos())));
-                return pillarCandidates.get(0);
+            if (candidates.isEmpty()) {
+                if (!pillarCandidates.isEmpty()) {
+                    pillarCandidates.sort(Comparator
+                            .comparingInt((GatherTarget target) -> target.targetPos().getY())
+                            .thenComparingDouble(target -> minedPos.distSqr(target.targetPos()))
+                            .thenComparingDouble(target -> this.playerNpc.blockPosition().distSqr(target.standPos())));
+                    return pillarCandidates.get(0);
+                }
+                if (!leafCandidates.isEmpty()) {
+                    leafCandidates.sort(Comparator
+                            .comparingDouble((GatherTarget target) -> this.distanceToBlockCenterSqr(target.targetPos()))
+                            .thenComparingInt(target -> target.targetPos().getY())
+                            .thenComparingDouble(target -> minedPos.distSqr(target.targetPos()))
+                            .thenComparingDouble(target -> this.playerNpc.blockPosition().distSqr(target.standPos())));
+                    return leafCandidates.get(0);
+                }
+                return null;
             }
-            if (!leafCandidates.isEmpty()) {
-                leafCandidates.sort(Comparator
-                        .comparingDouble((GatherTarget target) -> this.distanceToBlockCenterSqr(target.targetPos()))
-                        .thenComparingInt(target -> target.targetPos().getY())
-                        .thenComparingDouble(target -> minedPos.distSqr(target.targetPos()))
-                        .thenComparingDouble(target -> this.playerNpc.blockPosition().distSqr(target.standPos())));
-                return leafCandidates.get(0);
-            }
-            return null;
-        }
 
-        candidates.sort(Comparator
-                .comparingInt((GatherTarget target) -> target.targetPos().getY())
-                .thenComparingDouble(target -> minedPos.distSqr(target.targetPos()))
-                .thenComparingDouble(target -> this.playerNpc.blockPosition().distSqr(target.standPos())));
-        return candidates.get(0);
+            candidates.sort(Comparator
+                    .comparingInt((GatherTarget target) -> target.targetPos().getY())
+                    .thenComparingDouble(target -> minedPos.distSqr(target.targetPos()))
+                    .thenComparingDouble(target -> this.playerNpc.blockPosition().distSqr(target.standPos())));
+            return candidates.get(0);
+        } finally {
+            this.remainingStandPathChecks = -1;
+        }
     }
 
     private boolean switchToNextLog(ServerLevel serverLevel, BlockPos originPos) {
@@ -1089,7 +1384,7 @@ public class GatherMaterialsGoal extends Goal {
         for (BlockPos candidate : candidates) {
             BlockPos immutable = candidate.immutable();
             if (this.canReachStand(serverLevel, immutable)
-                    && immutable.distSqr(target) <= BREAK_DISTANCE_SQR + 1.0D) {
+                    && this.isBlockCenterWithinBreakRange(immutable, target)) {
                 return immutable;
             }
         }
@@ -1103,14 +1398,21 @@ public class GatherMaterialsGoal extends Goal {
 
         List<BlockPos> candidates = new ArrayList<>();
         BlockPos center = this.playerNpc.blockPosition();
-        candidates.add(center);
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            for (int yOffset = -2; yOffset <= 2; yOffset++) {
-                candidates.add(new BlockPos(
-                        target.getX() + direction.getStepX(),
-                        center.getY() + yOffset,
-                        target.getZ() + direction.getStepZ()
-                ));
+        if (this.isCloseEnoughForLogPillarBase(center, target)) {
+            candidates.add(center);
+        }
+        for (int xOffset = -1; xOffset <= 1; xOffset++) {
+            for (int zOffset = -1; zOffset <= 1; zOffset++) {
+                if (xOffset == 0 && zOffset == 0) {
+                    continue;
+                }
+                for (int yOffset = -2; yOffset <= 2; yOffset++) {
+                    candidates.add(new BlockPos(
+                            target.getX() + xOffset,
+                            center.getY() + yOffset,
+                            target.getZ() + zOffset
+                    ));
+                }
             }
         }
 
@@ -1142,7 +1444,18 @@ public class GatherMaterialsGoal extends Goal {
             return false;
         }
 
-        if (!this.isAtLogPillarBase()) {
+        this.preferCurrentLogPillarBase(serverLevel);
+        if (!this.isAtLogPillarBase(serverLevel)) {
+            BlockPos pillarBase = this.findLogPillarBase(serverLevel, this.targetPos);
+            if (pillarBase != null && !pillarBase.equals(this.standPos)) {
+                this.standPos = pillarBase;
+                this.repathTicks = 0;
+                this.failedPathTicks = 0;
+                this.playerNpc.getNavigation().stop();
+            }
+        }
+
+        if (!this.isAtLogPillarBase(serverLevel)) {
             this.moveToTarget();
             return true;
         }
@@ -1164,6 +1477,22 @@ public class GatherMaterialsGoal extends Goal {
             return true;
         }
         return this.switchToTreeLeafClearTarget(serverLevel);
+    }
+
+    private void preferCurrentLogPillarBase(ServerLevel serverLevel) {
+        if (this.targetPos == null) {
+            return;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.shouldPillarForHighLog(feet, this.targetPos)
+                && this.canPillarReachLog(serverLevel, feet, this.targetPos)
+                && !feet.equals(this.standPos)) {
+            this.standPos = feet.immutable();
+            this.repathTicks = 0;
+            this.failedPathTicks = 0;
+            this.playerNpc.getNavigation().stop();
+        }
     }
 
     private boolean shouldCollectDirtBeforeHighLog(GatherTarget target) {
@@ -1391,6 +1720,9 @@ public class GatherMaterialsGoal extends Goal {
         if (availableDirt <= 0) {
             return false;
         }
+        if (!this.isCloseEnoughForLogPillarBase(feet, target)) {
+            return false;
+        }
 
         int maxPlacements = Math.min(availableDirt, Math.max(1, target.getY() - feet.getY() + 1));
         for (int placed = 0; placed <= maxPlacements; placed++) {
@@ -1405,20 +1737,30 @@ public class GatherMaterialsGoal extends Goal {
         return false;
     }
 
-    private boolean isAtLogPillarBase() {
+    private boolean isCloseEnoughForLogPillarBase(BlockPos feet, BlockPos target) {
+        if (feet == null || target == null) {
+            return false;
+        }
+
+        double dx = feet.getX() + 0.5D - (target.getX() + 0.5D);
+        double dz = feet.getZ() + 0.5D - (target.getZ() + 0.5D);
+        return dx * dx + dz * dz <= LOG_PILLAR_MAX_HORIZONTAL_DISTANCE_SQR;
+    }
+
+    private boolean isAtLogPillarBase(ServerLevel serverLevel) {
         if (this.standPos == null) {
             return true;
         }
 
         BlockPos feet = this.playerNpc.blockPosition();
-        return feet.getY() >= this.standPos.getY()
-                && feet.getX() == this.standPos.getX()
-                && feet.getZ() == this.standPos.getZ()
-                && this.playerNpc.distanceToSqr(
+        boolean nearBase = this.playerNpc.distanceToSqr(
                 this.standPos.getX() + 0.5D,
                 feet.getY(),
                 this.standPos.getZ() + 0.5D
         ) <= LOG_PILLAR_BASE_REACHED_SQR;
+        return feet.getY() >= this.standPos.getY()
+                && nearBase
+                && this.canPillarReachLog(serverLevel, feet, this.targetPos);
     }
 
     private boolean hasOpenBodySpace(ServerLevel serverLevel, BlockPos pos) {
@@ -1461,6 +1803,12 @@ public class GatherMaterialsGoal extends Goal {
             return true;
         }
 
+        if (this.remainingStandPathChecks == 0) {
+            return false;
+        }
+        if (this.remainingStandPathChecks > 0) {
+            this.remainingStandPathChecks--;
+        }
         Path path = this.playerNpc.getNavigation().createPath(pos, 0);
         return path != null && path.canReach()
                 || this.hasLocalPathObstructionToward(serverLevel, pos);
@@ -1530,15 +1878,22 @@ public class GatherMaterialsGoal extends Goal {
             return MaterialTarget.LOG;
         }
 
-        if (this.hasTool(PickaxeItem.class) && this.needsStoneGear() && stoneCount < STONE_GEAR_STONE_TARGET) {
+        boolean wantsStoneGearMaterial = this.hasTool(PickaxeItem.class) && this.needsStoneGear() && stoneCount < STONE_GEAR_STONE_TARGET;
+        boolean wantsStoneSupply = this.hasTool(PickaxeItem.class) && stoneCount < this.playerNpc.getCobblestoneSupplyTarget();
+        if ((wantsStoneGearMaterial || wantsStoneSupply) && this.shouldGatherWoodBeforeStone()) {
+            this.logReserveTarget = Math.max(this.logReserveTarget, MIN_RAW_LOGS_FOR_STONE_GATHERING);
+            return MaterialTarget.LOG;
+        }
+
+        if (wantsStoneGearMaterial) {
             return MaterialTarget.STONE;
         }
 
-        if (this.hasTool(PickaxeItem.class) && stoneCount < this.playerNpc.getCobblestoneSupplyTarget()) {
+        if (wantsStoneSupply) {
             return MaterialTarget.STONE;
         }
 
-        if (this.hasTool(ShovelItem.class) && this.needsBuildGlassSand(serverLevel)) {
+        if (this.needsBuildGlassSand(serverLevel)) {
             return MaterialTarget.SAND;
         }
 
@@ -1555,6 +1910,39 @@ public class GatherMaterialsGoal extends Goal {
         }
 
         return MaterialTarget.GENERAL;
+    }
+
+    private boolean shouldGatherWoodBeforeStone() {
+        return this.countRawLogs() < MIN_RAW_LOGS_FOR_STONE_GATHERING;
+    }
+
+    private boolean shouldYieldMissingLogsToExploration() {
+        if (!this.deferredHighLogTargets.isEmpty()
+                && this.dirtPillarReserveTarget > 0
+                && this.countDirtBlocks() < this.dirtPillarReserveTarget) {
+            return false;
+        }
+
+        return this.countRawLogs() < this.playerNpc.getRawLogReserveTarget()
+                || this.countWood() < this.playerNpc.getWoodSupplyTarget()
+                || this.shouldGatherWoodBeforeStone();
+    }
+
+    private boolean shouldYieldToReadyBuildWork(ServerLevel serverLevel) {
+        if (this.buildWorkCheckCooldown > 0) {
+            this.buildWorkCheckCooldown--;
+            return this.cachedReadyBuildWork;
+        }
+
+        this.buildWorkCheckCooldown = BUILD_WORK_CHECK_INTERVAL_TICKS + this.playerNpc.getRandom().nextInt(6);
+        this.cachedReadyBuildWork = !this.needsBuildMaterialReserves(serverLevel)
+                && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
+        return this.cachedReadyBuildWork;
+    }
+
+    private void backOffAfterEmptyTargetSearch() {
+        int cooldown = EMPTY_TARGET_SEARCH_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20);
+        this.playerNpc.setGatherCooldown(Math.max(this.playerNpc.getGatherCooldown(), cooldown));
     }
 
     private boolean needsBuildMaterialReserves(ServerLevel serverLevel) {
@@ -1747,18 +2135,38 @@ public class GatherMaterialsGoal extends Goal {
                 || state.is(BlockTags.MINEABLE_WITH_SHOVEL);
     }
 
+    private boolean isDirtPillarSupplyBlock(BlockState state) {
+        return state.is(Blocks.DIRT) || state.is(Blocks.GRASS_BLOCK);
+    }
+
     private boolean isCoalOre(BlockState state) {
         return state.is(Blocks.COAL_ORE) || state.is(Blocks.DEEPSLATE_COAL_ORE);
     }
 
     private boolean hasRequiredToolFor(BlockState state) {
+        if (this.targetType == MaterialTarget.DIRT && this.isDirtPillarSupplyBlock(state)) {
+            return true;
+        }
+        if (this.canClearSoftGroundByHand(state)) {
+            return true;
+        }
         if (this.isShovelBlock(state)) {
             return this.hasTool(ShovelItem.class);
+        }
+        if (state.is(BlockTags.LOGS)) {
+            return this.hasTool(AxeItem.class) || this.canBootstrapLogByHand();
+        }
+        if (state.is(BlockTags.MINEABLE_WITH_AXE) || state.is(Blocks.CRAFTING_TABLE)) {
+            return this.hasTool(AxeItem.class);
         }
         if (this.isStoneBlock(state) || this.isCoalOre(state)) {
             return this.hasTool(PickaxeItem.class);
         }
         return true;
+    }
+
+    private boolean canBootstrapLogByHand() {
+        return !this.hasTool(AxeItem.class) && !this.canCraftStarterGear();
     }
 
     private int getRequiredMineTicks(ServerLevel serverLevel, BlockState state) {
@@ -1787,13 +2195,29 @@ public class GatherMaterialsGoal extends Goal {
     }
 
     private boolean equipToolFor(BlockState state) {
-        if (this.isShovelBlock(state)) {
-            return this.equipTool(ShovelItem.class);
-        } else if (state.is(BlockTags.LOGS) || state.is(BlockTags.MINEABLE_WITH_AXE) || state.is(Blocks.CRAFTING_TABLE)) {
-            if (!this.equipTool(AxeItem.class)) {
+        if (this.targetType == MaterialTarget.DIRT && this.isDirtPillarSupplyBlock(state)) {
+            if (!this.equipTool(ShovelItem.class)) {
                 this.equipEmptyHandForMining();
             }
             return true;
+        }
+        if (this.canClearSoftGroundByHand(state)) {
+            if (!this.equipTool(ShovelItem.class)) {
+                this.equipEmptyHandForMining();
+            }
+            return true;
+        }
+        if (this.isShovelBlock(state)) {
+            return this.equipTool(ShovelItem.class);
+        } else if (state.is(BlockTags.LOGS) || state.is(BlockTags.MINEABLE_WITH_AXE) || state.is(Blocks.CRAFTING_TABLE)) {
+            if (this.equipTool(AxeItem.class)) {
+                return true;
+            }
+            if (state.is(BlockTags.LOGS) && this.canBootstrapLogByHand()) {
+                this.equipEmptyHandForMining();
+                return true;
+            }
+            return false;
         } else if (this.isTreeLeaf(state)) {
             this.equipEmptyHandForMining();
             return true;
@@ -1801,6 +2225,16 @@ public class GatherMaterialsGoal extends Goal {
             return this.equipTool(PickaxeItem.class);
         }
         return true;
+    }
+
+    private boolean equipToolForPathObstruction(BlockState state) {
+        if (this.canClearSoftGroundByHand(state)) {
+            if (!this.equipTool(ShovelItem.class)) {
+                this.equipEmptyHandForMining();
+            }
+            return true;
+        }
+        return this.equipToolFor(state);
     }
 
     private int getMaxGatherTicks() {

@@ -1,6 +1,6 @@
 package com.pla.smart_npc.util;
 
-import com.pla.smart_npc.config.PlayerNpcConfig;
+import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.task.DelayedTask;
 import net.minecraft.ChatFormatting;
@@ -117,13 +117,13 @@ public class ChatUtil {
 
     private static void broadcastSystemMessage(Entity entity, Component message) {
         MinecraftServer server = entity.level().getServer();
-        if (PlayerNpcConfig.TURN_ON_NPC_CHAT.get() && server != null) {
+        if (SmartNpcConfig.TURN_ON_NPC_CHAT.get() && server != null) {
             server.getPlayerList().broadcastSystemMessage(message, false);
         }
     }
 
     private static boolean canChat(Entity entity) {
-        return PlayerNpcConfig.TURN_ON_NPC_CHAT.get() && entity.level().getServer() != null;
+        return SmartNpcConfig.TURN_ON_NPC_CHAT.get() && entity.level().getServer() != null;
     }
 
     private static String randomKey(Entity entity, String prefix, int messageCount) {

@@ -3,7 +3,7 @@ package com.pla.smart_npc.item;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.network.PlayerNpcInspectorData;
 import com.pla.smart_npc.network.PlayerNpcInspectorPacket;
-import com.pla.smart_npc.network.PlayerNpcNetwork;
+import com.pla.smart_npc.network.SmartNpcNetwork;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
@@ -42,7 +42,7 @@ public class InventoryViewerItem extends Item {
         }
 
         if (player instanceof ServerPlayer serverPlayer) {
-            PlayerNpcNetwork.CHANNEL.send(
+            SmartNpcNetwork.CHANNEL.send(
                     PacketDistributor.PLAYER.with(() -> serverPlayer),
                     new PlayerNpcInspectorPacket(target.getId(), PlayerNpcInspectorData.createSnapshot(playerNpcEntity))
             );
@@ -55,7 +55,7 @@ public class InventoryViewerItem extends Item {
     public @NotNull InteractionResultHolder<ItemStack> use(@NotNull Level level, @NotNull Player player, @NotNull InteractionHand hand) {
         ItemStack stack = player.getItemInHand(hand);
         if (player instanceof ServerPlayer serverPlayer) {
-            PlayerNpcNetwork.CHANNEL.send(
+            SmartNpcNetwork.CHANNEL.send(
                     PacketDistributor.PLAYER.with(() -> serverPlayer),
                     PlayerNpcInspectorPacket.clear()
             );

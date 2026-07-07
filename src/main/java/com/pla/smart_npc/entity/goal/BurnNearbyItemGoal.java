@@ -1,14 +1,20 @@
 package com.pla.smart_npc.entity.goal;
 
-import com.pla.smart_npc.config.PlayerNpcConfig;
+import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
+import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -18,23 +24,43 @@ import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.*;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.pathfinder.Path;
+import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
 public class BurnNearbyItemGoal extends Goal {
     private final Mob mob;
     private final double speed;
     private final double searchRadius;
+    private final Set<BlockPos> skippedObstructions = new HashSet<>();
     private ItemEntity targetItem;
+    private BlockPos pathObstructionPos;
     private ItemStack burnToolRestoreItem = ItemStack.EMPTY;
+    private ItemStack previousMainHand = ItemStack.EMPTY;
     private BlockPos firePos;
     private ItemStack burningStack = ItemStack.EMPTY;
     private ItemStack activeBurnToolStack = ItemStack.EMPTY;
     private int burnTicks;
+    private int repathTicks;
+    private int failedPathTicks;
+    private int obstructionMineTicks;
+    private int giveUpCooldownTicks;
     private boolean equippedBurnTool;
+    private boolean usingTemporaryTool;
     private BurnTool burnTool;
+    private static final int REPATH_INTERVAL_TICKS = 10;
+    private static final int MAX_FAILED_PATH_TICKS = 20 * 5;
+    private static final int FAILED_BURN_COOLDOWN_TICKS = 20 * 15;
+    private static final int MAX_OBSTRUCTION_BREAK_TICKS = 20 * 4;
+    private static final double OBSTRUCTION_BREAK_DISTANCE_SQR = 3.2D * 3.2D;
 
     private static List<String> keys(String prefix, int count) {
         List<String> list = new ArrayList<>(count);
@@ -59,6 +85,10 @@ public class BurnNearbyItemGoal extends Goal {
 
     @Override
     public boolean canUse() {
+        if (giveUpCooldownTicks > 0) {
+            giveUpCooldownTicks--;
+            return false;
+        }
         if (mob.level().isClientSide) return false;
         if (!mob.isAlive() || mob.isRemoved() || mob.isDeadOrDying()) return false;
         if (mob.isPassenger()) return false;
@@ -91,7 +121,14 @@ public class BurnNearbyItemGoal extends Goal {
         burningStack = ItemStack.EMPTY;
         activeBurnToolStack = ItemStack.EMPTY;
         burnTicks = 0;
+        repathTicks = 0;
+        failedPathTicks = 0;
+        obstructionMineTicks = 0;
+        pathObstructionPos = null;
+        previousMainHand = ItemStack.EMPTY;
+        skippedObstructions.clear();
         equippedBurnTool = false;
+        usingTemporaryTool = false;
         burnTool = null;
 
         if (targetItem == null) {
@@ -102,7 +139,8 @@ public class BurnNearbyItemGoal extends Goal {
             restoreMainWeapon(false);
         }
 
-        mob.getNavigation().moveTo(targetItem, speed);
+        updateMovingDetail();
+        moveToTargetItem();
     }
 
     @Override
@@ -118,18 +156,27 @@ public class BurnNearbyItemGoal extends Goal {
             return;
         }
 
+        if (tickPathObstruction()) {
+            return;
+        }
+
         if (shouldPickupOrEquipInsteadOfBurn(targetItem.getItem())) {
             restoreMainWeapon(false);
         }
 
-        if (mob.getNavigation().isDone()) {
-            var path = mob.getNavigation().createPath(targetItem, 0);
+        double dist = mob.distanceTo(targetItem);
 
-            if (path == null) {
+        if (dist > 1.5D && (repathTicks-- <= 0 || mob.getNavigation().isDone() || mob.getNavigation().isStuck())) {
+            repathTicks = REPATH_INTERVAL_TICKS;
+            if (moveToTargetItem()) {
+                failedPathTicks = 0;
+            } else {
+                failedPathTicks += REPATH_INTERVAL_TICKS;
+                if (failedPathTicks >= MAX_FAILED_PATH_TICKS) {
+                    abandonTarget("failed to path to item");
+                }
                 return;
             }
-
-            mob.getNavigation().moveTo(targetItem, speed);
         }
 
         mob.getLookControl().setLookAt(
@@ -139,9 +186,8 @@ public class BurnNearbyItemGoal extends Goal {
                 30.0F, 30.0F
         );
 
-        double dist = mob.distanceTo(targetItem);
-
         if (dist <= 1.5D) {
+            restorePreviousMainHand();
             if (shouldPickupOrEquipInsteadOfBurn(targetItem.getItem())) {
                 if (tryHandleItemWithoutBurning(targetItem)) {
                     targetItem = null;
@@ -158,6 +204,8 @@ public class BurnNearbyItemGoal extends Goal {
 
             igniteGroundAtItem(serverLevel);
         }
+
+        updateMovingDetail();
     }
 
     @Override
@@ -166,24 +214,453 @@ public class BurnNearbyItemGoal extends Goal {
 
         clearTemporaryFire();
         targetItem = null;
+        clearPathObstruction();
         mob.getNavigation().stop();
 
         if (shouldRestoreBurnTool) {
             restoreMainWeapon(true);
         }
         returnActiveBurnToolIfNeeded();
+        restorePreviousMainHand();
+
+        if (mob instanceof PlayerNpcEntity playerNpcEntity) {
+            playerNpcEntity.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+        }
 
         burnToolRestoreItem = ItemStack.EMPTY;
         firePos = null;
         burningStack = ItemStack.EMPTY;
         activeBurnToolStack = ItemStack.EMPTY;
         burnTicks = 0;
+        repathTicks = 0;
+        failedPathTicks = 0;
+        obstructionMineTicks = 0;
+        pathObstructionPos = null;
+        previousMainHand = ItemStack.EMPTY;
+        skippedObstructions.clear();
         equippedBurnTool = false;
+        usingTemporaryTool = false;
         burnTool = null;
     }
 
+    private boolean moveToTargetItem() {
+        if (targetItem == null || !targetItem.isAlive()) {
+            return false;
+        }
+
+        restorePreviousMainHand();
+        Path itemPath = mob.getNavigation().createPath(targetItem, 0);
+        if (itemPath != null && itemPath.canReach() && mob.getNavigation().moveTo(itemPath, speed)) {
+            return true;
+        }
+
+        BlockPos stand = findStandNearItem(targetItem);
+        Path standPath = stand == null ? null : mob.getNavigation().createPath(stand, 0);
+        if (standPath != null && standPath.canReach() && mob.getNavigation().moveTo(standPath, speed)) {
+            return true;
+        }
+
+        return tryStartPathObstructionMining(stand) || tryStartPathObstructionMining(targetItem.blockPosition());
+    }
+
+    private void abandonTarget(String reason) {
+        if (mob instanceof PlayerNpcEntity playerNpcEntity) {
+            playerNpcEntity.setCurrentAiDetail(reason);
+        }
+        giveUpCooldownTicks = FAILED_BURN_COOLDOWN_TICKS;
+        targetItem = null;
+        clearPathObstruction();
+        mob.getNavigation().stop();
+    }
+
+    private BlockPos findStandNearItem(ItemEntity item) {
+        if (item == null || !(mob.level() instanceof ServerLevel serverLevel)) {
+            return null;
+        }
+
+        BlockPos itemPos = item.blockPosition();
+        BlockPos bestStand = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.betweenClosed(itemPos.offset(-2, -2, -2), itemPos.offset(2, 2, 2))) {
+            BlockPos stand = pos.immutable();
+            if (!canStandAt(serverLevel, stand)) {
+                continue;
+            }
+            double distance = mob.distanceToSqr(stand.getX() + 0.5D, stand.getY(), stand.getZ() + 0.5D);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestStand = stand;
+            }
+        }
+        return bestStand;
+    }
+
+    private boolean tryStartPathObstructionMining(BlockPos destination) {
+        if (!(mob.level() instanceof ServerLevel) || destination == null || !(mob instanceof PlayerNpcEntity)) {
+            return false;
+        }
+
+        BlockPos obstruction = findPathObstructionToward(destination);
+        if (obstruction == null) {
+            return false;
+        }
+
+        pathObstructionPos = obstruction;
+        obstructionMineTicks = 0;
+        mob.getNavigation().stop();
+        return tickPathObstruction();
+    }
+
+    private boolean tickPathObstruction() {
+        if (pathObstructionPos == null
+                || !(mob instanceof PlayerNpcEntity playerNpc)
+                || !(mob.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+
+        BlockState state = serverLevel.getBlockState(pathObstructionPos);
+        if (!isPathObstructionBlock(serverLevel, pathObstructionPos, state)) {
+            clearPathObstruction();
+            return false;
+        }
+        if (mob.distanceToSqr(
+                pathObstructionPos.getX() + 0.5D,
+                pathObstructionPos.getY() + 0.5D,
+                pathObstructionPos.getZ() + 0.5D
+        ) > OBSTRUCTION_BREAK_DISTANCE_SQR) {
+            skippedObstructions.add(pathObstructionPos.immutable());
+            clearPathObstruction();
+            return false;
+        }
+        if (!equipToolFor(state)) {
+            skippedObstructions.add(pathObstructionPos.immutable());
+            clearPathObstruction();
+            return false;
+        }
+
+        mob.getNavigation().stop();
+        mob.getLookControl().setLookAt(
+                pathObstructionPos.getX() + 0.5D,
+                pathObstructionPos.getY() + 0.5D,
+                pathObstructionPos.getZ() + 0.5D,
+                40.0F,
+                40.0F
+        );
+        if (obstructionMineTicks % 8 == 0) {
+            playerNpc.triggerMainHandAttackAnimation();
+            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, pathObstructionPos, state, playerNpc);
+        }
+
+        obstructionMineTicks++;
+        int requiredMineTicks = getRequiredMineTicks(serverLevel, pathObstructionPos, state);
+        playerNpc.showBlockBreakProgress(pathObstructionPos, obstructionMineTicks, requiredMineTicks);
+        updateObstructionDetail(state, requiredMineTicks);
+        if (obstructionMineTicks < requiredMineTicks && obstructionMineTicks < MAX_OBSTRUCTION_BREAK_TICKS) {
+            return true;
+        }
+
+        BlockPos clearedPos = pathObstructionPos;
+        if (obstructionMineTicks >= requiredMineTicks && PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, clearedPos, state, playerNpc)) {
+            playerNpc.hurtMainHandItem(1);
+            failedPathTicks = 0;
+            repathTicks = 0;
+            clearPathObstruction();
+            moveToTargetItem();
+        } else {
+            skippedObstructions.add(clearedPos.immutable());
+            failedPathTicks += REPATH_INTERVAL_TICKS;
+            clearPathObstruction();
+            if (failedPathTicks >= MAX_FAILED_PATH_TICKS) {
+                abandonTarget("failed to clear burn path");
+            }
+        }
+        return true;
+    }
+
+    private void clearPathObstruction() {
+        if (mob instanceof PlayerNpcEntity playerNpc) {
+            playerNpc.clearBlockBreakProgress(pathObstructionPos);
+        }
+        pathObstructionPos = null;
+        obstructionMineTicks = 0;
+    }
+
+    private BlockPos findPathObstructionToward(BlockPos destination) {
+        if (!(mob.level() instanceof ServerLevel serverLevel) || destination == null) {
+            return null;
+        }
+
+        BlockPos feet = mob.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        candidates.add(feet.above());
+        candidates.add(feet.above(2));
+        candidates.add(destination);
+        candidates.add(destination.above());
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos side = feet.relative(direction);
+            candidates.add(side);
+            candidates.add(side.above());
+            if (destination.getY() > feet.getY()) {
+                candidates.add(side.above(2));
+            }
+        }
+        addLineObstructionCandidates(candidates, feet, destination);
+
+        Set<BlockPos> seen = new HashSet<>();
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> mob.distanceToSqr(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D))
+                .thenComparingDouble(pos -> pos.distSqr(destination)));
+        for (BlockPos candidate : candidates) {
+            BlockPos immutable = candidate.immutable();
+            if (!seen.add(immutable)
+                    || skippedObstructions.contains(immutable)
+                    || !serverLevel.isInWorldBounds(immutable)
+                    || !serverLevel.getWorldBorder().isWithinBounds(immutable)
+                    || mob.distanceToSqr(
+                    immutable.getX() + 0.5D,
+                    immutable.getY() + 0.5D,
+                    immutable.getZ() + 0.5D
+            ) > OBSTRUCTION_BREAK_DISTANCE_SQR) {
+                continue;
+            }
+
+            BlockState state = serverLevel.getBlockState(immutable);
+            if (isPathObstructionBlock(serverLevel, immutable, state)) {
+                return immutable;
+            }
+        }
+        return null;
+    }
+
+    private void addLineObstructionCandidates(List<BlockPos> candidates, BlockPos feet, BlockPos destination) {
+        double dx = destination.getX() - feet.getX();
+        double dy = destination.getY() - feet.getY();
+        double dz = destination.getZ() - feet.getZ();
+        double steps = Math.max(1.0D, Math.max(Math.abs(dx), Math.max(Math.abs(dy), Math.abs(dz))));
+        int maxSteps = Math.min(8, (int) Math.ceil(steps));
+        for (int i = 1; i <= maxSteps; i++) {
+            double progress = i / (double) maxSteps;
+            int x = feet.getX() + (int) Math.round(dx * progress);
+            int y = feet.getY() + (int) Math.round(dy * progress);
+            int z = feet.getZ() + (int) Math.round(dz * progress);
+            BlockPos routeFeet = new BlockPos(x, y, z);
+            candidates.add(routeFeet);
+            candidates.add(routeFeet.above());
+            candidates.add(routeFeet.above(2));
+        }
+    }
+
+    private boolean isPathObstructionBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        boolean blocksMovement = !state.getCollisionShape(serverLevel, pos).isEmpty();
+        boolean replaceableClutter = state.canBeReplaced() && !state.isAir();
+        return !state.isAir()
+                && state.getDestroySpeed(serverLevel, pos) >= 0.0F
+                && (blocksMovement || replaceableClutter)
+                && state.getFluidState().isEmpty()
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(playerNpcForTempTableCheck(), serverLevel, pos)
+                && !isProtectedHomeBlock(pos)
+                && serverLevel.getBlockEntity(pos) == null
+                && hasRequiredToolFor(state);
+    }
+
+    private PlayerNpcEntity playerNpcForTempTableCheck() {
+        return mob instanceof PlayerNpcEntity playerNpc ? playerNpc : null;
+    }
+
+    private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
+        if (!serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+            return false;
+        }
+
+        BlockState feet = serverLevel.getBlockState(pos);
+        BlockState head = serverLevel.getBlockState(pos.above());
+        BlockPos floorPos = pos.below();
+        return feet.getCollisionShape(serverLevel, pos).isEmpty()
+                && head.getCollisionShape(serverLevel, pos.above()).isEmpty()
+                && feet.getFluidState().isEmpty()
+                && head.getFluidState().isEmpty()
+                && serverLevel.getBlockState(floorPos).isSolidRender(serverLevel, floorPos);
+    }
+
+    private boolean isProtectedHomeBlock(BlockPos pos) {
+        if (!(mob instanceof PlayerNpcEntity playerNpc)) {
+            return false;
+        }
+        Optional<PlayerNpcHomeUtil.HomeArea> homeArea = PlayerNpcHomeUtil.getHome(playerNpc);
+        return homeArea.isPresent() && PlayerNpcHomeUtil.isInside(homeArea.get(), pos);
+    }
+
+    private boolean hasRequiredToolFor(BlockState state) {
+        return !state.is(BlockTags.MINEABLE_WITH_PICKAXE) || hasTool(PickaxeItem.class);
+    }
+
+    private boolean equipToolFor(BlockState state) {
+        if (state.is(BlockTags.MINEABLE_WITH_AXE)) {
+            if (!equipTool(AxeItem.class)) {
+                equipEmptyHandForMining();
+            }
+            return true;
+        }
+        if (state.is(BlockTags.MINEABLE_WITH_PICKAXE)) {
+            return equipTool(PickaxeItem.class);
+        }
+        if (state.is(BlockTags.MINEABLE_WITH_SHOVEL)) {
+            if (!equipTool(ShovelItem.class)) {
+                equipEmptyHandForMining();
+            }
+            return true;
+        }
+        return true;
+    }
+
+    private boolean equipTool(Class<?> toolClass) {
+        if (toolClass.isInstance(mob.getMainHandItem().getItem())) {
+            return true;
+        }
+        if (restorePreviousMainHandForTool(toolClass)) {
+            return true;
+        }
+
+        ItemStack tool = InventoryUtils.consumeItem(mob, stack -> toolClass.isInstance(stack.getItem()), 1)
+                .orElse(ItemStack.EMPTY);
+        if (tool.isEmpty()) {
+            return false;
+        }
+
+        setTemporaryMainHand(tool);
+        return true;
+    }
+
+    private void equipEmptyHandForMining() {
+        if (mob.getMainHandItem().isEmpty()) {
+            return;
+        }
+
+        setTemporaryMainHand(ItemStack.EMPTY);
+    }
+
+    private void setTemporaryMainHand(ItemStack stack) {
+        ItemStack currentMainHand = mob.getMainHandItem().copy();
+        if (!usingTemporaryTool) {
+            previousMainHand = currentMainHand;
+            usingTemporaryTool = true;
+        } else if (!currentMainHand.isEmpty()
+                && !ItemStack.isSameItemSameTags(currentMainHand, previousMainHand)
+                && !InventoryUtils.addItem(mob, currentMainHand)) {
+            mob.spawnAtLocation(currentMainHand);
+        }
+
+        mob.setItemSlot(EquipmentSlot.MAINHAND, stack);
+    }
+
+    private boolean restorePreviousMainHandForTool(Class<?> toolClass) {
+        if (!usingTemporaryTool || !toolClass.isInstance(previousMainHand.getItem())) {
+            return false;
+        }
+
+        ItemStack currentMainHand = mob.getMainHandItem().copy();
+        if (!currentMainHand.isEmpty()
+                && !ItemStack.isSameItemSameTags(currentMainHand, previousMainHand)
+                && !InventoryUtils.addItem(mob, currentMainHand)) {
+            mob.spawnAtLocation(currentMainHand);
+        }
+
+        mob.setItemSlot(EquipmentSlot.MAINHAND, previousMainHand.copy());
+        previousMainHand = ItemStack.EMPTY;
+        usingTemporaryTool = false;
+        return true;
+    }
+
+    private void restorePreviousMainHand() {
+        if (!usingTemporaryTool) {
+            return;
+        }
+
+        ItemStack currentMainHand = mob.getMainHandItem().copy();
+        if (!currentMainHand.isEmpty()
+                && !ItemStack.isSameItemSameTags(currentMainHand, previousMainHand)
+                && !InventoryUtils.addItem(mob, currentMainHand)) {
+            mob.spawnAtLocation(currentMainHand);
+        }
+
+        mob.setItemSlot(EquipmentSlot.MAINHAND, previousMainHand.copy());
+        previousMainHand = ItemStack.EMPTY;
+        usingTemporaryTool = false;
+    }
+
+    private boolean hasTool(Class<?> toolClass) {
+        if (toolClass.isInstance(mob.getMainHandItem().getItem())) {
+            return true;
+        }
+        if (usingTemporaryTool && toolClass.isInstance(previousMainHand.getItem())) {
+            return true;
+        }
+        return InventoryUtils.hasItem(mob, stack -> toolClass.isInstance(stack.getItem()));
+    }
+
+    private int getRequiredMineTicks(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        float hardness = state.getDestroySpeed(serverLevel, pos);
+        if (hardness < 0.0F) {
+            return MAX_OBSTRUCTION_BREAK_TICKS;
+        }
+
+        ItemStack heldStack = mob.getMainHandItem();
+        float toolSpeed = heldStack.isEmpty() ? 1.0F : heldStack.getDestroySpeed(state);
+        if (toolSpeed <= 0.0F) {
+            toolSpeed = 1.0F;
+        }
+
+        boolean correctTool = !state.requiresCorrectToolForDrops() || heldStack.isCorrectToolForDrops(state);
+        float progressPerTick = toolSpeed / hardness / (correctTool ? 30.0F : 100.0F);
+        if (progressPerTick <= 0.0F) {
+            return MAX_OBSTRUCTION_BREAK_TICKS;
+        }
+
+        return Math.max(1, (int) Math.ceil(1.0F / progressPerTick));
+    }
+
+    private void updateObstructionDetail(BlockState state, int requiredMineTicks) {
+        if (pathObstructionPos == null || !(mob instanceof PlayerNpcEntity playerNpcEntity)) {
+            return;
+        }
+
+        ResourceLocation blockId = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        String blockName = blockId == null ? state.getBlock().getDescriptionId() : blockId.toString();
+        playerNpcEntity.setCurrentAiDetail(String.format(
+                java.util.Locale.ROOT,
+                "clearing burn path %s\n@ %d %d %d %d/%dt\ncooldown if failed: 15s",
+                blockName,
+                pathObstructionPos.getX(),
+                pathObstructionPos.getY(),
+                pathObstructionPos.getZ(),
+                Math.min(obstructionMineTicks, requiredMineTicks),
+                requiredMineTicks
+        ));
+    }
+
+    private void updateMovingDetail() {
+        if (!(mob instanceof PlayerNpcEntity playerNpcEntity) || targetItem == null || targetItem.getItem().isEmpty()) {
+            return;
+        }
+
+        ItemStack stack = targetItem.getItem();
+        BlockPos pos = targetItem.blockPosition();
+        boolean collecting = shouldPickupOrEquipInsteadOfBurn(stack);
+        playerNpcEntity.setCurrentAiState(collecting ? "ai.player_npc.collecting_item" : "ai.player_npc.burning_item");
+        playerNpcEntity.setCurrentAiDetail(
+                (collecting ? "moving to " : "moving to burn ")
+                        + stack.getHoverName().getString()
+                        + " @ "
+                        + pos.getX()
+                        + " "
+                        + pos.getY()
+                        + " "
+                        + pos.getZ()
+        );
+    }
+
     private void tryBroadcastBurnMessage(ServerLevel serverLevel, ItemStack burnedStack) {
-        if (!PlayerNpcConfig.TURN_ON_NPC_CHAT.get()) return;
+        if (!SmartNpcConfig.TURN_ON_NPC_CHAT.get()) return;
         if (!(mob instanceof PlayerNpcEntity)) return;
         if (mob.getRandom().nextFloat() >= 0.05F) return;
 
@@ -553,18 +1030,8 @@ public class BurnNearbyItemGoal extends Goal {
         for (int i = 0; i < inventory.getContainerSize() && !remaining.isEmpty(); i++) {
             ItemStack slotStack = inventory.getItem(i);
 
-            if (slotStack.isEmpty()) {
-                int transferable = Math.min(
-                        remaining.getCount(),
-                        Math.min(remaining.getMaxStackSize(), inventory.getMaxStackSize())
-                );
-
-                ItemStack inserted = remaining.copy();
-                inserted.setCount(transferable);
-
-                inventory.setItem(i, inserted);
-                remaining.shrink(transferable);
-            } else if (ItemStack.isSameItemSameTags(slotStack, remaining)
+            if (!slotStack.isEmpty()
+                    && ItemStack.isSameItemSameTags(slotStack, remaining)
                     && slotStack.getCount() < slotStack.getMaxStackSize()) {
                 int transferable = Math.min(
                         remaining.getCount(),
@@ -574,6 +1041,24 @@ public class BurnNearbyItemGoal extends Goal {
                 slotStack.grow(transferable);
                 remaining.shrink(transferable);
             }
+        }
+
+        for (int i = 0; i < inventory.getContainerSize() && !remaining.isEmpty(); i++) {
+            ItemStack slotStack = inventory.getItem(i);
+            if (!slotStack.isEmpty()) {
+                continue;
+            }
+
+            int transferable = Math.min(
+                    remaining.getCount(),
+                    Math.min(remaining.getMaxStackSize(), inventory.getMaxStackSize())
+            );
+
+            ItemStack inserted = remaining.copy();
+            inserted.setCount(transferable);
+
+            inventory.setItem(i, inserted);
+            remaining.shrink(transferable);
         }
 
         if (remaining.getCount() == originalCount) {

@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
@@ -269,7 +270,7 @@ public class DigDownForStoneGoal extends Goal {
         }
 
         BlockPos minedPos = this.targetPos;
-        if (serverLevel.destroyBlock(minedPos, true, this.playerNpc)) {
+        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, minedPos, state, this.playerNpc)) {
             if (this.isStoneMaterial(state)) {
                 this.minedStone = true;
             }
@@ -301,9 +302,28 @@ public class DigDownForStoneGoal extends Goal {
             if (this.equipTool(ShovelItem.class)) {
                 return true;
             }
-            return this.equipTool(PickaxeItem.class);
+            this.equipEmptyHandForMining();
+            return true;
         }
         return this.equipTool(PickaxeItem.class);
+    }
+
+    private void equipEmptyHandForMining() {
+        if (this.playerNpc.getMainHandItem().isEmpty()) {
+            return;
+        }
+
+        ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
+        if (!this.usingTemporaryTool) {
+            this.previousMainHand = currentMainHand;
+            this.usingTemporaryTool = true;
+        } else if (!currentMainHand.isEmpty()
+                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)
+                && !InventoryUtils.addItem(this.playerNpc, currentMainHand)) {
+            this.playerNpc.spawnAtLocation(currentMainHand);
+        }
+
+        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
     }
 
     private boolean equipTool(Class<?> toolClass) {

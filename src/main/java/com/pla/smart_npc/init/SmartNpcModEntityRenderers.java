@@ -8,10 +8,10 @@ import net.minecraftforge.fml.common.Mod.EventBusSubscriber;
 import net.minecraftforge.fml.common.Mod.EventBusSubscriber.Bus;
 
 @EventBusSubscriber(bus = Bus.MOD, value = {Dist.CLIENT})
-public class PlayerNpcModEntityRenderers {
+public class SmartNpcModEntityRenderers {
 
     @SubscribeEvent
     public static void registerEntityRenderers(RegisterRenderers registerrenderers) {
-        registerrenderers.registerEntityRenderer(PlayerNpcModEntities.PLAYER_NPC.get(), FakePlayerRenderer::new);
+        registerrenderers.registerEntityRenderer(SmartNpcModEntities.PLAYER_NPC.get(), FakePlayerRenderer::new);
     }
 }

@@ -2,7 +2,7 @@ package com.pla.smart_npc.client.renderer;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.pla.smart_npc.clazz.FakePlayer;
-import com.pla.smart_npc.client.gui.PlayerNpcInspectorOverlay;
+import com.pla.smart_npc.client.gui.SmartNpcInspectorOverlay;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.client.model.HumanoidArmorModel;
 import net.minecraft.client.model.HumanoidModel;
@@ -55,7 +55,7 @@ public class FakePlayerRenderer<T extends FakePlayer> extends HumanoidMobRendere
 
     @Override
     public void render(@NotNull T entity, float entityYaw, float partialTick, @NotNull PoseStack poseStack, @NotNull MultiBufferSource buffer, int packedLight) {
-        boolean renderInspectatorBody = PlayerNpcInspectorOverlay.shouldRenderInspectatorCameraTargetBody(entity);
+        boolean renderInspectatorBody = SmartNpcInspectorOverlay.shouldRenderInspectatorCameraTargetBody(entity);
         boolean slim = FakePlayerTextureUtils.getPlayerSkinType(entity.getProfile()) == FakePlayerTextureUtils.SkinType.SLIM;
         this.model = slim ? this.slimModel : this.defaultModel;
         this.layers.remove(this.defaultArmorLayer);

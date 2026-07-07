@@ -42,6 +42,50 @@ public class CraftBasicGearGoal extends Goal {
     private static final double CRAFTING_TABLE_USE_DISTANCE_SQR = 2.25D * 2.25D;
     private static final int CRAFT_ACTION_DELAY_TICKS = 12;
 
+    public static boolean hasTemporaryCraftingTable(PlayerNpcEntity playerNpc) {
+        return getTemporaryCraftingTablePos(playerNpc) != null;
+    }
+
+    public static boolean hasValidTemporaryCraftingTable(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        BlockPos pos = getTemporaryCraftingTablePos(playerNpc);
+        return pos != null && serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE);
+    }
+
+    public static boolean isTemporaryCraftingTable(PlayerNpcEntity playerNpc, ServerLevel serverLevel, BlockPos pos) {
+        BlockPos tablePos = getTemporaryCraftingTablePos(playerNpc);
+        return tablePos != null && tablePos.equals(pos) && serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE);
+    }
+
+    public static boolean shouldKeepTemporaryCraftingTableForGear(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (!hasValidTemporaryCraftingTable(playerNpc, serverLevel)) {
+            return false;
+        }
+
+        CraftBasicGearGoal probe = new CraftBasicGearGoal(playerNpc);
+        return probe.needsCriticalStarterTool() || probe.canCraftTool();
+    }
+
+    public static BlockPos getTemporaryCraftingTablePos(PlayerNpcEntity playerNpc) {
+        if (playerNpc == null || !playerNpc.getPersistentData().contains(TEMP_TABLE_X)) {
+            return null;
+        }
+
+        return new BlockPos(
+                playerNpc.getPersistentData().getInt(TEMP_TABLE_X),
+                playerNpc.getPersistentData().getInt(TEMP_TABLE_Y),
+                playerNpc.getPersistentData().getInt(TEMP_TABLE_Z)
+        );
+    }
+
+    public static void clearTemporaryCraftingTable(PlayerNpcEntity playerNpc) {
+        if (playerNpc == null) {
+            return;
+        }
+        playerNpc.getPersistentData().remove(TEMP_TABLE_X);
+        playerNpc.getPersistentData().remove(TEMP_TABLE_Y);
+        playerNpc.getPersistentData().remove(TEMP_TABLE_Z);
+    }
+
     private final PlayerNpcEntity playerNpc;
     private BlockPos craftingTablePos;
     private BlockPos craftingStandPos;
@@ -319,26 +363,26 @@ public class CraftBasicGearGoal extends Goal {
             return terraformRecipe;
         }
 
-        ToolRecipe stoneUpgradeRecipe = this.nextStoneUpgradeRecipe();
-        if (stoneUpgradeRecipe != null) {
-            return stoneUpgradeRecipe;
+        ToolRecipe materialUpgradeRecipe = this.nextMaterialUpgradeRecipe();
+        if (materialUpgradeRecipe != null) {
+            return materialUpgradeRecipe;
         }
 
         if (!this.hasTool(AxeItem.class)) {
-            return this.toolRecipe(ToolKind.AXE, ToolTier.WOOD);
+            return this.bestCraftableToolRecipe(ToolKind.AXE);
         }
         if (!this.hasTool(PickaxeItem.class)) {
-            return this.toolRecipe(ToolKind.PICKAXE, ToolTier.WOOD);
+            return this.bestCraftableToolRecipe(ToolKind.PICKAXE);
         }
         if (!this.hasTool(SwordItem.class)) {
-            return this.toolRecipe(ToolKind.SWORD, ToolTier.WOOD);
+            return this.bestCraftableToolRecipe(ToolKind.SWORD);
         }
         if (!this.hasTool(ShovelItem.class)) {
-            return this.toolRecipe(ToolKind.SHOVEL, ToolTier.WOOD);
+            return this.bestCraftableToolRecipe(ToolKind.SHOVEL);
         }
         if (!this.hasTool(FishingRodItem.class)
                 && PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(Items.STRING)) >= 2) {
-            return new ToolRecipe(Items.FISHING_ROD.getDefaultInstance(), false, 0, 3);
+            return new ToolRecipe(Items.FISHING_ROD.getDefaultInstance(), null, ToolTier.NONE, 0, 3);
         }
         return null;
     }
@@ -349,36 +393,55 @@ public class CraftBasicGearGoal extends Goal {
             return null;
         }
 
-        return this.countStone() >= ToolKind.SHOVEL.materialCost()
-                ? this.toolRecipe(ToolKind.SHOVEL, ToolTier.STONE)
-                : this.toolRecipe(ToolKind.SHOVEL, ToolTier.WOOD);
+        return this.bestCraftableToolRecipe(ToolKind.SHOVEL);
     }
 
     private ToolRecipe nextCriticalStarterRecipe() {
         if (!this.hasTool(AxeItem.class)) {
-            return this.countStone() >= ToolKind.AXE.materialCost()
-                    ? this.toolRecipe(ToolKind.AXE, ToolTier.STONE)
-                    : this.toolRecipe(ToolKind.AXE, ToolTier.WOOD);
+            return this.bestCraftableToolRecipe(ToolKind.AXE);
         }
         if (!this.hasTool(PickaxeItem.class)) {
-            return this.countStone() >= ToolKind.PICKAXE.materialCost()
-                    ? this.toolRecipe(ToolKind.PICKAXE, ToolTier.STONE)
-                    : this.toolRecipe(ToolKind.PICKAXE, ToolTier.WOOD);
+            return this.bestCraftableToolRecipe(ToolKind.PICKAXE);
         }
         return null;
     }
 
-    private ToolRecipe nextStoneUpgradeRecipe() {
+    private ToolRecipe nextMaterialUpgradeRecipe() {
         for (ToolKind kind : List.of(ToolKind.PICKAXE, ToolKind.AXE, ToolKind.SWORD, ToolKind.SHOVEL)) {
-            if (this.bestToolTier(kind).isBelow(ToolTier.STONE) && this.countStone() >= kind.materialCost()) {
-                return this.toolRecipe(kind, ToolTier.STONE);
+            ToolRecipe recipe = this.bestCraftableToolRecipe(kind);
+            if (recipe != null && this.bestToolTier(kind).isBelow(recipe.tier())) {
+                return recipe;
+            }
+        }
+        return null;
+    }
+
+    private ToolRecipe bestCraftableToolRecipe(ToolKind kind) {
+        ToolTier currentTier = this.bestToolTier(kind);
+        boolean hasBetterPrimaryMaterial = false;
+        for (ToolTier tier : List.of(ToolTier.DIAMOND, ToolTier.IRON, ToolTier.STONE, ToolTier.WOOD)) {
+            ToolRecipe recipe = this.toolRecipe(kind, tier);
+            if (!currentTier.isBelow(tier)) {
+                continue;
+            }
+
+            if (tier != ToolTier.WOOD && this.hasPrimaryToolMaterial(recipe)) {
+                hasBetterPrimaryMaterial = true;
+            }
+
+            if (this.canProvideRecipeMaterials(recipe, 0, this.rawLogReserveForRecipe(recipe))) {
+                return recipe;
+            }
+
+            if (hasBetterPrimaryMaterial) {
+                return null;
             }
         }
         return null;
     }
 
     private ToolRecipe toolRecipe(ToolKind kind, ToolTier tier) {
-        return new ToolRecipe(PlayerNpcGearUtil.itemFor(kind, tier).getDefaultInstance(), tier == ToolTier.STONE, kind.materialCost(), kind.stickCost());
+        return new ToolRecipe(PlayerNpcGearUtil.itemFor(kind, tier).getDefaultInstance(), kind, tier, kind.materialCost(), kind.stickCost());
     }
 
     private boolean tryCraftRecipe(ServerLevel serverLevel, ToolRecipe recipe) {
@@ -402,32 +465,33 @@ public class CraftBasicGearGoal extends Goal {
         return PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(Items.COBBLESTONE) || stack.is(Items.COBBLED_DEEPSLATE));
     }
 
-    private boolean consumeStone(int count) {
-        return PlayerNpcCraftingUtil.consumeItem(this.playerNpc.getInventory(), stack -> stack.is(Items.COBBLESTONE) || stack.is(Items.COBBLED_DEEPSLATE), count);
+    private int countToolMaterial(ToolTier tier) {
+        return switch (tier) {
+            case STONE -> this.countStone();
+            case IRON -> PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(Items.IRON_INGOT));
+            case DIAMOND -> PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(Items.DIAMOND));
+            case WOOD, NONE, NETHERITE -> 0;
+        };
     }
 
-    private boolean canCraftStoneTool(int stoneNeeded, int sticksNeeded) {
-        return this.countStone() >= stoneNeeded
-                && PlayerNpcCraftingUtil.canProvidePlanksAndSticks(this.playerNpc.getInventory(), 0, sticksNeeded, this.rawLogReserveForCurrentNeed());
-    }
-
-    private boolean canCraftStoneTool(int stoneNeeded, int sticksNeeded, int rawLogReserve) {
-        return this.countStone() >= stoneNeeded
-                && PlayerNpcCraftingUtil.canProvidePlanksAndSticks(this.playerNpc.getInventory(), 0, sticksNeeded, rawLogReserve);
-    }
-
-    private boolean canCraftStoneTool(int stoneNeeded, int sticksNeeded, int reservedPlanks, int rawLogReserve) {
-        return this.countStone() >= stoneNeeded
-                && this.canProvidePlanksAndSticks(0, sticksNeeded, reservedPlanks, rawLogReserve);
+    private boolean hasPrimaryToolMaterial(ToolRecipe recipe) {
+        return recipe.kind() != null
+                && recipe.tier() != ToolTier.WOOD
+                && recipe.tier() != ToolTier.NONE
+                && this.countToolMaterial(recipe.tier()) >= recipe.materialNeeded();
     }
 
     private boolean canProvideRecipeMaterials(ToolRecipe recipe, int reservedPlanks, int rawLogReserve) {
-        if (recipe.usesStone()) {
-            return this.countStone() >= recipe.materialNeeded()
+        if (recipe.kind() == null || recipe.tier() == ToolTier.NONE || recipe.tier() == ToolTier.WOOD) {
+            return this.canProvidePlanksAndSticks(recipe.materialNeeded(), recipe.sticksNeeded(), reservedPlanks, rawLogReserve);
+        }
+
+        if (recipe.tier() == ToolTier.STONE || recipe.tier() == ToolTier.IRON || recipe.tier() == ToolTier.DIAMOND) {
+            return this.countToolMaterial(recipe.tier()) >= recipe.materialNeeded()
                     && this.canProvidePlanksAndSticks(0, recipe.sticksNeeded(), reservedPlanks, rawLogReserve);
         }
 
-        return this.canProvidePlanksAndSticks(recipe.materialNeeded(), recipe.sticksNeeded(), reservedPlanks, rawLogReserve);
+        return false;
     }
 
     private boolean canProvidePlanksAndSticks(int planksNeeded, int sticksNeeded, int reservedPlanks, int rawLogReserve) {
@@ -455,15 +519,12 @@ public class CraftBasicGearGoal extends Goal {
     }
 
     private boolean isCriticalStarterRecipe(ToolRecipe recipe) {
-        return recipe.result().is(Items.WOODEN_AXE)
-                || recipe.result().is(Items.STONE_AXE)
-                || recipe.result().is(Items.WOODEN_PICKAXE)
-                || recipe.result().is(Items.STONE_PICKAXE);
+        return recipe.kind() == ToolKind.AXE && !this.hasTool(AxeItem.class)
+                || recipe.kind() == ToolKind.PICKAXE && !this.hasTool(PickaxeItem.class);
     }
 
     private boolean isTerraformShovelRecipe(ToolRecipe recipe) {
-        return recipe.result().is(Items.WOODEN_SHOVEL)
-                || recipe.result().is(Items.STONE_SHOVEL);
+        return recipe.kind() == ToolKind.SHOVEL;
     }
 
     private boolean needsTerraformShovel() {
@@ -476,12 +537,13 @@ public class CraftBasicGearGoal extends Goal {
     }
 
     private ToolTier bestToolTier(ToolKind kind) {
-        return PlayerNpcGearUtil.bestToolTier(
+        ToolTier best = PlayerNpcGearUtil.bestToolTier(
                 this.playerNpc.getMainHandItem(),
                 this.playerNpc.getOffhandItem(),
                 this.playerNpc.getInventory(),
                 kind
         );
+        return best;
     }
 
     private boolean hasNearbyCraftingTable(ServerLevel serverLevel) {
@@ -601,21 +663,11 @@ public class CraftBasicGearGoal extends Goal {
     }
 
     private BlockPos getTemporaryCraftingTablePos() {
-        if (!this.playerNpc.getPersistentData().contains(TEMP_TABLE_X)) {
-            return null;
-        }
-
-        return new BlockPos(
-                this.playerNpc.getPersistentData().getInt(TEMP_TABLE_X),
-                this.playerNpc.getPersistentData().getInt(TEMP_TABLE_Y),
-                this.playerNpc.getPersistentData().getInt(TEMP_TABLE_Z)
-        );
+        return getTemporaryCraftingTablePos(this.playerNpc);
     }
 
     private void clearTemporaryCraftingTable() {
-        this.playerNpc.getPersistentData().remove(TEMP_TABLE_X);
-        this.playerNpc.getPersistentData().remove(TEMP_TABLE_Y);
-        this.playerNpc.getPersistentData().remove(TEMP_TABLE_Z);
+        clearTemporaryCraftingTable(this.playerNpc);
     }
 
     private BlockPos findCraftingTablePlacement(ServerLevel serverLevel) {
@@ -644,5 +696,5 @@ public class CraftBasicGearGoal extends Goal {
         this.craftedTool = false;
     }
 
-    private record ToolRecipe(ItemStack result, boolean usesStone, int materialNeeded, int sticksNeeded) {}
+    private record ToolRecipe(ItemStack result, ToolKind kind, ToolTier tier, int materialNeeded, int sticksNeeded) {}
 }

@@ -1,6 +1,6 @@
 package com.pla.smart_npc.mixin;
 
-import com.pla.smart_npc.client.gui.PlayerNpcInspectorOverlay;
+import com.pla.smart_npc.client.gui.SmartNpcInspectorOverlay;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.contents.TranslatableContents;
@@ -13,7 +13,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class GuiMixin {
     @Inject(method = "setOverlayMessage", at = @At("HEAD"), cancellable = true)
     private void player_npc$hideInspectatorMountPrompt(Component component, boolean animateColor, CallbackInfo ci) {
-        if (PlayerNpcInspectorOverlay.isInspectatorActive()
+        if (SmartNpcInspectorOverlay.isInspectatorActive()
                 && component.getContents() instanceof TranslatableContents contents
                 && "mount.onboard".equals(contents.getKey())) {
             ci.cancel();
