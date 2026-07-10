@@ -131,6 +131,12 @@ public class TerraformBuildSiteGoal extends Goal {
             return false;
         }
 
+        if (nextTarget.get().phase() == TerraformPhase.CLEAR
+                && serverLevel.getBlockState(nextTarget.get().pos()).is(BlockTags.MINEABLE_WITH_SHOVEL)
+                && !hasTool(this.playerNpc, ShovelItem.class)) {
+            return false;
+        }
+
         this.target = nextTarget.get();
         this.targetSearchRetryCooldownTicks = 0;
         return true;

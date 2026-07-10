@@ -3,9 +3,12 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.level.block.BedBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BedPart;
 
 import java.util.EnumSet;
 import java.util.Optional;
@@ -49,7 +52,9 @@ public class SleepAtHomeGoal extends Goal {
                 && this.playerNpc.isAlive()
                 && this.playerNpc.getTarget() == null
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
-                && serverLevel.isNight();
+                && serverLevel.isNight()
+                && this.bedPos != null
+                && this.isValidBed(serverLevel, this.bedPos);
     }
 
     @Override
@@ -61,7 +66,10 @@ public class SleepAtHomeGoal extends Goal {
 
     @Override
     public void tick() {
-        if (this.bedPos == null) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || this.bedPos == null
+                || !this.isValidBed(serverLevel, this.bedPos)) {
+            this.wakeFromInvalidBed();
             return;
         }
 
@@ -97,6 +105,15 @@ public class SleepAtHomeGoal extends Goal {
         }
     }
 
+    private void wakeFromInvalidBed() {
+        if (this.playerNpc.isSleeping()) {
+            this.playerNpc.stopSleeping();
+        }
+        this.playerNpc.setCurrentAiDetail("bed missing");
+        this.bedPos = null;
+        this.sleepTicks = 0;
+    }
+
     private BlockPos findHomeBed(ServerLevel serverLevel) {
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
         if (home.isEmpty()) {
@@ -107,10 +124,43 @@ public class SleepAtHomeGoal extends Goal {
         for (BlockPos pos : BlockPos.betweenClosed(
                 homeArea.origin(),
                 homeArea.origin().offset(homeArea.width() - 1, 3, homeArea.depth() - 1))) {
-            if (serverLevel.getBlockState(pos).getBlock() instanceof BedBlock) {
-                return pos.immutable();
+            BlockPos foot = this.normalizeBedFoot(serverLevel, pos.immutable());
+            if (foot != null && this.isValidBed(serverLevel, foot)) {
+                return foot;
             }
         }
         return null;
+    }
+
+    private BlockPos normalizeBedFoot(ServerLevel serverLevel, BlockPos pos) {
+        BlockState state = serverLevel.getBlockState(pos);
+        if (!(state.getBlock() instanceof BedBlock)
+                || !state.hasProperty(BedBlock.PART)
+                || !state.hasProperty(BedBlock.FACING)) {
+            return null;
+        }
+        if (state.getValue(BedBlock.PART) == BedPart.FOOT) {
+            return pos;
+        }
+        Direction facing = state.getValue(BedBlock.FACING);
+        return pos.relative(facing.getOpposite());
+    }
+
+    private boolean isValidBed(ServerLevel serverLevel, BlockPos footPos) {
+        BlockState foot = serverLevel.getBlockState(footPos);
+        if (!(foot.getBlock() instanceof BedBlock)
+                || !foot.hasProperty(BedBlock.PART)
+                || !foot.hasProperty(BedBlock.FACING)
+                || foot.getValue(BedBlock.PART) != BedPart.FOOT) {
+            return false;
+        }
+
+        Direction facing = foot.getValue(BedBlock.FACING);
+        BlockState head = serverLevel.getBlockState(footPos.relative(facing));
+        return head.getBlock() == foot.getBlock()
+                && head.hasProperty(BedBlock.PART)
+                && head.hasProperty(BedBlock.FACING)
+                && head.getValue(BedBlock.PART) == BedPart.HEAD
+                && head.getValue(BedBlock.FACING) == facing;
     }
 }

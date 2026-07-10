@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcGearUtil;
@@ -41,6 +42,7 @@ public class CraftBasicGearGoal extends Goal {
     private static final double HOME_CRAFTING_DISTANCE_SQR = 48.0D * 48.0D;
     private static final double CRAFTING_TABLE_USE_DISTANCE_SQR = 2.25D * 2.25D;
     private static final int CRAFT_ACTION_DELAY_TICKS = 12;
+    private static final double DIRECT_CRAFTING_STEP_DISTANCE_SQR = 8.0D * 8.0D;
 
     public static boolean hasTemporaryCraftingTable(PlayerNpcEntity playerNpc) {
         return getTemporaryCraftingTablePos(playerNpc) != null;
@@ -349,7 +351,9 @@ public class CraftBasicGearGoal extends Goal {
     }
 
     private boolean needsCriticalStarterTool() {
-        return !this.hasTool(AxeItem.class) || !this.hasTool(PickaxeItem.class);
+        return !this.hasTool(AxeItem.class)
+                || !this.hasTool(PickaxeItem.class)
+                || !this.hasTool(ShovelItem.class);
     }
 
     private ToolRecipe nextToolRecipe() {
@@ -402,6 +406,9 @@ public class CraftBasicGearGoal extends Goal {
         }
         if (!this.hasTool(PickaxeItem.class)) {
             return this.bestCraftableToolRecipe(ToolKind.PICKAXE);
+        }
+        if (!this.hasTool(ShovelItem.class)) {
+            return this.bestCraftableToolRecipe(ToolKind.SHOVEL);
         }
         return null;
     }
@@ -520,7 +527,8 @@ public class CraftBasicGearGoal extends Goal {
 
     private boolean isCriticalStarterRecipe(ToolRecipe recipe) {
         return recipe.kind() == ToolKind.AXE && !this.hasTool(AxeItem.class)
-                || recipe.kind() == ToolKind.PICKAXE && !this.hasTool(PickaxeItem.class);
+                || recipe.kind() == ToolKind.PICKAXE && !this.hasTool(PickaxeItem.class)
+                || recipe.kind() == ToolKind.SHOVEL && !this.hasTool(ShovelItem.class);
     }
 
     private boolean isTerraformShovelRecipe(ToolRecipe recipe) {
@@ -589,14 +597,15 @@ public class CraftBasicGearGoal extends Goal {
     }
 
     private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
-        return serverLevel.isInWorldBounds(pos)
-                && serverLevel.getWorldBorder().isWithinBounds(pos)
-                && serverLevel.getBlockState(pos).isAir()
-                && serverLevel.getBlockState(pos.above()).isAir()
-                && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+        return PathNavigationAi.canStandAt(serverLevel, pos);
     }
 
     private boolean isAtCraftingStand() {
+        if (this.craftingTablePos != null
+                && this.distanceToTableSqr(this.playerNpc.blockPosition(), this.craftingTablePos) <= CRAFTING_TABLE_USE_DISTANCE_SQR + 1.0D) {
+            return true;
+        }
+
         return this.craftingStandPos != null
                 && this.playerNpc.distanceToSqr(this.craftingStandPos.getX() + 0.5D, this.craftingStandPos.getY(), this.craftingStandPos.getZ() + 0.5D) <= 1.25D * 1.25D
                 && this.distanceToTableSqr(this.playerNpc.blockPosition(), this.craftingTablePos) <= CRAFTING_TABLE_USE_DISTANCE_SQR + 1.0D;
@@ -608,6 +617,19 @@ public class CraftBasicGearGoal extends Goal {
         }
         Path path = this.playerNpc.getNavigation().createPath(this.craftingStandPos, 0);
         if (path == null || !path.canReach()) {
+            if (this.playerNpc.distanceToSqr(
+                    this.craftingStandPos.getX() + 0.5D,
+                    this.playerNpc.getY(),
+                    this.craftingStandPos.getZ() + 0.5D) <= DIRECT_CRAFTING_STEP_DISTANCE_SQR) {
+                this.playerNpc.getNavigation().stop();
+                this.playerNpc.getMoveControl().setWantedPosition(
+                        this.craftingStandPos.getX() + 0.5D,
+                        this.craftingStandPos.getY(),
+                        this.craftingStandPos.getZ() + 0.5D,
+                        1.0D);
+                this.playerNpc.setCurrentAiDetail("stepping to crafting table");
+                return true;
+            }
             return false;
         }
         return this.playerNpc.getNavigation().moveTo(path, 1.0D);

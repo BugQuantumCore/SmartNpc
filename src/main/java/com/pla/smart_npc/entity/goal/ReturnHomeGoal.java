@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.ReturnPositionAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
@@ -18,7 +19,6 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
-import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.EnumSet;
 import java.util.Optional;
@@ -28,20 +28,20 @@ public class ReturnHomeGoal extends Goal {
     private static final double STOP_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double UTILITY_RETURN_DISTANCE_SQR = 48.0D * 48.0D;
     private static final int MAX_RETURN_TICKS = 20 * 20;
-    private static final int UPWARD_ESCAPE_REQUEST_TICKS = 20 * 8;
     private static final int HOME_WORK_AREA_MARGIN = 4;
 
     private final PlayerNpcEntity playerNpc;
-    private final double speed;
+    private final ReturnPositionAi returnPositionAi;
     private PlayerNpcHomeUtil.HomeArea homeArea;
     private BlockPos homeCenter;
     private int returnTicks;
     private boolean utilityReturn;
     private boolean buildReturn;
+    private boolean shelterReturn;
 
     public ReturnHomeGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
-        this.speed = speed;
+        this.returnPositionAi = new ReturnPositionAi(playerNpc, speed);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -67,8 +67,15 @@ public class ReturnHomeGoal extends Goal {
         double distanceSqr = this.playerNpc.distanceToSqr(this.homeCenter.getX() + 0.5D, this.homeCenter.getY(), this.homeCenter.getZ() + 0.5D);
         boolean inventoryHalfFull = this.inventoryMoreThanHalfFull();
         boolean inventoryMostlyFull = this.inventoryMostlyFull();
+        this.shelterReturn = this.shouldShelterAtHome(serverLevel);
         this.buildReturn = BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
-        if (this.needsBuildMaterialReserves() && !inventoryMostlyFull) {
+        if (this.shelterReturn && distanceSqr > STOP_DISTANCE_SQR && !this.isInsideHomeWorkArea(homeArea)) {
+            this.utilityReturn = false;
+            this.buildReturn = false;
+            return true;
+        }
+
+        if (!this.shelterReturn && this.needsBuildMaterialReserves() && !inventoryMostlyFull) {
             this.utilityReturn = false;
             this.buildReturn = false;
             return false;
@@ -76,8 +83,7 @@ public class ReturnHomeGoal extends Goal {
 
         this.utilityReturn = this.hasHomeUtilityWork(serverLevel, homeArea);
         if (this.buildReturn
-                && !this.isInsideHomeWorkArea(homeArea)
-                && distanceSqr <= UTILITY_RETURN_DISTANCE_SQR) {
+                && !this.isInsideHomeWorkArea(homeArea)) {
             return true;
         }
         if (!this.buildReturn && this.utilityReturn && distanceSqr > STOP_DISTANCE_SQR && distanceSqr <= UTILITY_RETURN_DISTANCE_SQR) {
@@ -87,24 +93,33 @@ public class ReturnHomeGoal extends Goal {
         if (this.playerNpc.getReturnHomeCooldown() > 0) {
             this.utilityReturn = false;
             this.buildReturn = false;
+            this.shelterReturn = false;
             return false;
         }
 
         if (distanceSqr < MIN_DISTANCE_SQR) {
             this.utilityReturn = false;
             this.buildReturn = false;
+            this.shelterReturn = false;
             return false;
         }
 
         this.utilityReturn = false;
         this.buildReturn = false;
+        this.shelterReturn = false;
         boolean randomReturn = this.playerNpc.getRandom().nextFloat() < 0.35F;
         return inventoryHalfFull || randomReturn;
     }
 
     @Override
     public boolean canContinueToUse() {
-        if (this.needsBuildMaterialReserves() && !this.inventoryMostlyFull()) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (this.shelterReturn && !this.shouldShelterAtHome(serverLevel)) {
+            return false;
+        }
+        if (!this.shelterReturn && this.needsBuildMaterialReserves() && !this.inventoryMostlyFull()) {
             return false;
         }
         if (this.buildReturn && this.isInsideHomeWorkArea(this.homeArea)) {
@@ -115,24 +130,42 @@ public class ReturnHomeGoal extends Goal {
                 && this.returnTicks > 0
                 && this.playerNpc.isAlive()
                 && this.playerNpc.getTarget() == null
+                && !this.playerNpc.isNoAi()
+                && !this.playerNpc.isPassenger()
+                && !this.playerNpc.isHealing()
                 && this.playerNpc.distanceToSqr(this.homeCenter.getX() + 0.5D, this.homeCenter.getY(), this.homeCenter.getZ() + 0.5D) > STOP_DISTANCE_SQR;
+    }
+
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
     }
 
     @Override
     public void start() {
         this.returnTicks = MAX_RETURN_TICKS;
         this.playerNpc.setCurrentAiState("ai.player_npc.returning_home");
-        this.moveHome();
+        if (this.homeCenter != null) {
+            this.returnPositionAi.start(this.homeCenter);
+        }
+        this.updateDetail();
     }
 
     @Override
     public void tick() {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return;
+        }
         this.returnTicks--;
         if (this.homeCenter != null) {
             this.playerNpc.getLookControl().setLookAt(this.homeCenter.getX() + 0.5D, this.homeCenter.getY(), this.homeCenter.getZ() + 0.5D, 40.0F, 40.0F);
-            if (this.playerNpc.getNavigation().isDone() || this.returnTicks % 40 == 0) {
-                this.moveHome();
-            }
+            this.returnPositionAi.tick(
+                    serverLevel,
+                    this.homeCenter,
+                    this::isProtectedHomeBlock,
+                    this.moveDetail(),
+                    "clearing return path");
+            this.updateDetail();
         }
     }
 
@@ -145,6 +178,7 @@ public class ReturnHomeGoal extends Goal {
         if (!this.playerNpc.level().isClientSide) {
             int cooldown = this.utilityReturn
                     || this.buildReturn
+                    || this.shelterReturn
                     ? 20 * 12 + this.playerNpc.getRandom().nextInt(20 * 12)
                     : 20 * 60 + this.playerNpc.getRandom().nextInt(20 * 60);
             this.playerNpc.setReturnHomeCooldown(cooldown);
@@ -154,28 +188,14 @@ public class ReturnHomeGoal extends Goal {
                 this.playerNpc.setGatherCooldown(20 * 8);
             }
         }
+        this.returnPositionAi.stop();
         this.homeArea = null;
         this.homeCenter = null;
         this.returnTicks = 0;
         this.utilityReturn = false;
         this.buildReturn = false;
+        this.shelterReturn = false;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
-    }
-
-    private void moveHome() {
-        if (this.homeCenter != null) {
-            Path path = this.playerNpc.getNavigation().createPath(this.homeCenter, 0);
-            if (path != null && path.canReach()) {
-                this.playerNpc.getNavigation().moveTo(path, this.speed);
-                return;
-            }
-
-            if (this.playerNpc.level() instanceof ServerLevel serverLevel
-                    && this.homeCenter.getY() > this.playerNpc.blockPosition().getY() + 2
-                    && !serverLevel.canSeeSky(this.playerNpc.blockPosition().above())) {
-                this.playerNpc.requestUpwardEscapeTo(this.homeCenter, UPWARD_ESCAPE_REQUEST_TICKS);
-            }
-        }
     }
 
     private boolean isInsideHomeWorkArea(PlayerNpcHomeUtil.HomeArea homeArea) {
@@ -190,6 +210,31 @@ public class ReturnHomeGoal extends Goal {
                 && pos.getZ() < homeArea.origin().getZ() + homeArea.depth() + HOME_WORK_AREA_MARGIN
                 && pos.getY() >= homeArea.origin().getY() - 3
                 && pos.getY() <= homeArea.origin().getY() + 8;
+    }
+
+    private boolean isProtectedHomeBlock(BlockPos pos) {
+        return this.homeArea != null && PlayerNpcHomeUtil.isInside(this.homeArea, pos);
+    }
+
+    private void updateDetail() {
+        this.playerNpc.setCurrentAiDetail(this.returnPositionAi.detail(this.moveDetail()));
+    }
+
+    private String moveDetail() {
+        if (this.shelterReturn) {
+            return "returning to home shelter";
+        }
+        if (this.buildReturn) {
+            return "returning to build site";
+        }
+        if (this.utilityReturn) {
+            return "returning to home utility";
+        }
+        return "returning home";
+    }
+
+    private boolean shouldShelterAtHome(ServerLevel serverLevel) {
+        return serverLevel.isNight() || serverLevel.isThundering();
     }
 
     private boolean inventoryMoreThanHalfFull() {

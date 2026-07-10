@@ -31,6 +31,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.phys.AABB;
 import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.ArrayList;
@@ -47,6 +48,8 @@ public class BuildHouseGoal extends Goal {
     private static final int BUILD_SEARCH_RADIUS = 14;
     private static final int MAX_RANDOM_LAYOUT_ATTEMPTS = 24;
     private static final int MAX_TERRAIN_CLEARS_PER_BUILD_SITE = 36;
+    private static final int MAX_PLACEMENT_CLEARANCE_TICKS = 20 * 3;
+    private static final int MAX_PLACEMENT_CLEARANCE_RETRIES = 3;
     private static final double BUILD_DISTANCE_SQR = 4.0D * 4.0D;
 
     private final PlayerNpcEntity playerNpc;
@@ -64,6 +67,10 @@ public class BuildHouseGoal extends Goal {
     private boolean placedBlockThisTick;
     private BlockState placedBlockStateThisTick;
     private BlockPos placedBlockSoundPos;
+    private BlockPos placementClearancePos;
+    private BlockState placementClearanceState;
+    private int placementClearanceTicks;
+    private int placementClearanceRetries;
     private String missingMaterial = "";
 
     public BuildHouseGoal(PlayerNpcEntity playerNpc) {
@@ -72,7 +79,8 @@ public class BuildHouseGoal extends Goal {
     }
 
     public static boolean hasReadyHomeBuildWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        if (!playerNpc.hasInterest(PlayerNpcInterest.BUILDING) || playerNpc.getBuildHouseCooldown() > 0) {
+        if (!playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || playerNpc.getBuildHouseCooldown() > 0) {
             return false;
         }
 
@@ -91,8 +99,9 @@ public class BuildHouseGoal extends Goal {
         PlayerNpcHomeUtil.HomeArea homeArea = existingHome.get();
         return layout.get().width() == homeArea.width()
                 && layout.get().depth() == homeArea.depth()
+                && playerNpc.hasMetBuildSupplyGoals()
                 && checker.hasUnfinishedPlacement(serverLevel, layout.get(), homeArea.origin())
-                && checker.hasMaterialForNextPlacement(serverLevel, layout.get(), homeArea.origin());
+                && checker.hasMaterialForAnyPlacement(serverLevel, layout.get(), homeArea.origin());
     }
 
     public static int countAvailableBuildingBlocks(PlayerNpcEntity playerNpc) {
@@ -133,7 +142,7 @@ public class BuildHouseGoal extends Goal {
         if (TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)) {
             return false;
         }
-        return true;
+        return this.playerNpc.hasMetBuildSupplyGoals();
     }
 
     @Override
@@ -141,7 +150,8 @@ public class BuildHouseGoal extends Goal {
         return this.origin != null
                 && !this.blueprint.isEmpty()
                 && this.playerNpc.isAlive()
-                && this.playerNpc.getTarget() == null;
+                && this.playerNpc.getTarget() == null
+                && this.playerNpc.hasMetBuildSupplyGoals();
     }
 
     @Override
@@ -163,6 +173,10 @@ public class BuildHouseGoal extends Goal {
         this.placedBlockThisTick = false;
         this.placedBlockStateThisTick = null;
         this.placedBlockSoundPos = null;
+        this.placementClearancePos = null;
+        this.placementClearanceState = null;
+        this.placementClearanceTicks = 0;
+        this.placementClearanceRetries = 0;
         this.missingMaterial = "";
         this.playerNpc.setCurrentAiState("ai.player_npc.building_house");
         this.updateTaskDetail("starting");
@@ -188,6 +202,27 @@ public class BuildHouseGoal extends Goal {
 
         this.previewPlacementItem(block);
         this.playerNpc.getLookControl().setLookAt(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, 40.0F, 40.0F);
+        if (this.waitingForPlacementClearance
+                && this.placementClearancePos != null
+                && this.placementClearanceState != null) {
+            if (!this.canPlaceWithoutClipping(serverLevel, this.placementClearancePos, this.placementClearanceState)) {
+                if (this.placementClearanceTicks++ >= MAX_PLACEMENT_CLEARANCE_TICKS) {
+                    this.placementClearanceTicks = 0;
+                    this.placementClearanceRetries++;
+                }
+                if (this.placementClearanceRetries >= MAX_PLACEMENT_CLEARANCE_RETRIES) {
+                    this.deferBlockedPlacement(block);
+                    this.clearPlacementClearance();
+                    this.updateTaskDetail("deferred blocked", block);
+                    return;
+                }
+                this.moveAwayFromPlacement(serverLevel, this.placementClearancePos, this.placementClearanceState);
+                this.updateTaskDetail("moving clear of", block);
+                return;
+            }
+            this.clearPlacementClearance();
+        }
+
         if (this.playerNpc.distanceToSqr(target.getX() + 0.5D, target.getY(), target.getZ() + 0.5D) > BUILD_DISTANCE_SQR) {
             this.playerNpc.getNavigation().moveTo(target.getX() + 0.5D, target.getY(), target.getZ() + 0.5D, 1.0D);
             this.updateTaskDetail("walking to", block);
@@ -247,6 +282,10 @@ public class BuildHouseGoal extends Goal {
         this.placedBlockThisTick = false;
         this.placedBlockStateThisTick = null;
         this.placedBlockSoundPos = null;
+        this.placementClearancePos = null;
+        this.placementClearanceState = null;
+        this.placementClearanceTicks = 0;
+        this.placementClearanceRetries = 0;
         this.missingMaterial = "";
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }
@@ -266,11 +305,11 @@ public class BuildHouseGoal extends Goal {
             return null;
         }
 
-        if (!this.hasReadyFirstBuildReserves()) {
+        if (!this.hasReadyFirstBaseReserves()) {
             return null;
         }
 
-        int availableBlocks = countAvailableBuildingBlocks(this.playerNpc);
+        int availableBlocks = this.countAvailableBaseSelectionBlocks();
         if (availableBlocks < MIN_BASE_BUILD_BLOCKS) {
             return null;
         }
@@ -359,19 +398,33 @@ public class BuildHouseGoal extends Goal {
         return false;
     }
 
-    private boolean hasMaterialForNextPlacement(ServerLevel serverLevel, PlayerNpcBuildLayout layout, BlockPos origin) {
+    private boolean hasMaterialForAnyPlacement(ServerLevel serverLevel, PlayerNpcBuildLayout layout, BlockPos origin) {
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.blocks()) {
             if (this.isBuiltMatch(serverLevel, block.toWorld(origin), block.state())) {
                 continue;
             }
-            return PlayerNpcBuildMaterialUtil.hasMaterialFor(serverLevel, this.playerNpc, block, origin);
+            if (PlayerNpcBuildMaterialUtil.hasMaterialFor(serverLevel, this.playerNpc, block, origin)) {
+                return true;
+            }
         }
         return false;
     }
 
-    private boolean hasReadyFirstBuildReserves() {
-        return this.countRawLogs() >= this.playerNpc.getRawLogReserveTarget()
-                && this.countCobblestone() >= this.playerNpc.getCobblestoneSupplyTarget();
+    private boolean hasReadyFirstBaseReserves() {
+        return this.countRawLogs() >= this.playerNpc.getRawLogReserveTarget();
+    }
+
+    private int countAvailableBaseSelectionBlocks() {
+        int count = 0;
+        for (int i = 0; i < this.playerNpc.getInventory().getContainerSize(); i++) {
+            ItemStack stack = this.playerNpc.getInventory().getItem(i);
+            if (!stack.isEmpty()
+                    && isBuildingBlockItem(stack)
+                    && !PlayerNpcCraftingUtil.isPlanks(stack)) {
+                count += stack.getCount();
+            }
+        }
+        return count + PlayerNpcCraftingUtil.countPlankEquivalent(this.playerNpc.getInventory(), 0);
     }
 
     private int countRawLogs() {
@@ -513,6 +566,41 @@ public class BuildHouseGoal extends Goal {
     }
 
     private PlayerNpcBuildLayout.RelativeBlock nextUnfinishedBlock(ServerLevel serverLevel) {
+        PlayerNpcBuildLayout.RelativeBlock firstMissingBlock = null;
+        for (int i = 0; i < this.blueprint.size(); ) {
+            PlayerNpcBuildLayout.RelativeBlock block = this.blueprint.get(i);
+            if (this.isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
+                this.blueprint.remove(i);
+                if (countsTowardBuildProgress(block)) {
+                    this.completedPlacements++;
+                }
+                continue;
+            }
+
+            boolean hasMaterial = PlayerNpcBuildMaterialUtil.hasMaterialFor(serverLevel, this.playerNpc, block, this.origin);
+            if (block.optional() && !hasMaterial) {
+                this.blueprint.remove(i);
+                continue;
+            }
+
+            if (hasMaterial) {
+                return block;
+            }
+
+            if (firstMissingBlock == null) {
+                firstMissingBlock = block;
+            }
+            i++;
+        }
+
+        if (firstMissingBlock != null) {
+            BlockPos pos = firstMissingBlock.toWorld(this.origin);
+            this.ranOutOfMaterials = true;
+            this.missingMaterial = PlayerNpcBuildMaterialUtil.describeTarget(firstMissingBlock.state());
+            this.updateTaskDetail("missing", firstMissingBlock.state(), pos);
+            return null;
+        }
+
         while (!this.blueprint.isEmpty()) {
             PlayerNpcBuildLayout.RelativeBlock block = this.blueprint.get(0);
             if (this.isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
@@ -520,10 +608,6 @@ public class BuildHouseGoal extends Goal {
                 if (countsTowardBuildProgress(block)) {
                     this.completedPlacements++;
                 }
-                continue;
-            }
-            if (block.optional() && !PlayerNpcBuildMaterialUtil.hasMaterialFor(serverLevel, this.playerNpc, block, this.origin)) {
-                this.blueprint.remove(0);
                 continue;
             }
             return block;
@@ -582,12 +666,12 @@ public class BuildHouseGoal extends Goal {
 
         if (!this.canPlaceWithoutClipping(serverLevel, pos, placementState)) {
             this.returnPlacementMaterial(material);
-            this.waitForPlacementClearance(pos);
+            this.waitForPlacementClearance(pos, placementState);
             return false;
         }
         if (pairedPlacement.isPresent() && !this.canPlaceWithoutClipping(serverLevel, pairedPlacement.get().pos(), pairedPlacement.get().state())) {
             this.returnPlacementMaterial(material);
-            this.waitForPlacementClearance(pairedPlacement.get().pos());
+            this.waitForPlacementClearance(pairedPlacement.get().pos(), pairedPlacement.get().state());
             return false;
         }
 
@@ -596,7 +680,14 @@ public class BuildHouseGoal extends Goal {
             this.returnPlacementMaterial(material);
             return false;
         }
-        pairedPlacement.ifPresent(pair -> serverLevel.setBlockAndUpdate(pair.pos(), pair.state()));
+        if (pairedPlacement.isPresent()) {
+            PairedPlacement pair = pairedPlacement.get();
+            if (!serverLevel.setBlockAndUpdate(pair.pos(), pair.state())) {
+                serverLevel.setBlockAndUpdate(pos, Blocks.AIR.defaultBlockState());
+                this.returnPlacementMaterial(material);
+                return false;
+            }
+        }
         this.applyBlockEntityData(serverLevel, pos, block.blockEntityTag());
         this.markPlacedBlock(pos, placementState);
         return true;
@@ -738,13 +829,49 @@ public class BuildHouseGoal extends Goal {
                 .noneMatch(box -> box.move(pos).intersects(this.playerNpc.getBoundingBox().inflate(0.05D)));
     }
 
-    private void waitForPlacementClearance(BlockPos pos) {
+    private void waitForPlacementClearance(BlockPos pos, BlockState state) {
+        if (!pos.equals(this.placementClearancePos)) {
+            this.placementClearanceRetries = 0;
+        }
         this.waitingForPlacementClearance = true;
+        this.placementClearancePos = pos.immutable();
+        this.placementClearanceState = state;
+        this.placementClearanceTicks = 0;
         this.placeDelay = 0;
-        this.moveAwayFromPlacement(pos);
+        if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            this.moveAwayFromPlacement(serverLevel, pos, state);
+        }
     }
 
-    private void moveAwayFromPlacement(BlockPos pos) {
+    private void clearPlacementClearance() {
+        this.waitingForPlacementClearance = false;
+        this.placementClearancePos = null;
+        this.placementClearanceState = null;
+        this.placementClearanceTicks = 0;
+        this.placementClearanceRetries = 0;
+    }
+
+    private void deferBlockedPlacement(PlayerNpcBuildLayout.RelativeBlock block) {
+        if (this.blueprint.size() <= 1) {
+            return;
+        }
+
+        int index = this.blueprint.indexOf(block);
+        if (index < 0) {
+            return;
+        }
+
+        this.blueprint.remove(index);
+        this.blueprint.add(block);
+    }
+
+    private void moveAwayFromPlacement(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        BlockPos standPos = this.findPlacementClearanceStand(serverLevel, pos, state);
+        if (standPos != null) {
+            this.playerNpc.getNavigation().moveTo(standPos.getX() + 0.5D, standPos.getY(), standPos.getZ() + 0.5D, 1.0D);
+            return;
+        }
+
         double dx = this.playerNpc.getX() - (pos.getX() + 0.5D);
         double dz = this.playerNpc.getZ() - (pos.getZ() + 0.5D);
         double distance = Math.sqrt(dx * dx + dz * dz);
@@ -758,6 +885,62 @@ public class BuildHouseGoal extends Goal {
         double targetX = this.playerNpc.getX() + dx / distance * 1.2D;
         double targetZ = this.playerNpc.getZ() + dz / distance * 1.2D;
         this.playerNpc.getNavigation().moveTo(targetX, this.playerNpc.getY(), targetZ, 1.0D);
+    }
+
+    private BlockPos findPlacementClearanceStand(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        BlockPos current = this.playerNpc.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int radius = 1; radius <= 3; radius++) {
+            for (int x = -radius; x <= radius; x++) {
+                for (int z = -radius; z <= radius; z++) {
+                    if (Math.max(Math.abs(x), Math.abs(z)) != radius) {
+                        continue;
+                    }
+                    for (int y = -1; y <= 1; y++) {
+                        BlockPos candidate = pos.offset(x, y, z);
+                        if (this.canUsePlacementClearanceStand(serverLevel, candidate, pos, state)) {
+                            candidates.add(candidate.immutable());
+                        }
+                    }
+                }
+            }
+            if (!candidates.isEmpty()) {
+                break;
+            }
+        }
+
+        candidates.sort(Comparator.comparingDouble(current::distSqr));
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private boolean canUsePlacementClearanceStand(ServerLevel serverLevel, BlockPos standPos, BlockPos placementPos, BlockState placementState) {
+        if (!serverLevel.isInWorldBounds(standPos)
+                || !serverLevel.getWorldBorder().isWithinBounds(standPos)
+                || !serverLevel.getBlockState(standPos).getCollisionShape(serverLevel, standPos).isEmpty()
+                || !serverLevel.getBlockState(standPos.above()).getCollisionShape(serverLevel, standPos.above()).isEmpty()
+                || !serverLevel.getBlockState(standPos.below()).isSolidRender(serverLevel, standPos.below())
+                || !serverLevel.getFluidState(standPos).isEmpty()
+                || !serverLevel.getFluidState(standPos.above()).isEmpty()) {
+            return false;
+        }
+
+        double width = this.playerNpc.getBbWidth();
+        double height = this.playerNpc.getBbHeight();
+        double x = standPos.getX() + 0.5D;
+        double z = standPos.getZ() + 0.5D;
+        AABB standBox = new AABB(
+                x - width / 2.0D,
+                standPos.getY(),
+                z - width / 2.0D,
+                x + width / 2.0D,
+                standPos.getY() + height,
+                z + width / 2.0D
+        ).inflate(0.05D);
+
+        return placementState.getCollisionShape(serverLevel, placementPos)
+                .toAabbs()
+                .stream()
+                .noneMatch(box -> box.move(placementPos).intersects(standBox));
     }
 
     private void returnStack(ItemStack stack) {

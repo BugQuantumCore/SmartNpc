@@ -96,7 +96,7 @@ public final class PlayerNpcCraftingUtil {
     }
 
     public static boolean canCraftBed(SimpleContainer inventory, int rawLogReserve) {
-        return getCraftableBed(inventory) != null
+        return getCraftableBedItem(inventory) != null
                 && countPlankEquivalent(inventory, rawLogReserve) >= 3;
     }
 
@@ -532,8 +532,7 @@ public final class PlayerNpcCraftingUtil {
     }
 
     public static boolean tryCraftBed(ServerLevel serverLevel, SimpleContainer inventory, int rawLogReserve) {
-        Item bed = getCraftableBed(inventory);
-        return bed != null && tryCraftWithLogConversion(serverLevel, inventory, bed, true, rawLogReserve);
+        return tryCraftBed(inventory, rawLogReserve);
     }
 
     public static boolean tryCraftWithLogConversion(ServerLevel serverLevel, SimpleContainer inventory, ItemLike result, boolean craftingTable) {
@@ -577,6 +576,13 @@ public final class PlayerNpcCraftingUtil {
     }
 
     public static boolean consumeItem(SimpleContainer inventory, Predicate<ItemStack> matcher, int count) {
+        if (count <= 0) {
+            return true;
+        }
+        if (countItem(inventory, matcher) < count) {
+            return false;
+        }
+
         int remaining = count;
         for (int i = 0; i < inventory.getContainerSize() && remaining > 0; i++) {
             ItemStack stack = inventory.getItem(i);
@@ -647,7 +653,7 @@ public final class PlayerNpcCraftingUtil {
         return null;
     }
 
-    private static Item getCraftableBed(SimpleContainer inventory) {
+    public static Item getCraftableBedItem(SimpleContainer inventory) {
         Item wool = getCraftableWool(inventory);
         return wool == null ? null : getBedForWool(wool);
     }

@@ -60,8 +60,6 @@ public class PlayerNpcInspectatorModePacket {
     }
 
     public static void restorePlayer(ServerPlayer player) {
-        PlayerNpcGoalTraceLogger.stopTrace(player);
-
         CompoundTag data = player.getPersistentData();
         boolean wasActive = data.getBoolean(ACTIVE_KEY);
         int originalGameMode = data.contains(ORIGINAL_GAME_MODE_KEY)

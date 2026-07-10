@@ -1,22 +1,18 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.CraftingAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.sounds.SoundEvents;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.FluidTags;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.ArrowItem;
 import net.minecraft.world.item.BoatItem;
 import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.CrossbowItem;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.level.block.Blocks;
 
 import java.util.EnumSet;
 
@@ -26,10 +22,12 @@ public class UtilityCraftingGoal extends Goal {
     private static final int MIN_ARROW_COUNT = 16;
 
     private final PlayerNpcEntity playerNpc;
+    private final CraftingAi craftingAi;
     private CraftAction action = CraftAction.NONE;
 
     public UtilityCraftingGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.craftingAi = new CraftingAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -65,28 +63,17 @@ public class UtilityCraftingGoal extends Goal {
 
         switch (this.action) {
             case FLINT_AND_STEEL -> {
-                if (PlayerNpcCraftingUtil.tryCraftFlintAndSteel(this.playerNpc.getInventory())) {
-                    this.playCraftSound(serverLevel, "crafted flint and steel", this.playerNpc.blockPosition());
-                }
+                this.craftingAi.tryCraftFlintAndSteel(serverLevel);
             }
             case ARROWS -> {
-                if (PlayerNpcCraftingUtil.tryCraftArrows(this.playerNpc.getInventory(), this.playerNpc.getRawLogReserveTarget())) {
-                    this.playCraftSound(serverLevel, "crafted arrows", this.playerNpc.blockPosition());
-                }
+                this.craftingAi.tryCraftArrows(serverLevel, this.playerNpc.getRawLogReserveTarget());
             }
             case BOAT -> {
-                if (PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 5, this.playerNpc.getRawLogReserveTarget())) {
-                    InventoryUtils.addItem(this.playerNpc, new ItemStack(Items.OAK_BOAT));
-                    this.playCraftSound(serverLevel, "crafted boat", this.playerNpc.blockPosition());
-                }
+                this.craftingAi.tryCraftBoat(serverLevel, this.playerNpc.getRawLogReserveTarget());
             }
             case CRAFTING_TABLE -> {
                 BlockPos tablePos = this.findCraftingTablePlacement(serverLevel);
-                if (tablePos != null && PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 4, this.playerNpc.getRawLogReserveTarget())) {
-                    serverLevel.setBlockAndUpdate(tablePos, Blocks.CRAFTING_TABLE.defaultBlockState());
-                    this.playerNpc.getLookControl().setLookAt(tablePos.getX() + 0.5D, tablePos.getY() + 0.5D, tablePos.getZ() + 0.5D, 40.0F, 40.0F);
-                    this.playCraftSound(serverLevel, "placed crafting table", tablePos);
-                }
+                this.craftingAi.tryPlaceCraftingTable(serverLevel, tablePos, this.playerNpc.getRawLogReserveTarget());
             }
             case NONE -> {
             }
@@ -156,12 +143,6 @@ public class UtilityCraftingGoal extends Goal {
         count += this.playerNpc.getOffhandItem().getItem() instanceof ArrowItem ? this.playerNpc.getOffhandItem().getCount() : 0;
         count += PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.getItem() instanceof ArrowItem);
         return count;
-    }
-
-    private void playCraftSound(ServerLevel serverLevel, String detail, BlockPos soundPos) {
-        this.playerNpc.setCurrentAiDetail(detail);
-        this.playerNpc.triggerMainHandUseAnimation();
-        serverLevel.playSound(null, soundPos, SoundEvents.WOOD_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
     }
 
     private BlockPos findCraftingTablePlacement(ServerLevel serverLevel) {

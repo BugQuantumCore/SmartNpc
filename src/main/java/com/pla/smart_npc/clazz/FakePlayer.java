@@ -71,8 +71,7 @@ public class FakePlayer extends PathfinderMob {
 //            new FakePlayerName("Sevadus", PlayerNpcInterest.EXPLORING, PlayerNpcInterest.CAUTIOUS)
     );
     private static final List<PlayerNpcInterest> DEFAULT_INTERESTS = List.of(
-            PlayerNpcInterest.EXPLORING,
-            PlayerNpcInterest.LOOTING
+            PlayerNpcInterest.BUILDING
     );
     private static final Queue<FakePlayerName> NAME_POOL = new ArrayDeque<>();
     private static final Queue<FakePlayer> PROFILE_QUEUE = new ConcurrentLinkedQueue<>();

@@ -1,0 +1,121 @@
+package com.pla.smart_npc.entity.ai;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Queue;
+import java.util.Set;
+import java.util.function.Predicate;
+
+public final class StoneAi {
+    private static final int MAX_CLUSTER_BLOCKS = 192;
+
+    private StoneAi() {
+    }
+
+    public static List<StoneCluster> findNearby(
+            ServerLevel serverLevel,
+            BlockPos center,
+            int radius,
+            Predicate<BlockPos> allowedStone
+    ) {
+        Set<BlockPos> visited = new HashSet<>();
+        List<StoneCluster> clusters = new ArrayList<>();
+
+        for (BlockPos mutable : BlockPos.betweenClosed(
+                center.offset(-radius, -6, -radius),
+                center.offset(radius, 6, radius))) {
+            BlockPos pos = mutable.immutable();
+            if (visited.contains(pos) || !canUseStone(serverLevel, pos, allowedStone)) {
+                continue;
+            }
+
+            StoneCluster cluster = scan(serverLevel, pos, visited, allowedStone);
+            if (!cluster.stones().isEmpty()) {
+                clusters.add(cluster);
+            }
+        }
+
+        clusters.sort(Comparator.comparingDouble(cluster -> cluster.nearestTo(center).distSqr(center)));
+        return clusters;
+    }
+
+    public static boolean isStone(BlockState state) {
+        return state.is(Blocks.STONE)
+                || state.is(Blocks.COBBLESTONE)
+                || state.is(Blocks.DEEPSLATE)
+                || state.is(Blocks.COBBLED_DEEPSLATE)
+                || state.is(BlockTags.BASE_STONE_OVERWORLD);
+    }
+
+    private static StoneCluster scan(
+            ServerLevel serverLevel,
+            BlockPos start,
+            Set<BlockPos> globalVisited,
+            Predicate<BlockPos> allowedStone
+    ) {
+        Queue<BlockPos> open = new ArrayDeque<>();
+        Set<BlockPos> localVisited = new HashSet<>();
+        List<BlockPos> stones = new ArrayList<>();
+        open.add(start.immutable());
+
+        while (!open.isEmpty() && stones.size() < MAX_CLUSTER_BLOCKS) {
+            BlockPos pos = open.poll();
+            if (!localVisited.add(pos) || !canUseStone(serverLevel, pos, allowedStone)) {
+                continue;
+            }
+
+            stones.add(pos);
+            globalVisited.add(pos);
+            for (Direction direction : Direction.values()) {
+                BlockPos next = pos.relative(direction);
+                if (!localVisited.contains(next) && canUseStone(serverLevel, next, allowedStone)) {
+                    open.add(next.immutable());
+                }
+            }
+        }
+
+        return new StoneCluster(stones);
+    }
+
+    private static boolean canUseStone(ServerLevel serverLevel, BlockPos pos, Predicate<BlockPos> allowedStone) {
+        return isStone(serverLevel.getBlockState(pos))
+                && (allowedStone == null || allowedStone.test(pos));
+    }
+
+    public static final class StoneCluster {
+        private final List<BlockPos> stones;
+
+        private StoneCluster(List<BlockPos> stones) {
+            this.stones = List.copyOf(stones);
+        }
+
+        public List<BlockPos> stones() {
+            return this.stones;
+        }
+
+        public BlockPos nearestTo(BlockPos origin) {
+            return this.stones.stream()
+                    .min(Comparator.comparingDouble(pos -> pos.distSqr(origin)))
+                    .orElse(origin)
+                    .immutable();
+        }
+
+        public List<BlockPos> stonesNearestFirst(BlockPos origin) {
+            List<BlockPos> sorted = new ArrayList<>(this.stones);
+            sorted.sort(Comparator
+                    .comparingDouble((BlockPos pos) -> pos.distSqr(origin))
+                    .thenComparingInt(BlockPos::getY));
+            return sorted;
+        }
+    }
+}

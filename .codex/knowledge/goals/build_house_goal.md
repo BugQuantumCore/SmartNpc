@@ -20,8 +20,9 @@ The old randomly generated role-based shelter system and its generated JSON file
 - Server side only.
 - NPC must have the `BUILDING` interest.
 - NPC must be alive, idle, not healing, not riding, and not in combat.
-- Requires the NPC's per-NPC raw-log reserve and cobblestone/cobbled-deepslate reserve to be met before selecting a first home. These reserves are randomized on the entity from 12, 16, 20, 24, or 32.
-- Requires at least 16 available build/plank-equivalent blocks before starting a new home.
+- First home/base selection requires the NPC's raw-log reserve only. It uses wood/plank-equivalent blocks with raw-log reserve `0` for the base-selection readiness check.
+- Actual blueprint block placement waits until both daily log and cobblestone/cobbled-deepslate supply targets are met. This keeps the flow as logs -> select base -> terraform -> gather/dig stone near base -> return/build.
+- Requires at least 16 available build/plank-equivalent blocks before selecting a new home.
 - Existing unfinished homes can resume from the saved `PlayerNpcHomeUtil` home area and layout id.
 - Cooldown uses `PlayerNpcEntity.buildHouseCooldown`.
 
@@ -33,7 +34,7 @@ The JSON parser still exists only as a compatibility path for older local packs.
 
 ## Behavior
 
-The goal scans around the NPC for a supported footprint, saves the home area through `PlayerNpcHomeUtil`, places a build-site crafting table just outside the selected footprint when possible, and then walks the exact block list bottom-up.
+The goal scans around the NPC for a supported footprint and saves the home area through `PlayerNpcHomeUtil` as soon as logs are ready. If terraform work remains, or if either primary supply target is still low, `canUse()` returns false after saving the base so higher-priority prep/resource goals can run. Once both supply targets are ready, the goal places a build-site crafting table just outside the selected footprint when possible, then walks the exact block list bottom-up.
 
 For each target block:
 

@@ -1,6 +1,10 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -21,11 +25,9 @@ import net.minecraft.world.item.ShovelItem;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
-import net.minecraft.world.level.pathfinder.Path;
 import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
@@ -43,9 +45,19 @@ public class DigDownForStoneGoal extends Goal {
     private static final double LOCAL_STEP_DISTANCE_SQR = 3.0D * 3.0D;
     private static final int REPATH_INTERVAL_TICKS = 15;
     private static final int COOLDOWN_TICKS = 20 * 18;
+    private static final int FAILED_WALK_COOLDOWN_TICKS = 20 * 2;
+    private static final int MAX_DIG_SITE_WALK_TICKS = 20 * 25;
+    private static final int MAX_DIG_SITE_SAFE_DROP_BLOCKS = 3;
+    private static final int CLEAR_OBSTRUCTION_TICKS = 24;
+    private static final double CLEAR_OBSTRUCTION_DISTANCE_SQR = 5.0D * 5.0D;
+    private static final int PROTECTED_BASE_SUPPORT_DEPTH = 3;
 
     private final PlayerNpcEntity playerNpc;
     private final double speed;
+    private final ToolAi toolAi;
+    private final BreakingBlockAi breakingBlockAi;
+    private final ClearBlockAi clearBlockAi;
+    private final PathNavigationAi pathNavigationAi;
     private BlockPos digOrigin;
     private BlockPos targetPos;
     private Direction digDirection;
@@ -53,16 +65,22 @@ public class DigDownForStoneGoal extends Goal {
     private int goalTicks;
     private int mineTicks;
     private int repathTicks;
+    private int digSiteWalkTicks;
     private int stairSteps;
     private int stoneBlocksMined;
     private int stoneBlocksNeeded;
     private boolean usingTemporaryTool;
     private boolean minedStone;
+    private boolean reachedDigSite;
     private boolean finished;
 
     public DigDownForStoneGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
         this.speed = speed;
+        this.toolAi = new ToolAi(playerNpc);
+        this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
+        this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
+        this.pathNavigationAi = new PathNavigationAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -75,9 +93,12 @@ public class DigDownForStoneGoal extends Goal {
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getGatherCooldown() > 0
+                || this.shouldStayHomeForWeather(serverLevel)
                 || !this.hasPickaxe()
+                || !this.hasPreparedBaseForStone(serverLevel)
                 || this.countStone() >= this.playerNpc.getCobblestoneSupplyTarget()
-                || this.countRawLogs() < this.playerNpc.getRawLogReserveTarget()) {
+                || this.countRawLogs() < this.playerNpc.getRawLogReserveTarget()
+                || GatherStoneGoal.hasNearbyStoneTarget(this.playerNpc, serverLevel)) {
             return false;
         }
 
@@ -98,7 +119,10 @@ public class DigDownForStoneGoal extends Goal {
                 && this.stoneBlocksMined < this.stoneBlocksNeeded
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
-                && this.playerNpc.getTarget() == null;
+                && this.playerNpc.getTarget() == null
+                && this.playerNpc.level() instanceof ServerLevel serverLevel
+                && !this.shouldStayHomeForWeather(serverLevel)
+                && this.hasPreparedBaseForStone(serverLevel);
     }
 
     @Override
@@ -106,6 +130,7 @@ public class DigDownForStoneGoal extends Goal {
         this.goalTicks = 0;
         this.mineTicks = 0;
         this.repathTicks = 0;
+        this.digSiteWalkTicks = 0;
         this.stairSteps = 0;
         this.stoneBlocksMined = 0;
         this.stoneBlocksNeeded = Math.max(1, this.playerNpc.getCobblestoneSupplyTarget() - this.countStone());
@@ -113,10 +138,13 @@ public class DigDownForStoneGoal extends Goal {
         this.previousMainHand = ItemStack.EMPTY;
         this.usingTemporaryTool = false;
         this.minedStone = false;
+        this.reachedDigSite = false;
         this.finished = false;
         this.playerNpc.setCurrentAiState("ai.player_npc.digging_down_for_stone");
-        this.playerNpc.setCurrentAiDetail("walking to dig site");
-        this.moveTo(this.digOrigin);
+        this.updateWalkDetail();
+        if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            this.moveTo(serverLevel, this.digOrigin);
+        }
     }
 
     @Override
@@ -127,16 +155,30 @@ public class DigDownForStoneGoal extends Goal {
         }
 
         this.goalTicks++;
+        if (this.tickClearBlock(serverLevel)) {
+            return;
+        }
+
         if (!this.hasReached(this.digOrigin)) {
-            this.playerNpc.setCurrentAiDetail("walking to dig site");
+            this.digSiteWalkTicks++;
+            this.updateWalkDetail();
+            if (this.digSiteWalkTicks > MAX_DIG_SITE_WALK_TICKS) {
+                this.finished = true;
+                return;
+            }
+            if (this.startClearingDigRoute(serverLevel)) {
+                return;
+            }
             if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
-                if (!this.moveTo(this.digOrigin)) {
+                if (!this.moveTo(serverLevel, this.digOrigin) && !this.startClearingDigRoute(serverLevel)) {
                     this.finished = true;
                 }
                 this.repathTicks = REPATH_INTERVAL_TICKS;
             }
             return;
         }
+        this.reachedDigSite = true;
+        this.digSiteWalkTicks = 0;
 
         if (this.targetPos == null) {
             this.targetPos = this.findNextDigTarget(serverLevel);
@@ -156,9 +198,16 @@ public class DigDownForStoneGoal extends Goal {
     @Override
     public void stop() {
         this.playerNpc.clearBlockBreakProgress(this.targetPos);
+        this.clearBlockAi.stop();
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
         this.restorePreviousMainHand();
         if (!this.playerNpc.level().isClientSide) {
-            int cooldown = this.minedStone ? COOLDOWN_TICKS : COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 12);
+            int cooldown = this.minedStone
+                    ? COOLDOWN_TICKS
+                    : this.reachedDigSite
+                    ? COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 12)
+                    : FAILED_WALK_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 2);
             this.playerNpc.setGatherCooldown(cooldown);
         }
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -169,13 +218,20 @@ public class DigDownForStoneGoal extends Goal {
         this.goalTicks = 0;
         this.mineTicks = 0;
         this.repathTicks = 0;
+        this.digSiteWalkTicks = 0;
         this.stairSteps = 0;
         this.minedStone = false;
+        this.reachedDigSite = false;
         this.finished = false;
     }
 
     private BlockPos findDigOrigin(ServerLevel serverLevel) {
-        BlockPos center = this.playerNpc.blockPosition();
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
+        if (home.isEmpty()) {
+            return null;
+        }
+
+        BlockPos center = PlayerNpcHomeUtil.center(home.get());
         List<BlockPos> candidates = new ArrayList<>();
         for (int x = center.getX() - DIG_SITE_MAX_RADIUS; x <= center.getX() + DIG_SITE_MAX_RADIUS; x++) {
             for (int z = center.getZ() - DIG_SITE_MAX_RADIUS; z <= center.getZ() + DIG_SITE_MAX_RADIUS; z++) {
@@ -195,12 +251,10 @@ public class DigDownForStoneGoal extends Goal {
             }
         }
 
-        candidates.sort(Comparator.comparingDouble(center::distSqr));
         int checks = Math.min(candidates.size(), 32);
-        for (int i = 0; i < checks; i++) {
-            BlockPos candidate = candidates.get(i);
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
-            if (path != null && path.canReach()) {
+        for (int i = 0; i < checks && !candidates.isEmpty(); i++) {
+            BlockPos candidate = candidates.remove(this.playerNpc.getRandom().nextInt(candidates.size()));
+            if (this.pathNavigationAi.canReachOrSafelyDropTo(serverLevel, candidate, MAX_DIG_SITE_SAFE_DROP_BLOCKS)) {
                 return candidate;
             }
         }
@@ -225,8 +279,10 @@ public class DigDownForStoneGoal extends Goal {
         }
         if (this.canStandAt(serverLevel, forwardFeet)) {
             this.digOrigin = forwardFeet.immutable();
+            this.reachedDigSite = false;
+            this.digSiteWalkTicks = 0;
             this.stairSteps++;
-            this.moveTo(this.digOrigin);
+            this.moveTo(serverLevel, this.digOrigin);
             return null;
         }
         return null;
@@ -401,13 +457,53 @@ public class DigDownForStoneGoal extends Goal {
         ));
     }
 
-    private boolean moveTo(BlockPos pos) {
+    private boolean tickClearBlock(ServerLevel serverLevel) {
+        if (!this.clearBlockAi.isRunning()) {
+            return false;
+        }
+
+        ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            return true;
+        }
+
+        this.repathTicks = 0;
+        return false;
+    }
+
+    private boolean startClearingDigRoute(ServerLevel serverLevel) {
+        if (this.digOrigin == null) {
+            return false;
+        }
+
+        List<BlockPos> candidates = new ArrayList<>();
+        BlockPos feet = this.playerNpc.blockPosition();
+        addBodyColumn(candidates, feet);
+        addBodyColumn(candidates, this.digOrigin);
+        addLineCandidates(candidates, feet.above(), this.digOrigin.above(), 5);
+        addLineCandidates(candidates, feet, this.digOrigin, 5);
+        candidates.removeIf(pos -> this.isProtectedHomeBlock(pos));
+
+        return this.clearBlockAi.startNearest(
+                serverLevel,
+                candidates,
+                this::isClearablePathState,
+                "clearing dig path",
+                CLEAR_OBSTRUCTION_TICKS,
+                CLEAR_OBSTRUCTION_DISTANCE_SQR
+        );
+    }
+
+    private boolean isClearablePathState(BlockState state) {
+        return !state.isAir();
+    }
+
+    private boolean moveTo(ServerLevel serverLevel, BlockPos pos) {
         if (pos == null) {
             return false;
         }
-        Path path = this.playerNpc.getNavigation().createPath(pos, 0);
-        if (path != null && path.canReach()) {
-            return this.playerNpc.getNavigation().moveTo(path, this.speed);
+        if (this.pathNavigationAi.moveTo(serverLevel, pos, this.speed, MAX_DIG_SITE_SAFE_DROP_BLOCKS)) {
+            return true;
         }
         if (this.playerNpc.blockPosition().distSqr(pos) <= LOCAL_STEP_DISTANCE_SQR) {
             this.playerNpc.getMoveControl().setWantedPosition(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D, this.speed);
@@ -421,17 +517,13 @@ public class DigDownForStoneGoal extends Goal {
     }
 
     private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
-        return serverLevel.isInWorldBounds(pos)
-                && serverLevel.getWorldBorder().isWithinBounds(pos)
-                && serverLevel.getBlockState(pos).isAir()
-                && serverLevel.getBlockState(pos.above()).isAir()
-                && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+        return PathNavigationAi.canStandAt(serverLevel, pos);
     }
 
     private boolean isAwayFromHome(BlockPos pos) {
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
         if (home.isEmpty()) {
-            return true;
+            return false;
         }
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
         BlockPos homeCenter = PlayerNpcHomeUtil.center(homeArea);
@@ -444,7 +536,27 @@ public class DigDownForStoneGoal extends Goal {
 
     private boolean isProtectedHomeBlock(BlockPos pos) {
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
-        return home.isPresent() && PlayerNpcHomeUtil.isInside(home.get(), pos);
+        return home.isPresent()
+                && (PlayerNpcHomeUtil.isInside(home.get(), pos) || isInsideHomeSupport(home.get(), pos));
+    }
+
+    private static boolean isInsideHomeSupport(PlayerNpcHomeUtil.HomeArea homeArea, BlockPos pos) {
+        return pos.getX() >= homeArea.origin().getX()
+                && pos.getX() < homeArea.origin().getX() + homeArea.width()
+                && pos.getZ() >= homeArea.origin().getZ()
+                && pos.getZ() < homeArea.origin().getZ() + homeArea.depth()
+                && pos.getY() >= homeArea.origin().getY() - PROTECTED_BASE_SUPPORT_DEPTH
+                && pos.getY() < homeArea.origin().getY();
+    }
+
+    private boolean hasPreparedBaseForStone(ServerLevel serverLevel) {
+        return PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent()
+                && !TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel);
+    }
+
+    private boolean shouldStayHomeForWeather(ServerLevel serverLevel) {
+        return PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent()
+                && (serverLevel.isNight() || serverLevel.isThundering());
     }
 
     private boolean hasPickaxe() {
@@ -466,5 +578,41 @@ public class DigDownForStoneGoal extends Goal {
                 || state.is(Blocks.DEEPSLATE)
                 || state.is(Blocks.COBBLED_DEEPSLATE)
                 || state.is(BlockTags.MINEABLE_WITH_PICKAXE);
+    }
+
+    private void updateWalkDetail() {
+        if (this.digOrigin == null) {
+            this.playerNpc.setCurrentAiDetail("walking to dig site");
+            return;
+        }
+        this.playerNpc.setCurrentAiDetail("walking to dig site @ "
+                + this.digOrigin.getX() + " "
+                + this.digOrigin.getY() + " "
+                + this.digOrigin.getZ());
+    }
+
+    private static void addBodyColumn(List<BlockPos> candidates, BlockPos feet) {
+        if (feet == null) {
+            return;
+        }
+        candidates.add(feet);
+        candidates.add(feet.above());
+    }
+
+    private static void addLineCandidates(List<BlockPos> candidates, BlockPos start, BlockPos target, int maxSteps) {
+        if (start == null || target == null) {
+            return;
+        }
+        double dx = target.getX() - start.getX();
+        double dy = target.getY() - start.getY();
+        double dz = target.getZ() - start.getZ();
+        int steps = Math.max(1, Math.min(maxSteps, (int) Math.ceil(Math.max(Math.abs(dx), Math.max(Math.abs(dy), Math.abs(dz))))));
+        for (int i = 1; i <= steps; i++) {
+            double progress = i / (double) steps;
+            int x = start.getX() + (int) Math.round(dx * progress);
+            int y = start.getY() + (int) Math.round(dy * progress);
+            int z = start.getZ() + (int) Math.round(dz * progress);
+            candidates.add(new BlockPos(x, y, z));
+        }
     }
 }

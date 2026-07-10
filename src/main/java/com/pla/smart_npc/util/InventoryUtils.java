@@ -128,23 +128,42 @@ public class InventoryUtils {
             return Optional.empty();
         }
 
+        int available = 0;
         for (int i = 0; i < inventory.getContainerSize(); i++) {
+            ItemStack stack = inventory.getItem(i);
+            if (!stack.isEmpty() && matcher.test(stack)) {
+                available += stack.getCount();
+                if (available >= count) {
+                    break;
+                }
+            }
+        }
+        if (available < count) {
+            return Optional.empty();
+        }
+
+        ItemStack consumed = ItemStack.EMPTY;
+        int remaining = count;
+        for (int i = 0; i < inventory.getContainerSize() && remaining > 0; i++) {
             ItemStack stack = inventory.getItem(i);
             if (stack.isEmpty() || !matcher.test(stack)) {
                 continue;
             }
-
-            int consumedCount = Math.min(count, stack.getCount());
-            ItemStack consumed = stack.copy();
-            consumed.setCount(consumedCount);
+            int consumedCount = Math.min(remaining, stack.getCount());
+            if (consumed.isEmpty()) {
+                consumed = stack.copy();
+                consumed.setCount(0);
+            }
+            consumed.grow(consumedCount);
             stack.shrink(consumedCount);
+            remaining -= consumedCount;
             if (stack.isEmpty()) {
                 inventory.setItem(i, ItemStack.EMPTY);
             }
-            return Optional.of(consumed);
         }
 
-        return Optional.empty();
+        inventory.setChanged();
+        return Optional.of(consumed);
     }
 
     public static Optional<ItemStack> consumeItem(Entity entity, Predicate<ItemStack> matcher, int count) {

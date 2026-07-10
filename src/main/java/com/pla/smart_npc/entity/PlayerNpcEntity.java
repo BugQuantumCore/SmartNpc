@@ -4,7 +4,8 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.clazz.FakePlayer;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
-import com.pla.smart_npc.entity.goal.AfkAtHomeGoal;
+import com.pla.smart_npc.entity.ai.ResourceAi;
+import com.pla.smart_npc.entity.goal.BeingAtHomeGoal;
 import com.pla.smart_npc.entity.goal.BuildHouseGoal;
 import com.pla.smart_npc.entity.goal.BreakTargetObstructionGoal;
 import com.pla.smart_npc.entity.goal.BurnNearbyItemGoal;
@@ -18,15 +19,17 @@ import com.pla.smart_npc.entity.goal.CraftBasicGearGoal;
 import com.pla.smart_npc.entity.goal.CraftCropFoodGoal;
 import com.pla.smart_npc.entity.goal.CraftIronGearGoal;
 import com.pla.smart_npc.entity.goal.CraftShieldGoal;
+import com.pla.smart_npc.entity.goal.DigDownForStoneGoal;
 import com.pla.smart_npc.entity.goal.EatHealingFoodGoal;
 import com.pla.smart_npc.entity.goal.EscapeHoleWithBlockGoal;
 import com.pla.smart_npc.entity.goal.EscapeWaterCurrentGoal;
-import com.pla.smart_npc.entity.goal.ExploreBiomeForLogsGoal;
+import com.pla.smart_npc.entity.goal.ExploreAroundGoal;
 import com.pla.smart_npc.entity.goal.ExploreCaveOreGoal;
-import com.pla.smart_npc.entity.goal.DigDownForStoneGoal;
 import com.pla.smart_npc.entity.goal.FillWaterBucketGoal;
 import com.pla.smart_npc.entity.goal.FarmCropGoal;
-import com.pla.smart_npc.entity.goal.GatherMaterialsGoal;
+import com.pla.smart_npc.entity.goal.GatherMissingBuildMaterialGoal;
+import com.pla.smart_npc.entity.goal.GatherLogsGoal;
+import com.pla.smart_npc.entity.goal.GatherStoneGoal;
 import com.pla.smart_npc.entity.goal.HuntSheepForBedGoal;
 import com.pla.smart_npc.entity.goal.IronGolemTrollGoal;
 import com.pla.smart_npc.entity.goal.InterestGatedGoal;
@@ -100,7 +103,6 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkHooks;
 import net.minecraftforge.network.PlayMessages;
-import net.minecraftforge.fml.ModList;
 import net.minecraftforge.registries.ForgeRegistries;
 import org.jetbrains.annotations.NotNull;
 
@@ -117,13 +119,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final EntityDataAccessor<String> AI_STATE = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> AI_DETAIL = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<Boolean> DANCING = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
+    private static final EntityDataAccessor<Boolean> SNEAKING_AI_HIDES_DISPLAY_NAME = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
     private static final int MAIN_HAND_ATTACK_ANIMATION_DURATION = 10;
     private static final int MAIN_HAND_USE_ANIMATION_DURATION = 6;
     private static final int PLACE_BLOCK_PARRY_COOLDOWN_TICKS = 60;
     private static final double PLAYER_LIKE_JUMP_Y = 0.42D;
-    private static final int[] RAW_LOG_RESERVE_OPTIONS = {12, 16, 20, 24, 32};
-    private static final int[] WOOD_SUPPLY_TARGET_OPTIONS = {12, 16, 20, 24, 32};
-    private static final int[] COBBLESTONE_SUPPLY_TARGET_OPTIONS = {12, 16, 20, 24, 32};
     private static final int STARTUP_IDLE_WAKE_TICKS = 20 * 4;
     private static final int TASKLESS_IDLE_WAKE_TICKS = 20;
     public static final String AI_IDLE = "ai.player_npc.idle";
@@ -210,6 +210,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int rawLogReserveTarget = 24;
     private int woodSupplyTarget = 64;
     private int cobblestoneSupplyTarget = 24;
+    private long lastSupplyGoalRerollDay = -1L;
     private ItemStack mainWeaponItem = ItemStack.EMPTY;
     private ItemStack offWeaponItem = ItemStack.EMPTY;
     private boolean healing = false;
@@ -219,6 +220,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     @Nullable
     private BlockPos upwardEscapeTarget;
     private int upwardEscapeRequestTicks = 0;
+    private int upwardEscapeMaxPillarBlocks = 0;
     private double placeBlockToParryChance;
     private int placeBlockParryCooldown = 0;
     private int stunEscapeCooldown = 0;
@@ -413,18 +415,28 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public void requestUpwardEscapeTo(@Nullable BlockPos target, int ticks) {
+        this.requestUpwardEscapeTo(target, ticks, 0);
+    }
+
+    public void requestUpwardEscapeTo(@Nullable BlockPos target, int ticks, int maxPillarBlocks) {
         if (target == null || ticks <= 0) {
             return;
         }
 
         this.upwardEscapeTarget = target.immutable();
         this.upwardEscapeRequestTicks = Math.max(this.upwardEscapeRequestTicks, normalizeCooldown(ticks));
+        this.upwardEscapeMaxPillarBlocks = Math.max(0, maxPillarBlocks);
         this.holeEscapeCooldown = 0;
+    }
+
+    public int getUpwardEscapeMaxPillarBlocks() {
+        return this.getUpwardEscapeTarget() == null ? 0 : this.upwardEscapeMaxPillarBlocks;
     }
 
     public void clearUpwardEscapeTarget() {
         this.upwardEscapeTarget = null;
         this.upwardEscapeRequestTicks = 0;
+        this.upwardEscapeMaxPillarBlocks = 0;
     }
 
     @Nullable
@@ -691,6 +703,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return this.rawLogReserveTarget;
     }
 
+    public int getLogSupplyGoal() {
+        return this.rawLogReserveTarget;
+    }
+
     public int getWoodSupplyTarget() {
         return this.woodSupplyTarget;
     }
@@ -699,20 +715,21 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return this.cobblestoneSupplyTarget;
     }
 
-    public boolean shouldPrioritizeLogGathering() {
-        int rawLogs = this.countHeldAndInventoryItems(stack -> stack.is(ItemTags.LOGS));
-        if (rawLogs < this.rawLogReserveTarget) {
-            return true;
-        }
+    public int getStoneSupplyGoal() {
+        return this.cobblestoneSupplyTarget;
+    }
 
-        int plankSupply = this.countHeldAndInventoryItems(stack -> stack.is(ItemTags.PLANKS));
-        int usableWoodEquivalent = plankSupply + Math.max(0, rawLogs - this.rawLogReserveTarget) * 4;
-        return usableWoodEquivalent < this.woodSupplyTarget;
+    public boolean shouldPrioritizeLogGathering() {
+        return ResourceAi.countLogs(this) < this.getLogSupplyGoal();
     }
 
     public boolean shouldPrioritizeCobblestoneGathering() {
-        int cobblestone = this.countHeldAndInventoryItems(stack -> stack.is(Items.COBBLESTONE) || stack.is(Items.COBBLED_DEEPSLATE));
-        return cobblestone < this.cobblestoneSupplyTarget;
+        return ResourceAi.countStone(this) < this.getStoneSupplyGoal();
+    }
+
+    public boolean hasMetBuildSupplyGoals() {
+        return !this.shouldPrioritizeLogGathering()
+                && !this.shouldPrioritizeCobblestoneGathering();
     }
 
     private boolean hasHeldOrInventoryTool(Class<?> toolClass) {
@@ -854,14 +871,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.setCustomNameVisible(true);
         this.setPersistenceRequired();
         this.placeBlockToParryChance = new Random().nextDouble(0.20, 0.40);
-        this.rawLogReserveTarget = this.randomMaterialTarget(RAW_LOG_RESERVE_OPTIONS);
-        this.woodSupplyTarget = this.randomMaterialTarget(WOOD_SUPPLY_TARGET_OPTIONS);
-        this.cobblestoneSupplyTarget = this.randomMaterialTarget(COBBLESTONE_SUPPLY_TARGET_OPTIONS);
+        this.rawLogReserveTarget = ResourceAi.randomLogSupplyGoal(this.getRandom());
+        this.woodSupplyTarget = this.rawLogReserveTarget;
+        this.cobblestoneSupplyTarget = ResourceAi.randomStoneSupplyGoal(this.getRandom());
         this.setCanPickUpLoot(true);
-    }
-
-    private int randomMaterialTarget(int[] options) {
-        return options[this.getRandom().nextInt(options.length)];
     }
 
     @Override
@@ -871,6 +884,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.entityData.define(AI_STATE, AI_IDLE);
         this.entityData.define(AI_DETAIL, "");
         this.entityData.define(DANCING, false);
+        this.entityData.define(SNEAKING_AI_HIDES_DISPLAY_NAME, false);
     }
 
     @Override
@@ -916,6 +930,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         tag.putInt("RawLogReserveTarget", this.rawLogReserveTarget);
         tag.putInt("WoodSupplyTarget", this.woodSupplyTarget);
         tag.putInt("CobblestoneSupplyTarget", this.cobblestoneSupplyTarget);
+        tag.putLong("LastSupplyGoalRerollDay", this.lastSupplyGoalRerollDay);
         tag.putBoolean("UseBow", this.useBow);
         tag.putDouble("BlockProjectileChance", this.placeBlockToParryChance);
         tag.putInt("BlockParryCooldown", this.placeBlockParryCooldown);
@@ -992,6 +1007,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
         if (tag.contains("CobblestoneSupplyTarget", Tag.TAG_INT)) {
             this.cobblestoneSupplyTarget = Math.max(0, tag.getInt("CobblestoneSupplyTarget"));
+        }
+        if (tag.contains("LastSupplyGoalRerollDay", Tag.TAG_LONG)) {
+            this.lastSupplyGoalRerollDay = tag.getLong("LastSupplyGoalRerollDay");
         }
         this.useBow = tag.getBoolean("UseBow");
         if (tag.contains("BlockProjectileChance", Tag.TAG_DOUBLE)) {
@@ -1138,68 +1156,59 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     protected void registerGoals() {
-        this.goalSelector.addGoal(-2, new RecoverWeaponInCombatGoal(this, 1.0D, 10.0D));
-        this.goalSelector.addGoal(-1, new EscapeWaterCurrentGoal(this));
         this.goalSelector.addGoal(0, new FloatGoal(this));
-        this.targetSelector.addGoal(0, new RetargetCloserThreatGoal(this));
-        this.targetSelector.addGoal(1, new HurtByTargetGoal(this));
-        this.targetSelector.addGoal(2, this.gated(new PlayerNpcSmartTargetGoal(this),
-                PlayerNpcInterest.HUNT_MONSTERS,
-                PlayerNpcInterest.HUNT_ANIMALS,
-                PlayerNpcInterest.HUNT_PLAYERS,
-                PlayerNpcInterest.HUNT_VILLAGERS));
         this.goalSelector.addGoal(1, new EscapeHoleWithBlockGoal(this));
-        this.goalSelector.addGoal(1, new RespondToNpcAlertGoal(this));
-        this.goalSelector.addGoal(2, new CallForHelpGoal(this));
-        this.goalSelector.addGoal(2, new BreakTargetObstructionGoal(this));
         this.goalSelector.addGoal(2, this.gated(new SleepAtHomeGoal(this), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(2, new BoatTrapMonsterGoal(this));
-        this.goalSelector.addGoal(2, this.gated(new TrollHitGoal(this), PlayerNpcInterest.TROLL_HIT));
         this.goalSelector.addGoal(3, new PickupNearbyItemGoal(this, 1.1D));
-        this.goalSelector.addGoal(5, new BurnNearbyItemGoal(this, 1.0D, 10.0D));
-        this.goalSelector.addGoal(5, this.gated(new IronGolemTrollGoal(this), PlayerNpcInterest.TROLL_HIT));
-        this.goalSelector.addGoal(5, new CraftBasicGearGoal(this));
-        this.goalSelector.addGoal(3, new MeleeAttackGoal(this, 1.0D, false));
         this.goalSelector.addGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, this.gated(new TerraformBuildSiteGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, this.gated(new ManageHomeBaseGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new CheckHomeSuppliesGoal(this));
-        this.goalSelector.addGoal(5, new GatherMaterialsGoal(this, 1.0D));
-        this.goalSelector.addGoal(6, new AfkAtHomeGoal(this, 1.0D));
-        this.goalSelector.addGoal(6, new ExploreBiomeForLogsGoal(this, 1.0D));
+        this.goalSelector.addGoal(5, new CraftBasicGearGoal(this));
+        this.goalSelector.addGoal(6, new GatherLogsGoal(this, 1.0D));
+        this.goalSelector.addGoal(6, new GatherStoneGoal(this, 1.0D));
         this.goalSelector.addGoal(6, new DigDownForStoneGoal(this, 1.0D));
-        this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
-        this.goalSelector.addGoal(6, new CraftIronGearGoal(this));
-        this.goalSelector.addGoal(6, new CookFoodGoal(this));
-        this.goalSelector.addGoal(6, this.gated(new CraftCropFoodGoal(this), PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(6, this.gated(new CraftShieldGoal(this),
-                PlayerNpcInterest.HUNT_MONSTERS,
-                PlayerNpcInterest.HUNT_PLAYERS,
-                PlayerNpcInterest.HUNT_VILLAGERS,
-                PlayerNpcInterest.MINING));
-        this.goalSelector.addGoal(6, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(6, new PlantSaplingGoal(this));
-        this.goalSelector.addGoal(6, this.gated(new LootNearbyChestGoal(this, 1.0D), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.LOOTING));
-        this.goalSelector.addGoal(6, this.gated(new HuntSheepForBedGoal(this), PlayerNpcInterest.BUILDING, PlayerNpcInterest.HUNT_ANIMALS));
-        this.goalSelector.addGoal(6, this.gated(new PlayerNpcFishingGoal(this), PlayerNpcInterest.FISHING));
-        this.goalSelector.addGoal(6, this.gated(new BoatStockpileGoal(this), PlayerNpcInterest.FISHING, PlayerNpcInterest.EXPLORING));
-        this.goalSelector.addGoal(6, new UtilityCraftingGoal(this));
-        this.goalSelector.addGoal(7, new WaterAvoidingRandomStrollGoal(this, 1.0D));
-        this.goalSelector.addGoal(8, this.gated(new UseSpyglassGoal(this), PlayerNpcInterest.EXPLORING));
-        this.goalSelector.addGoal(8, new JukeboxDanceGoal(this, 1.0D));
-        this.goalSelector.addGoal(8, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS, PlayerNpcInterest.EXPLORING));
-        this.goalSelector.addGoal(8, this.gated(new ScaredHideGoal(this), PlayerNpcInterest.CAUTIOUS));
+        this.goalSelector.addGoal(6, new GatherMissingBuildMaterialGoal(this, 1.0D));
+        this.goalSelector.addGoal(7, new ExploreAroundGoal(
+                this,
+                1.0D,
+                "exploring for logs",
+                level -> this.shouldPrioritizeLogGathering() && !this.shouldStayHomeForWeather(level),
+                level -> GatherLogsGoal.hasNearbyLogTarget(this, level)
+        ));
+        this.goalSelector.addGoal(7, new ExploreAroundGoal(
+                this,
+                1.0D,
+                "exploring for stone",
+                level -> !this.shouldPrioritizeLogGathering()
+                        && this.shouldPrioritizeCobblestoneGathering()
+                        && PlayerNpcHomeUtil.getHome(this).isPresent()
+                        && !TerraformBuildSiteGoal.hasActionablePrepWork(this, level)
+                        && !this.shouldStayHomeForWeather(level),
+                level -> GatherStoneGoal.hasNearbyStoneTarget(this, level)
+        ));
+        this.goalSelector.addGoal(7, new ExploreAroundGoal(
+                this,
+                1.0D,
+                "exploring for build materials",
+                level -> GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(this, level)
+                        && !this.shouldStayHomeForWeather(level),
+                level -> GatherMissingBuildMaterialGoal.hasNearbyGatherTarget(this, level)
+        ));
+        this.goalSelector.addGoal(8, new BeingAtHomeGoal(this, 1.0D));
         this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
-            if (!ModList.get().isLoaded("epicfight_smart_npc")) {
-            this.registerVanillaCombatReplacementGoals();
-        }
         ((GroundPathNavigation) this.getNavigation()).setCanOpenDoors(true);
         ((GroundPathNavigation) this.getNavigation()).setCanFloat(true);
     }
 
     private Goal gated(Goal goal, PlayerNpcInterest... interests) {
         return new InterestGatedGoal(this, goal, interests);
+    }
+
+    private boolean shouldStayHomeForWeather(ServerLevel serverLevel) {
+        return PlayerNpcHomeUtil.getHome(this).isPresent()
+                && (serverLevel.isNight() || serverLevel.isThundering());
     }
 
     private void registerVanillaCombatReplacementGoals() {
@@ -1269,6 +1278,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 && attacker.isAlive()
                 && attacker != this
                 && !this.isAlliedTo(attacker)) {
+            if (!this.hasInterest(PlayerNpcInterest.HUNT_PLAYERS)
+                    && this.isPassiveBuildingBlockedByPlayerTarget(attacker)) {
+                return true;
+            }
             this.setTarget(attacker);
             this.lastCombatProgressTick = this.tickCount;
             this.staleTargetTicks = 0;
@@ -1408,6 +1421,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         String state = this.getCurrentAiState();
         return this.isHealing()
                 || "ai.player_npc.gathering_materials".equals(state)
+                || "ai.player_npc.gathering_logs".equals(state)
+                || "ai.player_npc.gathering_stone".equals(state)
                 || "ai.player_npc.exploring_cave".equals(state)
                 || "ai.player_npc.escaping_hole".equals(state)
                 || "ai.player_npc.pillaring_up".equals(state)
@@ -1575,6 +1590,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public void setDancing(boolean dancing) {
         this.entityData.set(DANCING, dancing);
+    }
+
+    public boolean isDisplayNameHiddenBySneakingAi() {
+        return this.entityData.get(SNEAKING_AI_HIDES_DISPLAY_NAME);
+    }
+
+    public void setDisplayNameHiddenBySneakingAi(boolean hidden) {
+        this.entityData.set(SNEAKING_AI_HIDES_DISPLAY_NAME, hidden);
     }
 
     @Override
@@ -1752,8 +1775,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.entityData.set(MAIN_HAND_ATTACK_ANIMATION_TICKS, mainHandAttackAnimationTicks - 1);
         }
 
-        if (!(this.level() instanceof ServerLevel)) return;
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
 
+        this.tickDailySupplyGoalReroll(serverLevel);
         this.tickAiCooldowns();
         this.clearStaleHealingState();
         this.tickStartupIdleWake();
@@ -1814,7 +1838,27 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.upwardEscapeRequestTicks = tickCooldown(this.upwardEscapeRequestTicks);
         if (this.upwardEscapeRequestTicks <= 0) {
             this.upwardEscapeTarget = null;
+            this.upwardEscapeMaxPillarBlocks = 0;
         }
+    }
+
+    private void tickDailySupplyGoalReroll(ServerLevel serverLevel) {
+        long dayTime = serverLevel.getDayTime();
+        long day = dayTime / 24000L;
+        if (dayTime % 24000L != 0L || day == this.lastSupplyGoalRerollDay) {
+            return;
+        }
+
+        this.rawLogReserveTarget = ResourceAi.randomLogSupplyGoal(this.getRandom());
+        this.woodSupplyTarget = this.rawLogReserveTarget;
+        this.cobblestoneSupplyTarget = ResourceAi.randomStoneSupplyGoal(this.getRandom());
+        this.lastSupplyGoalRerollDay = day;
+        this.gatherCooldown = 0;
+        this.biomeExploreCooldown = 0;
+        this.setCurrentAiDetail("new daily supply goals logs="
+                + this.rawLogReserveTarget
+                + " stone="
+                + this.cobblestoneSupplyTarget);
     }
 
     private static int tickCooldown(int cooldown) {
@@ -1937,6 +1981,18 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             currentTarget = null;
         }
 
+        if (currentTarget != null
+                && !this.hasInterest(PlayerNpcInterest.HUNT_PLAYERS)
+                && this.isPassiveBuildingBlockedByPlayerTarget(currentTarget)) {
+            this.setTarget(null);
+            this.staleTargetTicks = 0;
+            this.staleTargetEntityId = -1;
+            this.setCurrentAiState(AI_IDLE);
+            this.setCurrentAiDetail("");
+            this.wakeUpIdleWork();
+            currentTarget = null;
+        }
+
         if (currentTarget == null && this.isCombatAiState(this.getCurrentAiState())) {
             this.setCurrentAiState(AI_IDLE);
         }
@@ -1976,6 +2032,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 this.setCurrentAiState(AI_IDLE);
             }
         }
+    }
+
+    private boolean isPassiveBuildingBlockedByPlayerTarget(LivingEntity target) {
+        return target instanceof net.minecraft.world.entity.player.Player
+                || target instanceof PlayerNpcEntity
+                || this.isSmartNpcCompatPlayerLikeTarget(target);
     }
 
     private boolean isCombatAiState(String state) {

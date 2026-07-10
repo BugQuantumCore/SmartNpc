@@ -126,6 +126,14 @@ public class SmartNpcInspectorOverlay {
                 && entity.getId() == inspectatorEntityId;
     }
 
+    public static boolean shouldForceInspectatorTargetName(Entity entity) {
+        Minecraft minecraft = Minecraft.getInstance();
+        return inspectatorActive
+                && minecraft.options.getCameraType() != CameraType.FIRST_PERSON
+                && entity != null
+                && entity.getId() == inspectatorEntityId;
+    }
+
     public static InspectatorCameraTransform getInspectatorCameraTransform(float partialTick) {
         Minecraft minecraft = Minecraft.getInstance();
         if (!inspectatorActive
@@ -245,7 +253,7 @@ public class SmartNpcInspectorOverlay {
         }
 
         lastRefreshGameTime = gameTime;
-        SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
+        sendToServerIfConnected(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
     }
 
     private static void refreshDisplayCache(Font font, PlayerNpcEntity playerNpc) {
@@ -523,7 +531,7 @@ public class SmartNpcInspectorOverlay {
         inspectatorActive = true;
         inspectatorEntityId = playerNpc.getId();
         lastDisplayCacheMillis = Long.MIN_VALUE;
-        SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectatorModePacket(true, inspectatorEntityId));
+        sendToServerIfConnected(new PlayerNpcInspectatorModePacket(true, inspectatorEntityId));
         if (startingFresh) {
             minecraft.options.setCameraType(CameraType.THIRD_PERSON_FRONT);
             inspectatorCameraDistance = INSPECTATOR_CAMERA_DISTANCE_DEFAULT;
@@ -555,7 +563,6 @@ public class SmartNpcInspectorOverlay {
         boolean wasActive = inspectatorActive;
         inspectatorActive = false;
         inspectatorEntityId = -1;
-        snapshotTraceEnabled = false;
         resetInspectatorToggle();
         previousCycleLeftDown = false;
         previousCycleRightDown = false;
@@ -576,7 +583,7 @@ public class SmartNpcInspectorOverlay {
         previousCameraEntity = null;
         previousCameraType = null;
         if (notifyServer && wasActive) {
-            SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectatorModePacket(false, -1));
+            sendToServerIfConnected(new PlayerNpcInspectatorModePacket(false, -1));
         }
     }
 
@@ -614,7 +621,7 @@ public class SmartNpcInspectorOverlay {
         if (traceDown && !previousTraceToggleDown && entityId >= 0) {
             snapshotTraceEnabled = !snapshotTraceEnabled;
             lastDisplayCacheMillis = Long.MIN_VALUE;
-            SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcGoalTracePacket(entityId, snapshotTraceEnabled));
+            sendToServerIfConnected(new PlayerNpcGoalTracePacket(entityId, snapshotTraceEnabled));
         }
         previousTraceToggleDown = traceDown;
     }
@@ -683,7 +690,7 @@ public class SmartNpcInspectorOverlay {
         snapshotTraceEnabled = false;
         lastRefreshGameTime = Long.MIN_VALUE;
         lastDisplayCacheMillis = Long.MIN_VALUE;
-        SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
+        sendToServerIfConnected(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
         startInspectator(minecraft, nextNpc);
     }
 
@@ -785,9 +792,18 @@ public class SmartNpcInspectorOverlay {
 
     private static void disableTraceIfNeeded() {
         if (snapshotTraceEnabled && inspectedEntityId >= 0) {
-            SmartNpcNetwork.CHANNEL.sendToServer(new PlayerNpcGoalTracePacket(inspectedEntityId, false));
+            sendToServerIfConnected(new PlayerNpcGoalTracePacket(inspectedEntityId, false));
         }
         snapshotTraceEnabled = false;
+    }
+
+    private static void sendToServerIfConnected(Object packet) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.getConnection() == null) {
+            return;
+        }
+
+        SmartNpcNetwork.CHANNEL.sendToServer(packet);
     }
 
     public record InspectatorCameraTransform(Vec3 eyePosition, float yRot, float xRot) {}

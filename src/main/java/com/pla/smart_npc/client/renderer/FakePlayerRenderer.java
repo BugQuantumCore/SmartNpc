@@ -119,6 +119,14 @@ public class FakePlayerRenderer<T extends FakePlayer> extends HumanoidMobRendere
         return 0.0F;
     }
 
+    @Override
+    protected boolean shouldShowName(@NotNull T entity) {
+        if (entity instanceof PlayerNpcEntity playerNpc && playerNpc.isDisplayNameHiddenBySneakingAi()) {
+            return false;
+        }
+        return SmartNpcInspectorOverlay.shouldForceInspectatorTargetName(entity) || super.shouldShowName(entity);
+    }
+
     private boolean isMainHandAttackAnimating(T entity) {
         return entity instanceof PlayerNpcEntity playerNpc && playerNpc.getMainHandAttackAnimationTicks() > 0;
     }

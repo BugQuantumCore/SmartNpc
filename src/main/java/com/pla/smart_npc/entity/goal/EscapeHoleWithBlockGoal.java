@@ -164,6 +164,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.nextPillarPlanTick = this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
             return false;
         }
+        if (routeNeedsClimb && this.exceedsRequestedRouteMax(pillarPlan)) {
+            this.playerNpc.clearUpwardEscapeTarget();
+            this.nextPillarPlanTick = this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
+            return false;
+        }
         this.nextPillarPlanTick = 0;
         this.pillarBasePos = pillarPlan.basePos();
         this.pillarExitY = pillarPlan.exitY();
@@ -520,6 +525,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.finished = true;
             return;
         }
+        if (this.exceedsRequestedRouteMax(pillarPlan)) {
+            this.playerNpc.clearUpwardEscapeTarget();
+            this.finished = true;
+            return;
+        }
         this.pillarBasePos = pillarPlan.basePos();
         this.pillarExitY = pillarPlan.exitY();
         this.mode = EscapeMode.PILLAR;
@@ -632,6 +642,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (!this.canPillarFrom(serverLevel, feet)) {
             PillarPlan newPlan = this.findPillarPlan(serverLevel, feet, this.climbTargetPos);
             if (newPlan == null) {
+                this.finished = true;
+                return;
+            }
+            if (this.exceedsRequestedRouteMax(newPlan)) {
+                this.playerNpc.clearUpwardEscapeTarget();
                 this.finished = true;
                 return;
             }
@@ -1640,6 +1655,21 @@ public class EscapeHoleWithBlockGoal extends Goal {
             }
         }
         return count + this.countCraftablePillarPlanks();
+    }
+
+    private boolean exceedsRequestedRouteMax(PillarPlan plan) {
+        int maxBlocks = this.getRequestedRouteMaxPillarBlocks();
+        return plan != null && maxBlocks > 0 && plan.blocksNeeded() > maxBlocks;
+    }
+
+    private int getRequestedRouteMaxPillarBlocks() {
+        BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+        if (requestedTarget == null
+                || this.climbTargetPos == null
+                || !requestedTarget.equals(this.climbTargetPos)) {
+            return 0;
+        }
+        return this.playerNpc.getUpwardEscapeMaxPillarBlocks();
     }
 
     private int countCraftablePillarPlanks() {

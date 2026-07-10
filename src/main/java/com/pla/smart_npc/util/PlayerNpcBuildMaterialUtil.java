@@ -7,6 +7,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.SimpleContainer;
+import net.minecraft.world.item.BedItem;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -293,8 +294,11 @@ public final class PlayerNpcBuildMaterialUtil {
 
     public static boolean hasMaterialFor(ServerLevel serverLevel, PlayerNpcEntity playerNpc, PlayerNpcBuildLayout.RelativeBlock block, BlockPos origin) {
         BlockState targetState = block.state();
-        if (targetState.isAir() || block.isSecondHalfOfSingleItemBlock()) {
+        if (targetState.isAir()) {
             return true;
+        }
+        if (block.isSecondHalfOfSingleItemBlock()) {
+            return resolveSecondHalfState(serverLevel, block.toWorld(origin), targetState).isPresent();
         }
         if (isPottedPlant(targetState)) {
             return hasFlowerPot(playerNpc) && hasPottablePlant(playerNpc);
@@ -324,6 +328,9 @@ public final class PlayerNpcBuildMaterialUtil {
         if (item.get() == Items.GLASS_PANE && tryCraftGlassPaneFromAnyGlass(playerNpc.getInventory())) {
             return true;
         }
+        if (item.get() instanceof BedItem) {
+            return PlayerNpcCraftingUtil.tryCraftBed(playerNpc.getInventory(), BUILD_CRAFT_RAW_LOG_RESERVE);
+        }
         return PlayerNpcCraftingUtil.tryCraftWithLogConversion(serverLevel, playerNpc.getInventory(), item.get(), true, BUILD_CRAFT_RAW_LOG_RESERVE);
     }
 
@@ -335,8 +342,12 @@ public final class PlayerNpcBuildMaterialUtil {
         if (isPottedPlant(targetState)) {
             return resolvePottedPlantPlacement(playerNpc, targetState);
         }
+        if (block.isSecondHalfOfSingleItemBlock()) {
+            return resolveSecondHalfState(serverLevel, block.toWorld(origin), targetState)
+                    .map(state -> new PlacementMaterial(state, ItemStack.EMPTY));
+        }
         if (block.requiredItem().isEmpty()) {
-            return Optional.of(new PlacementMaterial(resolveSecondHalfState(serverLevel, block.toWorld(origin), targetState), ItemStack.EMPTY));
+            return Optional.of(new PlacementMaterial(targetState, ItemStack.EMPTY));
         }
 
         Optional<Item> item = findAvailableItem(serverLevel, playerNpc, targetState);
@@ -372,6 +383,115 @@ public final class PlayerNpcBuildMaterialUtil {
         return (family == MaterialFamily.GLASS_BLOCKS || family == MaterialFamily.GLASS_PANES)
                 && !hasMaterialFor(serverLevel, playerNpc, block, origin)
                 && countFamilyItems(playerNpc, MaterialFamily.GLASS_BLOCKS) + countGlassSmeltingInput(playerNpc) < requiredGlassFor(family);
+    }
+
+    public static Optional<MissingBuildMaterialNeed> findMissingBuildMaterialNeed(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        if (home.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Optional<PlayerNpcBuildLayout> layout = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc)
+                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
+        if (layout.isEmpty()
+                || layout.get().width() != home.get().width()
+                || layout.get().depth() != home.get().depth()) {
+            return Optional.empty();
+        }
+
+        BlockPos origin = home.get().origin();
+        for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
+            if (block.optional()
+                    || block.state().isAir()
+                    || isSecondHalfOfSingleItemBlock(block.state())
+                    || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())
+                    || hasMaterialFor(serverLevel, playerNpc, block, origin)) {
+                continue;
+            }
+
+            MissingBuildMaterialKind kind = missingKindFor(serverLevel, playerNpc, block, origin);
+            return Optional.of(new MissingBuildMaterialNeed(kind, block.state(), block.toWorld(origin), describeTarget(block.state())));
+        }
+        return Optional.empty();
+    }
+
+    public static boolean needsNonPrimaryBuildMaterial(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        return findMissingBuildMaterialNeed(serverLevel, playerNpc)
+                .map(MissingBuildMaterialNeed::kind)
+                .map(kind -> kind != MissingBuildMaterialKind.LOG
+                        && kind != MissingBuildMaterialKind.STONE
+                        && kind != MissingBuildMaterialKind.NONE)
+                .orElse(false);
+    }
+
+    public static boolean needsBedForCurrentBuild(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        return findMissingBuildMaterialNeed(serverLevel, playerNpc)
+                .map(MissingBuildMaterialNeed::kind)
+                .map(kind -> kind == MissingBuildMaterialKind.BED)
+                .orElse(false);
+    }
+
+    public static boolean isSandSourceBlock(BlockState state) {
+        return state.is(Blocks.SAND) || state.is(Blocks.RED_SAND);
+    }
+
+    public static boolean isGatherablePlantBlock(BlockState state) {
+        Item item = state.getBlock().asItem();
+        return item != Items.AIR
+                && (containsItem(FLOWERS, item) || containsItem(POTTABLE_PLANTS, item));
+    }
+
+    private static MissingBuildMaterialKind missingKindFor(
+            ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
+            PlayerNpcBuildLayout.RelativeBlock block,
+            BlockPos origin
+    ) {
+        BlockState targetState = block.state();
+        MaterialFamily family = familyForState(targetState);
+        if (family == MaterialFamily.GLASS_BLOCKS || family == MaterialFamily.GLASS_PANES) {
+            return needsSandForBuildMaterial(serverLevel, playerNpc, block, origin)
+                    ? MissingBuildMaterialKind.SAND
+                    : MissingBuildMaterialKind.NONE;
+        }
+        if (isWoodSupplyFamily(family)) {
+            return MissingBuildMaterialKind.LOG;
+        }
+        if (isStoneSupplyFamily(family)) {
+            return MissingBuildMaterialKind.STONE;
+        }
+        if (family == MaterialFamily.BEDS || family == MaterialFamily.CARPETS) {
+            return MissingBuildMaterialKind.BED;
+        }
+        if (family == MaterialFamily.FLOWERS || family == MaterialFamily.POTTED_FLOWERS) {
+            return MissingBuildMaterialKind.PLANT;
+        }
+        if (family == MaterialFamily.LOOSE_FILL && isSandSourceBlock(targetState)) {
+            return MissingBuildMaterialKind.SAND;
+        }
+        return MissingBuildMaterialKind.OTHER;
+    }
+
+    private static boolean isWoodSupplyFamily(MaterialFamily family) {
+        return family == MaterialFamily.LOGS
+                || family == MaterialFamily.PLANKS
+                || family == MaterialFamily.WOODEN_DOORS
+                || family == MaterialFamily.WOODEN_TRAPDOORS
+                || family == MaterialFamily.WOODEN_FENCES
+                || family == MaterialFamily.WOODEN_FENCE_GATES
+                || family == MaterialFamily.WOODEN_STAIRS
+                || family == MaterialFamily.WOODEN_SLABS
+                || family == MaterialFamily.WOODEN_BUTTONS
+                || family == MaterialFamily.WOODEN_PRESSURE_PLATES;
+    }
+
+    private static boolean isStoneSupplyFamily(MaterialFamily family) {
+        return family == MaterialFamily.COBBLESTONE_LIKE
+                || family == MaterialFamily.STONE_MASONRY
+                || family == MaterialFamily.STONE_STAIRS
+                || family == MaterialFamily.STONE_SLABS
+                || family == MaterialFamily.STONE_BUTTONS
+                || family == MaterialFamily.STONE_OR_METAL_PRESSURE_PLATES;
     }
 
     public static boolean isSecondHalfOfSingleItemBlock(BlockState state) {
@@ -445,6 +565,12 @@ public final class PlayerNpcBuildMaterialUtil {
         if (family == MaterialFamily.GLASS_PANES && canCraftGlassPaneFromAnyGlass(playerNpc.getInventory())) {
             return Optional.of(Items.GLASS_PANE);
         }
+        if (family == MaterialFamily.BEDS) {
+            Item bed = PlayerNpcCraftingUtil.getCraftableBedItem(playerNpc.getInventory());
+            return bed != null && PlayerNpcCraftingUtil.canCraftBed(playerNpc.getInventory(), BUILD_CRAFT_RAW_LOG_RESERVE)
+                    ? Optional.of(bed)
+                    : Optional.empty();
+        }
 
         List<Item> candidates = candidateItems(family, targetItem);
 
@@ -464,6 +590,10 @@ public final class PlayerNpcBuildMaterialUtil {
         }
 
         if (item == Items.GLASS_PANE && tryCraftGlassPaneFromAnyGlass(playerNpc.getInventory())) {
+            return playerNpc.consumeInventoryItem(item, 1).orElse(ItemStack.EMPTY);
+        }
+        if (item instanceof BedItem
+                && PlayerNpcCraftingUtil.tryCraftBed(playerNpc.getInventory(), BUILD_CRAFT_RAW_LOG_RESERVE)) {
             return playerNpc.consumeInventoryItem(item, 1).orElse(ItemStack.EMPTY);
         }
 
@@ -533,13 +663,13 @@ public final class PlayerNpcBuildMaterialUtil {
         return Optional.of(copySharedProperties(targetState, blockItem.getBlock().defaultBlockState()));
     }
 
-    private static BlockState resolveSecondHalfState(ServerLevel serverLevel, BlockPos pos, BlockState targetState) {
+    private static Optional<BlockState> resolveSecondHalfState(ServerLevel serverLevel, BlockPos pos, BlockState targetState) {
         if (targetState.getBlock() instanceof DoorBlock
                 && targetState.hasProperty(DoorBlock.HALF)
                 && targetState.getValue(DoorBlock.HALF) == DoubleBlockHalf.UPPER) {
             BlockState lower = serverLevel.getBlockState(pos.below());
             if (familyForState(lower) == MaterialFamily.WOODEN_DOORS) {
-                return copySharedProperties(targetState, lower.getBlock().defaultBlockState());
+                return Optional.of(copySharedProperties(targetState, lower.getBlock().defaultBlockState()));
             }
         }
 
@@ -548,7 +678,7 @@ public final class PlayerNpcBuildMaterialUtil {
                 && targetState.getValue(DoublePlantBlock.HALF) == DoubleBlockHalf.UPPER) {
             BlockState lower = serverLevel.getBlockState(pos.below());
             if (lower.getBlock() instanceof DoublePlantBlock) {
-                return copySharedProperties(targetState, lower.getBlock().defaultBlockState());
+                return Optional.of(copySharedProperties(targetState, lower.getBlock().defaultBlockState()));
             }
         }
 
@@ -559,11 +689,11 @@ public final class PlayerNpcBuildMaterialUtil {
             Direction facing = targetState.getValue(BedBlock.FACING);
             BlockState foot = serverLevel.getBlockState(pos.relative(facing.getOpposite()));
             if (familyForState(foot) == MaterialFamily.BEDS) {
-                return copySharedProperties(targetState, foot.getBlock().defaultBlockState());
+                return Optional.of(copySharedProperties(targetState, foot.getBlock().defaultBlockState()));
             }
         }
 
-        return targetState;
+        return Optional.empty();
     }
 
     private static MaterialFamily familyForState(BlockState state) {
@@ -796,6 +926,9 @@ public final class PlayerNpcBuildMaterialUtil {
 
     private static boolean sharedPropertiesMatch(BlockState targetState, BlockState existingState) {
         for (Property<?> targetProperty : targetState.getProperties()) {
+            if (!shouldCompareStructuralProperty(targetState, targetProperty)) {
+                continue;
+            }
             Property<?> existingProperty = existingState.getBlock().getStateDefinition().getProperty(targetProperty.getName());
             if (existingProperty == null) {
                 continue;
@@ -803,6 +936,17 @@ public final class PlayerNpcBuildMaterialUtil {
             if (!propertyValueName(targetState, targetProperty).equals(propertyValueName(existingState, existingProperty))) {
                 return false;
             }
+        }
+        return true;
+    }
+
+    private static boolean shouldCompareStructuralProperty(BlockState targetState, Property<?> property) {
+        String name = property.getName();
+        if (targetState.getBlock() instanceof BedBlock) {
+            return "part".equals(name) || "facing".equals(name);
+        }
+        if (targetState.getBlock() instanceof DoorBlock) {
+            return "half".equals(name) || "facing".equals(name) || "hinge".equals(name);
         }
         return true;
     }
@@ -837,6 +981,19 @@ public final class PlayerNpcBuildMaterialUtil {
         public PlacementMaterial(BlockState state, ItemStack consumedItem) {
             this(state, consumedItem, List.of());
         }
+    }
+
+    public record MissingBuildMaterialNeed(MissingBuildMaterialKind kind, BlockState targetState, BlockPos targetPos, String description) {
+    }
+
+    public enum MissingBuildMaterialKind {
+        NONE,
+        LOG,
+        STONE,
+        SAND,
+        PLANT,
+        BED,
+        OTHER
     }
 
     private record GlassProductionNeed(int requiredGlass) {
