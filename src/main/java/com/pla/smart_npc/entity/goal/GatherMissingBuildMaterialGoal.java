@@ -4,40 +4,50 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
+import com.pla.smart_npc.entity.ai.WeaponAi;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil.MissingBuildMaterialKind;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil.MissingBuildMaterialNeed;
+import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.animal.Sheep;
 import net.minecraft.world.item.ShovelItem;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.Map;
 import java.util.Optional;
+import java.util.WeakHashMap;
 import java.util.function.Predicate;
 
 public class GatherMissingBuildMaterialGoal extends Goal {
     private static final int SEARCH_RADIUS = 32;
+    private static final int TARGET_SCAN_CACHE_TICKS = 20;
     private static final int MAX_GATHER_TICKS = 20 * 45;
     private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int SHEEP_ATTACK_INTERVAL_TICKS = 14;
     private static final double BREAK_DISTANCE_SQR = 4.5D * 4.5D;
     private static final double STAND_REACHED_DISTANCE_SQR = 1.4D * 1.4D;
     private static final double SHEEP_ATTACK_DISTANCE_SQR = 2.4D * 2.4D;
+    private static final Map<PlayerNpcEntity, TargetScanCache> TARGET_SCAN_CACHE = new WeakHashMap<>();
 
     private final PlayerNpcEntity playerNpc;
     private final double speed;
     private final ToolAi toolAi;
+    private final WeaponAi weaponAi;
     private final BreakingBlockAi breakingBlockAi;
     private final PathNavigationAi pathNavigationAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private MissingBuildMaterialNeed need;
     private BlockPos targetPos;
     private BlockPos standPos;
@@ -50,6 +60,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         this.playerNpc = playerNpc;
         this.speed = speed;
         this.toolAi = new ToolAi(playerNpc);
+        this.weaponAi = new WeaponAi(playerNpc);
         this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
@@ -66,8 +77,11 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         if (need.isEmpty() || !isGatherableNeed(need.get().kind())) {
             return false;
         }
-        return findTargetBlock(playerNpc, serverLevel, need.get()).isPresent()
-                || need.get().kind() == MissingBuildMaterialKind.BED && findNearestSheep(playerNpc, serverLevel).isPresent();
+        if (need.get().kind() == MissingBuildMaterialKind.BED) {
+            return findNearestSheep(playerNpc, serverLevel).isPresent()
+                    || findTargetBlock(playerNpc, serverLevel, need.get()).isPresent();
+        }
+        return findTargetBlock(playerNpc, serverLevel, need.get()).isPresent();
     }
 
     @Override
@@ -78,8 +92,13 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.getGatherCooldown() > 0
-                || shouldStayHomeForWeather(serverLevel)
+                || this.playerNpc.getGatherCooldown() > 0) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
+        if (shouldStayHomeForWeather(serverLevel)
                 || !needsMissingBuildMaterial(this.playerNpc, serverLevel)) {
             return false;
         }
@@ -90,15 +109,19 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         }
 
         this.need = missing.get();
+        this.targetPos = null;
+        this.standPos = null;
+        this.sheepTarget = null;
+        if (this.need.kind() == MissingBuildMaterialKind.BED) {
+            return this.selectBedGatherTarget(serverLevel);
+        }
+
         this.targetPos = findTargetBlock(this.playerNpc, serverLevel, this.need).orElse(null);
-        this.sheepTarget = this.targetPos == null && this.need.kind() == MissingBuildMaterialKind.BED
-                ? findNearestSheep(this.playerNpc, serverLevel).orElse(null)
-                : null;
         if (this.targetPos != null) {
             this.standPos = this.findStandPos(serverLevel, this.targetPos).orElse(null);
             return this.canBreakFromCurrentPosition(this.targetPos) || this.standPos != null;
         }
-        return this.sheepTarget != null;
+        return false;
     }
 
     @Override
@@ -119,9 +142,13 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         this.gatherTicks = 0;
         this.repathTicks = 0;
         this.attackTicks = 0;
-        this.playerNpc.setCurrentAiState("ai.player_npc.gathering_build_material");
+        this.playerNpc.setCurrentAiState(this.sheepTarget == null
+                ? "ai.player_npc.gathering_build_material"
+                : "ai.player_npc.hunting_sheep");
         if (this.need != null && this.need.kind() == MissingBuildMaterialKind.SAND) {
             this.toolAi.equipTool(ShovelItem.class);
+        } else if (this.sheepTarget != null) {
+            this.weaponAi.equipBestMeleeWeapon();
         }
         this.updateDetail();
     }
@@ -174,7 +201,8 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 this.targetPos,
                 this.targetPredicate(),
                 this.requiredBreakTicks(),
-                "gathering " + this.need.description()
+                "gathering " + this.need.description(),
+                this.need.kind() == MissingBuildMaterialKind.BED
         );
         if (result == BreakingBlockAi.TickResult.DONE) {
             this.finishGathering();
@@ -188,6 +216,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     public void stop() {
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
+        this.weaponAi.restoreMainHand();
         this.need = null;
         this.targetPos = null;
         this.standPos = null;
@@ -220,6 +249,34 @@ public class GatherMissingBuildMaterialGoal extends Goal {
             this.playerNpc.triggerMainHandAttackAnimation();
             this.playerNpc.doHurtTarget(this.sheepTarget);
         }
+    }
+
+    private boolean selectBedGatherTarget(ServerLevel serverLevel) {
+        Optional<BlockPos> bedTarget = findTargetBlock(this.playerNpc, serverLevel, this.need);
+        Sheep nearbySheep = findNearestSheep(this.playerNpc, serverLevel).orElse(null);
+        Optional<BlockPos> bedStand = Optional.empty();
+        boolean canGatherBed = false;
+        if (bedTarget.isPresent()) {
+            BlockPos bedPos = bedTarget.get();
+            bedStand = this.findStandPos(serverLevel, bedPos);
+            canGatherBed = this.canBreakFromCurrentPosition(bedPos) || bedStand.isPresent();
+        }
+
+        if (canGatherBed) {
+            this.targetPos = bedTarget.get();
+            this.standPos = bedStand.orElse(null);
+            return true;
+        }
+        if (nearbySheep != null) {
+            this.sheepTarget = nearbySheep;
+            return true;
+        }
+        if (canGatherBed) {
+            this.targetPos = bedTarget.get();
+            this.standPos = bedStand.orElse(null);
+            return true;
+        }
+        return false;
     }
 
     private void finishGathering() {
@@ -278,7 +335,8 @@ public class GatherMissingBuildMaterialGoal extends Goal {
             return;
         }
         if (this.sheepTarget != null) {
-            this.playerNpc.setCurrentAiDetail("hunting sheep for " + this.need.description());
+            int woolCount = PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(ItemTags.WOOL));
+            this.playerNpc.setCurrentAiDetail("hunting sheep for " + this.need.description() + " wool=" + woolCount + "/3");
             return;
         }
         if (this.breakingBlockAi.isRunning()) {
@@ -306,13 +364,56 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     }
 
     private static Optional<BlockPos> findTargetBlock(PlayerNpcEntity playerNpc, ServerLevel serverLevel, MissingBuildMaterialNeed need) {
-        return BlockPos.betweenClosedStream(
-                        playerNpc.blockPosition().offset(-SEARCH_RADIUS, -8, -SEARCH_RADIUS),
-                        playerNpc.blockPosition().offset(SEARCH_RADIUS, 8, SEARCH_RADIUS))
-                .map(BlockPos::immutable)
-                .filter(pos -> !isProtectedHomeBlock(playerNpc, pos))
-                .filter(pos -> matchesNeed(serverLevel.getBlockState(pos), need))
-                .min(Comparator.comparingDouble(pos -> playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D)));
+        BlockPos center = playerNpc.blockPosition();
+        TargetScanCache cache = TARGET_SCAN_CACHE.get(playerNpc);
+        if (cache != null && cache.matches(playerNpc.tickCount, center, need)) {
+            Optional<BlockPos> cached = cache.target();
+            if (cached.isEmpty() || isValidTargetBlock(playerNpc, serverLevel, cached.get(), need)) {
+                return cached;
+            }
+        }
+
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        BlockPos bestPos = null;
+        double bestDistance = Double.MAX_VALUE;
+        int minX = center.getX() - SEARCH_RADIUS;
+        int maxX = center.getX() + SEARCH_RADIUS;
+        int minY = center.getY() - 8;
+        int maxY = center.getY() + 8;
+        int minZ = center.getZ() - SEARCH_RADIUS;
+        int maxZ = center.getZ() + SEARCH_RADIUS;
+
+        for (int x = minX; x <= maxX; x++) {
+            for (int y = minY; y <= maxY; y++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    cursor.set(x, y, z);
+                    BlockPos target = matchingTargetPos(serverLevel, cursor, need);
+                    if (target == null) {
+                        continue;
+                    }
+                    if (home.isPresent() && PlayerNpcHomeUtil.isInside(home.get(), target)) {
+                        continue;
+                    }
+
+                    double distance = playerNpc.distanceToSqr(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        bestPos = target.immutable();
+                    }
+                }
+            }
+        }
+
+        Optional<BlockPos> result = Optional.ofNullable(bestPos);
+        TARGET_SCAN_CACHE.put(playerNpc, new TargetScanCache(
+                playerNpc.tickCount,
+                center.immutable(),
+                need.kind(),
+                need.targetState(),
+                result
+        ));
+        return result;
     }
 
     private static boolean matchesNeed(BlockState state, MissingBuildMaterialNeed need) {
@@ -341,5 +442,63 @@ public class GatherMissingBuildMaterialGoal extends Goal {
 
     private static boolean shouldStayHomeForWeather(ServerLevel serverLevel) {
         return serverLevel.isNight() || serverLevel.isThundering();
+    }
+
+    private static BlockPos matchingTargetPos(ServerLevel serverLevel, BlockPos pos, MissingBuildMaterialNeed need) {
+        BlockState state = serverLevel.getBlockState(pos);
+        if (!matchesNeed(state, need)) {
+            return null;
+        }
+        if (need.kind() == MissingBuildMaterialKind.BED) {
+            return normalizeBedFoot(serverLevel, pos, state);
+        }
+        return pos.immutable();
+    }
+
+    private static BlockPos normalizeBedFoot(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        if (!(state.getBlock() instanceof BedBlock)
+                || !state.hasProperty(BedBlock.PART)
+                || !state.hasProperty(BedBlock.FACING)) {
+            return pos.immutable();
+        }
+        if (state.getValue(BedBlock.PART) == BedPart.FOOT) {
+            return pos.immutable();
+        }
+
+        Direction facing = state.getValue(BedBlock.FACING);
+        BlockPos foot = pos.relative(facing.getOpposite());
+        BlockState footState = serverLevel.getBlockState(foot);
+        if (footState.getBlock() instanceof BedBlock
+                && footState.hasProperty(BedBlock.PART)
+                && footState.getValue(BedBlock.PART) == BedPart.FOOT) {
+            return foot.immutable();
+        }
+        return pos.immutable();
+    }
+
+    private static boolean isValidTargetBlock(PlayerNpcEntity playerNpc, ServerLevel serverLevel, BlockPos pos, MissingBuildMaterialNeed need) {
+        return !isProtectedHomeBlock(playerNpc, pos)
+                && matchesNeed(serverLevel.getBlockState(pos), need);
+    }
+
+    private static double blockDistanceSqr(BlockPos first, BlockPos second) {
+        double dx = first.getX() - second.getX();
+        double dy = first.getY() - second.getY();
+        double dz = first.getZ() - second.getZ();
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private record TargetScanCache(
+            int tick,
+            BlockPos scanCenter,
+            MissingBuildMaterialKind kind,
+            BlockState targetState,
+            Optional<BlockPos> target) {
+        private boolean matches(int currentTick, BlockPos currentCenter, MissingBuildMaterialNeed need) {
+            return currentTick - this.tick <= TARGET_SCAN_CACHE_TICKS
+                    && blockDistanceSqr(this.scanCenter, currentCenter) <= 4.0D
+                    && this.kind == need.kind()
+                    && this.targetState.equals(need.targetState());
+        }
     }
 }

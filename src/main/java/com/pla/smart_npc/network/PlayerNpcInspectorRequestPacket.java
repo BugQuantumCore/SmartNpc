@@ -14,17 +14,24 @@ public class PlayerNpcInspectorRequestPacket {
     private static final double MAX_REFRESH_DISTANCE_SQR = 64.0D * 64.0D;
 
     private final int entityId;
+    private final boolean includeRequirements;
 
     public PlayerNpcInspectorRequestPacket(int entityId) {
+        this(entityId, false);
+    }
+
+    public PlayerNpcInspectorRequestPacket(int entityId, boolean includeRequirements) {
         this.entityId = entityId;
+        this.includeRequirements = includeRequirements;
     }
 
     public static void encode(PlayerNpcInspectorRequestPacket packet, FriendlyByteBuf buffer) {
         buffer.writeVarInt(packet.entityId);
+        buffer.writeBoolean(packet.includeRequirements);
     }
 
     public static PlayerNpcInspectorRequestPacket decode(FriendlyByteBuf buffer) {
-        return new PlayerNpcInspectorRequestPacket(buffer.readVarInt());
+        return new PlayerNpcInspectorRequestPacket(buffer.readVarInt(), buffer.readBoolean());
     }
 
     public static void handle(PlayerNpcInspectorRequestPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
@@ -53,6 +60,7 @@ public class PlayerNpcInspectorRequestPacket {
                             PlayerNpcInspectorData.createSnapshot(playerNpc),
                             PlayerNpcInspectorData.createBuildStatusText(playerNpc),
                             PlayerNpcInspectorData.createPerformanceText(),
+                            packet.includeRequirements ? PlayerNpcInspectorData.createBuildRequirementsText(playerNpc) : "",
                             PlayerNpcGoalTraceLogger.isTracing(sender, playerNpc)
                     )
             );

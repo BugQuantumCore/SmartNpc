@@ -7,6 +7,7 @@ import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
 import com.pla.smart_npc.util.PlayerNpcBuildLayoutLoader;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
+import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -1692,7 +1693,7 @@ public class GatherMaterialsGoal extends Goal {
 
         AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
         return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
-                && serverLevel.noCollision(this.playerNpc, snappedBox);
+                && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox);
     }
 
     private void snapAboveLogPillarIfNeeded(BlockPos pos) {
@@ -1708,11 +1709,7 @@ public class GatherMaterialsGoal extends Goal {
     }
 
     private boolean hasOtherEntityInBlock(ServerLevel serverLevel, BlockPos pos) {
-        return !serverLevel.getEntities(
-                this.playerNpc,
-                new AABB(pos).inflate(0.05D),
-                entity -> entity.isAlive() && !(entity instanceof ItemEntity)
-        ).isEmpty();
+        return !PlayerNpcCollisionUtil.blockingEntitiesInBox(serverLevel, this.playerNpc, new AABB(pos).inflate(0.05D)).isEmpty();
     }
 
     private boolean canPillarReachLog(ServerLevel serverLevel, BlockPos feet, BlockPos target) {

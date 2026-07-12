@@ -22,6 +22,7 @@ import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
@@ -45,9 +46,13 @@ import java.util.Locale;
 public class SmartNpcInspectorOverlay {
     private static final int PANEL_WIDTH = 196;
     private static final int PANEL_HEIGHT = 294;
+    private static final int REQUIREMENTS_PANEL_WIDTH = 250;
+    private static final int REQUIREMENTS_PANEL_MAX_LINES = 20;
+    private static final int REQUIREMENT_ROW_HEIGHT = 24;
+    private static final String REQUIREMENTS_PAYLOAD_VERSION = "#smart_npc_requirements_v1";
     private static final int SLOT_SIZE = 18;
     private static final int TASK_DETAIL_MAX_LINES = 3;
-    private static final int REFRESH_INTERVAL_TICKS = 10;
+    private static final int REFRESH_INTERVAL_TICKS = 20;
     private static final long DISPLAY_CACHE_INTERVAL_MS = 500L;
     private static final double INSPECTATOR_SWITCH_RADIUS = 64.0D;
     private static final double INSPECTATOR_CAMERA_DISTANCE_DEFAULT = 4.0D;
@@ -59,7 +64,9 @@ public class SmartNpcInspectorOverlay {
     private static List<ItemStack> snapshot = List.of();
     private static String snapshotBuildStatusText = "";
     private static String snapshotPerformanceText = "";
+    private static String snapshotRequirementsText = "";
     private static boolean snapshotTraceEnabled;
+    private static boolean requirementsVisible;
     private static long lastRefreshGameTime = Long.MIN_VALUE;
     private static long lastDisplayCacheMillis = Long.MIN_VALUE;
     private static boolean inspectatorActive;
@@ -72,14 +79,23 @@ public class SmartNpcInspectorOverlay {
     private static boolean previousCycleLeftDown;
     private static boolean previousCycleRightDown;
     private static boolean previousTraceToggleDown;
+    private static boolean previousRequirementsToggleDown;
+    private static boolean previousRequirementScrollUpDown;
+    private static boolean previousRequirementScrollDownDown;
     private static Component cachedTitle = Component.empty();
     private static Component cachedHealthText = Component.empty();
     private static int cachedHealthColor = 0xFF74E291;
     private static Component cachedAiText = Component.empty();
     private static String cachedInterestsText = "";
     private static String cachedBuildStatusText = "";
-    private static String cachedPerformanceText = "";
+    private static List<String> cachedPerformanceLines = List.of("");
     private static String cachedTraceText = "";
+    private static Component cachedRequirementsTitle = Component.empty();
+    private static Component cachedRequirementsLayout = Component.empty();
+    private static List<RequirementRow> cachedRequirementRows = List.of();
+    private static int cachedRequirementMore;
+    private static int requirementScrollOffset;
+    private static List<String> cachedRequirementLines = List.of("");
     private static Component cachedTaskLabel = Component.empty();
     private static int cachedTaskLabelWidth = 0;
     private static List<String> cachedTaskValueLines = List.of("");
@@ -87,14 +103,24 @@ public class SmartNpcInspectorOverlay {
     private static String cachedInspectatorHint = "";
 
     public static void handlePacket(PlayerNpcInspectorPacket packet) {
+        int previousEntityId = inspectedEntityId;
         if (packet.entityId() < 0) {
             disableTraceIfNeeded();
             stopInspectator(Minecraft.getInstance(), true);
+            requirementsVisible = false;
+            previousRequirementsToggleDown = false;
+            resetRequirementScroll();
+            resetRequirementScrollInput();
         }
         inspectedEntityId = packet.entityId();
+        if (inspectedEntityId != previousEntityId) {
+            resetRequirementScroll();
+            resetRequirementScrollInput();
+        }
         snapshot = packet.items();
         snapshotBuildStatusText = packet.buildStatusText();
         snapshotPerformanceText = packet.performanceText();
+        snapshotRequirementsText = packet.requirementsText();
         snapshotTraceEnabled = packet.traceEnabled();
         lastDisplayCacheMillis = Long.MIN_VALUE;
     }
@@ -242,6 +268,10 @@ public class SmartNpcInspectorOverlay {
         int x = screenWidth - PANEL_WIDTH - 12;
         int y = 18;
         renderPanel(guiGraphics, minecraft.font, x, y);
+        if (requirementsVisible) {
+            int requirementsX = Math.max(4, x - REQUIREMENTS_PANEL_WIDTH - 8);
+            renderRequirementsPanel(guiGraphics, minecraft.font, requirementsX, y);
+        }
         renderHoveredItemTooltip(guiGraphics, minecraft, x, y, screenWidth, screenHeight);
     }
 
@@ -253,7 +283,7 @@ public class SmartNpcInspectorOverlay {
         }
 
         lastRefreshGameTime = gameTime;
-        sendToServerIfConnected(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
+        sendToServerIfConnected(new PlayerNpcInspectorRequestPacket(inspectedEntityId, requirementsVisible));
     }
 
     private static void refreshDisplayCache(Font font, PlayerNpcEntity playerNpc) {
@@ -289,7 +319,7 @@ public class SmartNpcInspectorOverlay {
                 Component.translatable("gui.player_npc.inspector.build", snapshotBuildStatusText).getString(),
                 PANEL_WIDTH - 16
         );
-        cachedPerformanceText = trimToWidth(
+        cachedPerformanceLines = performanceLines(
                 font,
                 Component.translatable("gui.player_npc.inspector.performance", snapshotPerformanceText).getString(),
                 PANEL_WIDTH - 16
@@ -304,6 +334,21 @@ public class SmartNpcInspectorOverlay {
                 ).getString(),
                 PANEL_WIDTH - 16
         );
+        cachedRequirementsTitle = Component.translatable("gui.player_npc.inspector.requirements_title");
+        RequirementPayload requirementsPayload = parseRequirementsPayload(snapshotRequirementsText);
+        if (requirementsPayload.structured()) {
+            cachedRequirementsLayout = requirementsPayload.layout();
+            cachedRequirementRows = requirementsPayload.rows();
+            cachedRequirementMore = requirementsPayload.more();
+            cachedRequirementLines = List.of("");
+            clampRequirementScrollOffset();
+        } else {
+            cachedRequirementsLayout = Component.empty();
+            cachedRequirementRows = List.of();
+            cachedRequirementMore = 0;
+            resetRequirementScroll();
+            cachedRequirementLines = requirementsLines(font, snapshotRequirementsText, REQUIREMENTS_PANEL_WIDTH - 16);
+        }
 
         cachedTaskLabel = Component.translatable("gui.player_npc.inspector.task");
         cachedTaskLabelWidth = font.width(cachedTaskLabel);
@@ -342,16 +387,132 @@ public class SmartNpcInspectorOverlay {
         guiGraphics.drawString(font, cachedAiText, x + 8, y + 35, 0xFFB7C9E2, false);
         guiGraphics.drawString(font, cachedInterestsText, x + 8, y + 49, 0xFFB7C9E2, false);
         guiGraphics.drawString(font, cachedBuildStatusText, x + 8, y + 63, 0xFFB7C9E2, false);
-        guiGraphics.drawString(font, cachedPerformanceText, x + 8, y + 77, 0xFFB7C9E2, false);
-        guiGraphics.drawString(font, cachedTraceText, x + 8, y + 91, snapshotTraceEnabled ? 0xFF74E291 : 0xFFB7C9E2, false);
+        int performanceY = y + 77;
+        for (String line : cachedPerformanceLines) {
+            guiGraphics.drawString(font, line, x + 8, performanceY, 0xFFB7C9E2, false);
+            performanceY += 11;
+        }
+        guiGraphics.drawString(font, cachedTraceText, x + 8, performanceY, snapshotTraceEnabled ? 0xFF74E291 : 0xFFB7C9E2, false);
 
-        renderTaskDetail(guiGraphics, font, x + 8, y + 106);
+        renderTaskDetail(guiGraphics, font, x + 8, performanceY + 15);
 
-        guiGraphics.drawString(font, cachedMainHandText, x + 8, y + 140, 0xFFD6E4FF, false);
+        guiGraphics.drawString(font, cachedMainHandText, x + 8, y + 151, 0xFFD6E4FF, false);
 
-        renderEquipment(guiGraphics, font, x + 8, y + 170);
-        renderInventory(guiGraphics, font, x + 8, y + 204);
+        renderEquipment(guiGraphics, font, x + 8, y + 181);
+        renderInventory(guiGraphics, font, x + 8, y + 215);
         guiGraphics.drawString(font, cachedInspectatorHint, x + 8, y + PANEL_HEIGHT - 15, 0xFF94A3B8, false);
+    }
+
+    private static void renderRequirementsPanel(GuiGraphics guiGraphics, Font font, int x, int y) {
+        if (!cachedRequirementRows.isEmpty()) {
+            renderRequirementRowsPanel(guiGraphics, font, x, y);
+            return;
+        }
+
+        int lineHeight = 11;
+        int height = Math.min(PANEL_HEIGHT, 34 + cachedRequirementLines.size() * lineHeight);
+        guiGraphics.fill(x, y, x + REQUIREMENTS_PANEL_WIDTH, y + height, 0xE80F1720);
+        guiGraphics.fill(x, y, x + REQUIREMENTS_PANEL_WIDTH, y + 1, 0xFFFFD166);
+        guiGraphics.fill(x, y + height - 1, x + REQUIREMENTS_PANEL_WIDTH, y + height, 0xFF243447);
+        guiGraphics.fill(x, y, x + 1, y + height, 0xFF243447);
+        guiGraphics.fill(x + REQUIREMENTS_PANEL_WIDTH - 1, y, x + REQUIREMENTS_PANEL_WIDTH, y + height, 0xFF243447);
+
+        guiGraphics.drawString(font, cachedRequirementsTitle, x + 8, y + 7, 0xFFFFD166, false);
+        int lineY = y + 23;
+        for (String line : cachedRequirementLines) {
+            if (lineY + lineHeight > y + height - 4) {
+                break;
+            }
+            guiGraphics.drawString(font, line, x + 8, lineY, 0xFFD6E4FF, false);
+            lineY += lineHeight;
+        }
+    }
+
+    private static void renderRequirementRowsPanel(GuiGraphics guiGraphics, Font font, int x, int y) {
+        int headerHeight = requirementHeaderHeight();
+        int availableRows = visibleRequirementRows();
+        clampRequirementScrollOffset();
+        int rowsToRender = Math.min(availableRows, Math.max(0, cachedRequirementRows.size() - requirementScrollOffset));
+        int hiddenRowsAbove = requirementScrollOffset;
+        int hiddenRowsBelow = Math.max(0, cachedRequirementRows.size() - requirementScrollOffset - rowsToRender) + cachedRequirementMore;
+        int footerHeight = hiddenRowsAbove > 0 || hiddenRowsBelow > 0 ? 15 : 5;
+        int height = Math.min(PANEL_HEIGHT, headerHeight + rowsToRender * REQUIREMENT_ROW_HEIGHT + footerHeight);
+
+        guiGraphics.fill(x, y, x + REQUIREMENTS_PANEL_WIDTH, y + height, 0xE80F1720);
+        guiGraphics.fill(x, y, x + REQUIREMENTS_PANEL_WIDTH, y + 1, 0xFFFFD166);
+        guiGraphics.fill(x, y + height - 1, x + REQUIREMENTS_PANEL_WIDTH, y + height, 0xFF243447);
+        guiGraphics.fill(x, y, x + 1, y + height, 0xFF243447);
+        guiGraphics.fill(x + REQUIREMENTS_PANEL_WIDTH - 1, y, x + REQUIREMENTS_PANEL_WIDTH, y + height, 0xFF243447);
+
+        guiGraphics.drawString(font, cachedRequirementsTitle, x + 8, y + 7, 0xFFFFD166, false);
+        if (!cachedRequirementsLayout.getString().isBlank()) {
+            guiGraphics.drawString(
+                    font,
+                    trimToWidth(font, cachedRequirementsLayout.getString(), REQUIREMENTS_PANEL_WIDTH - 16),
+                    x + 8,
+                    y + 19,
+                    0xFF94A3B8,
+                    false
+            );
+        }
+
+        int rowY = y + headerHeight;
+        for (int i = 0; i < rowsToRender; i++) {
+            renderRequirementRow(guiGraphics, font, cachedRequirementRows.get(requirementScrollOffset + i), x, rowY, i);
+            rowY += REQUIREMENT_ROW_HEIGHT;
+        }
+
+        if (hiddenRowsAbove > 0) {
+            String text = "^ " + hiddenRowsAbove + " above";
+            guiGraphics.drawString(font, text, x + 8, rowY + 3, 0xFF94A3B8, false);
+        }
+        if (hiddenRowsBelow > 0) {
+            String text = "+" + hiddenRowsBelow + " more";
+            guiGraphics.drawString(
+                    font,
+                    text,
+                    x + REQUIREMENTS_PANEL_WIDTH - 8 - font.width(text),
+                    rowY + 3,
+                    0xFF94A3B8,
+                    false
+            );
+        }
+    }
+
+    private static void renderRequirementRow(GuiGraphics guiGraphics, Font font, RequirementRow row, int x, int y, int index) {
+        int rowColor = index % 2 == 0 ? 0xAA111827 : 0xAA0B1322;
+        guiGraphics.fill(x + 5, y, x + REQUIREMENTS_PANEL_WIDTH - 5, y + REQUIREMENT_ROW_HEIGHT - 1, rowColor);
+        guiGraphics.fill(x + 5, y + REQUIREMENT_ROW_HEIGHT - 1, x + REQUIREMENTS_PANEL_WIDTH - 5, y + REQUIREMENT_ROW_HEIGHT, 0xFF243447);
+        guiGraphics.fill(x + 8, y + 3, x + 26, y + 21, 0xFF0B1120);
+        guiGraphics.renderItem(row.stack(), x + 9, y + 4);
+
+        String name = trimToWidth(font, row.stack().getHoverName().getString(), REQUIREMENTS_PANEL_WIDTH - 106);
+        guiGraphics.drawString(font, name, x + 31, y + 4, 0xFFE6FFFA, false);
+
+        String countText = row.carried() + " / " + row.remaining();
+        int countColor = row.missing() <= 0 ? 0xFF74E291 : 0xFFFFD166;
+        guiGraphics.drawString(
+                font,
+                countText,
+                x + REQUIREMENTS_PANEL_WIDTH - 8 - font.width(countText),
+                y + 4,
+                countColor,
+                false
+        );
+
+        String placedText = "placed " + row.placed() + " of " + row.required();
+        guiGraphics.drawString(font, placedText, x + 31, y + 14, 0xFF94A3B8, false);
+
+        String missingText = row.missing() <= 0 ? "ready" : "missing " + row.missing();
+        int missingColor = row.missing() <= 0 ? 0xFF74E291 : 0xFFFF6B6B;
+        guiGraphics.drawString(
+                font,
+                missingText,
+                x + REQUIREMENTS_PANEL_WIDTH - 8 - font.width(missingText),
+                y + 14,
+                missingColor,
+                false
+        );
     }
 
     private static void renderTaskDetail(GuiGraphics guiGraphics, Font font, int x, int y) {
@@ -385,6 +546,139 @@ public class SmartNpcInspectorOverlay {
             lines.add("");
         }
         return lines;
+    }
+
+    private static List<String> performanceLines(Font font, String text, int fullLineWidth) {
+        String source = text == null ? "" : text.replace(" | ", "\n");
+        List<String> lines = new ArrayList<>(2);
+        String[] rawLines = source.split("\\R", -1);
+        for (String rawLine : rawLines) {
+            if (lines.size() >= 2) {
+                break;
+            }
+            lines.add(trimToWidth(font, rawLine.strip(), fullLineWidth));
+        }
+        if (lines.isEmpty()) {
+            lines.add("");
+        }
+        return lines;
+    }
+
+    private static List<String> requirementsLines(Font font, String text, int fullLineWidth) {
+        List<String> lines = new ArrayList<>(REQUIREMENTS_PANEL_MAX_LINES);
+        String source = text == null || text.isBlank()
+                ? Component.translatable("gui.player_npc.inspector.requirements_empty").getString()
+                : text;
+        String[] rawLines = source.split("\\R", -1);
+        for (String rawLine : rawLines) {
+            if (lines.size() >= REQUIREMENTS_PANEL_MAX_LINES) {
+                break;
+            }
+            appendWrappedRequirementLine(font, lines, rawLine, fullLineWidth);
+        }
+        if (lines.isEmpty()) {
+            lines.add("");
+        }
+        return lines;
+    }
+
+    private static RequirementPayload parseRequirementsPayload(String text) {
+        if (text == null || text.isBlank()) {
+            return RequirementPayload.fallback();
+        }
+
+        String[] rawLines = text.split("\\R", -1);
+        if (rawLines.length == 0 || !REQUIREMENTS_PAYLOAD_VERSION.equals(rawLines[0])) {
+            return RequirementPayload.fallback();
+        }
+
+        Component layout = Component.empty();
+        List<RequirementRow> rows = new ArrayList<>();
+        int more = 0;
+        for (int i = 1; i < rawLines.length; i++) {
+            String line = rawLines[i];
+            if (line.startsWith("layout\t")) {
+                layout = Component.literal(line.substring("layout\t".length()));
+                continue;
+            }
+            if (line.startsWith("more\t")) {
+                more = parseNonNegativeInt(line.substring("more\t".length()));
+                continue;
+            }
+            if (!line.startsWith("item\t")) {
+                continue;
+            }
+
+            String[] parts = line.split("\t", -1);
+            if (parts.length < 6) {
+                continue;
+            }
+
+            ResourceLocation itemId = ResourceLocation.tryParse(parts[1]);
+            if (itemId == null) {
+                continue;
+            }
+
+            Item item = ForgeRegistries.ITEMS.getValue(itemId);
+            if (item == null) {
+                continue;
+            }
+
+            ItemStack stack = new ItemStack(item);
+            if (stack.isEmpty()) {
+                continue;
+            }
+
+            rows.add(new RequirementRow(
+                    stack,
+                    parseNonNegativeInt(parts[2]),
+                    parseNonNegativeInt(parts[3]),
+                    parseNonNegativeInt(parts[4]),
+                    parseNonNegativeInt(parts[5])
+            ));
+        }
+        return new RequirementPayload(true, layout, List.copyOf(rows), more);
+    }
+
+    private static int parseNonNegativeInt(String value) {
+        try {
+            return Math.max(0, Integer.parseInt(value));
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
+    private static int requirementHeaderHeight() {
+        return cachedRequirementsLayout.getString().isBlank() ? 25 : 35;
+    }
+
+    private static void appendWrappedRequirementLine(Font font, List<String> lines, String rawLine, int fullLineWidth) {
+        String remaining = rawLine == null ? "" : rawLine.stripLeading();
+        if (remaining.isEmpty()) {
+            lines.add("");
+            return;
+        }
+
+        while (!remaining.isEmpty() && lines.size() < REQUIREMENTS_PANEL_MAX_LINES) {
+            boolean isLastLine = lines.size() == REQUIREMENTS_PANEL_MAX_LINES - 1;
+            if (font.width(remaining) <= fullLineWidth) {
+                lines.add(remaining);
+                return;
+            }
+            if (isLastLine) {
+                lines.add(trimToWidth(font, remaining, fullLineWidth));
+                return;
+            }
+
+            String segment = font.plainSubstrByWidth(remaining, fullLineWidth).stripTrailing();
+            if (segment.isEmpty()) {
+                lines.add(trimToWidth(font, remaining, fullLineWidth));
+                return;
+            }
+
+            lines.add(segment);
+            remaining = remaining.substring(segment.length()).stripLeading();
+        }
     }
 
     private static void appendWrappedTaskLine(
@@ -475,6 +769,8 @@ public class SmartNpcInspectorOverlay {
             previousCycleLeftDown = false;
             previousCycleRightDown = false;
             previousTraceToggleDown = false;
+            previousRequirementsToggleDown = false;
+            resetRequirementScrollInput();
             inspectatorZoomRepeatTicks = 0;
             return;
         }
@@ -490,6 +786,8 @@ public class SmartNpcInspectorOverlay {
             previousCycleLeftDown = false;
             previousCycleRightDown = false;
             previousTraceToggleDown = false;
+            previousRequirementsToggleDown = false;
+            resetRequirementScrollInput();
             inspectatorZoomRepeatTicks = 0;
             if (inspectatorActive) {
                 tickActiveInspectator(minecraft, playerNpc, false);
@@ -498,6 +796,8 @@ public class SmartNpcInspectorOverlay {
         }
 
         handleTraceToggleInput(minecraft, inspectedEntityId);
+        handleRequirementsToggleInput(minecraft);
+        handleRequirementsScrollInput(minecraft);
 
         boolean toggleDown = isInspectatorToggleDown(minecraft);
         if (toggleDown && !previousInspectatorToggleDown) {
@@ -567,6 +867,8 @@ public class SmartNpcInspectorOverlay {
         previousCycleLeftDown = false;
         previousCycleRightDown = false;
         previousTraceToggleDown = false;
+        previousRequirementsToggleDown = false;
+        resetRequirementScrollInput();
         inspectatorZoomRepeatTicks = 0;
         lastDisplayCacheMillis = Long.MIN_VALUE;
 
@@ -626,7 +928,43 @@ public class SmartNpcInspectorOverlay {
         previousTraceToggleDown = traceDown;
     }
 
+    private static void handleRequirementsToggleInput(Minecraft minecraft) {
+        boolean requirementsDown = isPhysicalKeyDown(minecraft, GLFW.GLFW_KEY_X);
+        if (requirementsDown && !previousRequirementsToggleDown) {
+            requirementsVisible = !requirementsVisible;
+            if (!requirementsVisible) {
+                resetRequirementScroll();
+            }
+            resetRequirementScrollInput();
+            lastRefreshGameTime = Long.MIN_VALUE;
+            lastDisplayCacheMillis = Long.MIN_VALUE;
+        }
+        previousRequirementsToggleDown = requirementsDown;
+    }
+
+    private static void handleRequirementsScrollInput(Minecraft minecraft) {
+        if (!requirementsVisible || !hasScrollableRequirementRows()) {
+            resetRequirementScrollInput();
+            return;
+        }
+
+        boolean scrollUpDown = isPhysicalKeyDown(minecraft, GLFW.GLFW_KEY_UP);
+        boolean scrollDownDown = isPhysicalKeyDown(minecraft, GLFW.GLFW_KEY_DOWN);
+        if (scrollUpDown && !previousRequirementScrollUpDown) {
+            scrollRequirementRows(-1);
+        } else if (scrollDownDown && !previousRequirementScrollDownDown) {
+            scrollRequirementRows(1);
+        }
+
+        previousRequirementScrollUpDown = scrollUpDown;
+        previousRequirementScrollDownDown = scrollDownDown;
+    }
+
     private static void handleInspectatorZoomInput(Minecraft minecraft) {
+        if (requirementsVisible && hasScrollableRequirementRows()) {
+            inspectatorZoomRepeatTicks = 0;
+            return;
+        }
         if (inspectatorZoomRepeatTicks > 0) {
             inspectatorZoomRepeatTicks--;
         }
@@ -652,6 +990,36 @@ public class SmartNpcInspectorOverlay {
 
     private static double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private static int visibleRequirementRows() {
+        return Math.max(1, (PANEL_HEIGHT - requirementHeaderHeight() - 16) / REQUIREMENT_ROW_HEIGHT);
+    }
+
+    private static int maxRequirementScrollOffset() {
+        return Math.max(0, cachedRequirementRows.size() - visibleRequirementRows());
+    }
+
+    private static boolean hasScrollableRequirementRows() {
+        return maxRequirementScrollOffset() > 0;
+    }
+
+    private static void scrollRequirementRows(int delta) {
+        requirementScrollOffset = Math.max(0, Math.min(maxRequirementScrollOffset(), requirementScrollOffset + delta));
+        lastDisplayCacheMillis = Long.MIN_VALUE;
+    }
+
+    private static void clampRequirementScrollOffset() {
+        requirementScrollOffset = Math.max(0, Math.min(maxRequirementScrollOffset(), requirementScrollOffset));
+    }
+
+    private static void resetRequirementScroll() {
+        requirementScrollOffset = 0;
+    }
+
+    private static void resetRequirementScrollInput() {
+        previousRequirementScrollUpDown = false;
+        previousRequirementScrollDownDown = false;
     }
 
     private static boolean isPhysicalKeyDown(Minecraft minecraft, int key) {
@@ -688,9 +1056,11 @@ public class SmartNpcInspectorOverlay {
         inspectedEntityId = nextNpc.getId();
         snapshot = List.of();
         snapshotTraceEnabled = false;
+        resetRequirementScroll();
+        resetRequirementScrollInput();
         lastRefreshGameTime = Long.MIN_VALUE;
         lastDisplayCacheMillis = Long.MIN_VALUE;
-        sendToServerIfConnected(new PlayerNpcInspectorRequestPacket(inspectedEntityId));
+        sendToServerIfConnected(new PlayerNpcInspectorRequestPacket(inspectedEntityId, requirementsVisible));
         startInspectator(minecraft, nextNpc);
     }
 
@@ -723,10 +1093,35 @@ public class SmartNpcInspectorOverlay {
     ) {
         int mouseX = (int) (minecraft.mouseHandler.xpos() * screenWidth / minecraft.getWindow().getScreenWidth());
         int mouseY = (int) (minecraft.mouseHandler.ypos() * screenHeight / minecraft.getWindow().getScreenHeight());
+        if (requirementsVisible && !cachedRequirementRows.isEmpty()) {
+            int requirementsX = Math.max(4, panelX - REQUIREMENTS_PANEL_WIDTH - 8);
+            ItemStack hoveredRequirement = getHoveredRequirementItem(requirementsX, panelY, mouseX, mouseY);
+            if (!hoveredRequirement.isEmpty()) {
+                guiGraphics.renderTooltip(minecraft.font, hoveredRequirement, mouseX, mouseY);
+                return;
+            }
+        }
+
         ItemStack hovered = getHoveredItem(panelX, panelY, mouseX, mouseY);
         if (!hovered.isEmpty()) {
             guiGraphics.renderTooltip(minecraft.font, hovered, mouseX, mouseY);
         }
+    }
+
+    private static ItemStack getHoveredRequirementItem(int panelX, int panelY, int mouseX, int mouseY) {
+        int rowStartY = panelY + requirementHeaderHeight();
+        if (mouseX < panelX + 8 || mouseX >= panelX + 26 || mouseY < rowStartY) {
+            return ItemStack.EMPTY;
+        }
+
+        int rowIndex = (mouseY - rowStartY) / REQUIREMENT_ROW_HEIGHT;
+        clampRequirementScrollOffset();
+        int rowsToRender = Math.min(visibleRequirementRows(), Math.max(0, cachedRequirementRows.size() - requirementScrollOffset));
+        if (rowIndex < 0 || rowIndex >= rowsToRender) {
+            return ItemStack.EMPTY;
+        }
+
+        return cachedRequirementRows.get(requirementScrollOffset + rowIndex).stack();
     }
 
     private static ItemStack getHoveredItem(int panelX, int panelY, int mouseX, int mouseY) {
@@ -772,7 +1167,11 @@ public class SmartNpcInspectorOverlay {
         snapshot = new ArrayList<>();
         snapshotBuildStatusText = "";
         snapshotPerformanceText = "";
+        snapshotRequirementsText = "";
         snapshotTraceEnabled = false;
+        requirementsVisible = false;
+        resetRequirementScroll();
+        resetRequirementScrollInput();
         lastRefreshGameTime = Long.MIN_VALUE;
         lastDisplayCacheMillis = Long.MIN_VALUE;
         cachedTitle = Component.empty();
@@ -781,8 +1180,13 @@ public class SmartNpcInspectorOverlay {
         cachedAiText = Component.empty();
         cachedInterestsText = "";
         cachedBuildStatusText = "";
-        cachedPerformanceText = "";
+        cachedPerformanceLines = List.of("");
         cachedTraceText = "";
+        cachedRequirementsTitle = Component.empty();
+        cachedRequirementsLayout = Component.empty();
+        cachedRequirementRows = List.of();
+        cachedRequirementMore = 0;
+        cachedRequirementLines = List.of("");
         cachedTaskLabel = Component.empty();
         cachedTaskLabelWidth = 0;
         cachedTaskValueLines = List.of("");
@@ -804,6 +1208,18 @@ public class SmartNpcInspectorOverlay {
         }
 
         SmartNpcNetwork.CHANNEL.sendToServer(packet);
+    }
+
+    private record RequirementPayload(boolean structured, Component layout, List<RequirementRow> rows, int more) {
+        private static RequirementPayload fallback() {
+            return new RequirementPayload(false, Component.empty(), List.of(), 0);
+        }
+    }
+
+    private record RequirementRow(ItemStack stack, int required, int placed, int carried, int missing) {
+        private int remaining() {
+            return Math.max(0, this.required - this.placed);
+        }
     }
 
     public record InspectatorCameraTransform(Vec3 eyePosition, float yRot, float xRot) {}

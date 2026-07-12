@@ -33,6 +33,10 @@ public final class PlayerNpcInspectorData {
         return PlayerNpcBuildStatusUtil.describe(playerNpc);
     }
 
+    public static String createBuildRequirementsText(PlayerNpcEntity playerNpc) {
+        return PlayerNpcBuildStatusUtil.describeRequirements(playerNpc);
+    }
+
     public static String createPerformanceText() {
         return PlayerNpcPerformanceMonitor.createInspectorText();
     }

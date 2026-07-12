@@ -1,7 +1,9 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.ChestAi;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcBuildStatusUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -16,7 +18,6 @@ import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.ArrowItem;
 import net.minecraft.world.item.AxeItem;
-import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
@@ -46,6 +47,7 @@ public class CheckHomeSuppliesGoal extends Goal {
     private static final double CONTAINER_USE_DISTANCE_SQR = 2.25D * 2.25D;
     private static final double CONTAINER_STAND_REACHED_SQR = 1.25D * 1.25D;
     private static final int ACTION_DELAY_TICKS = 8;
+    private static final int STORAGE_REPATH_INTERVAL_TICKS = 20;
     private static final int MAX_WITHDRAW_STACKS = 6;
     private static final int TOOL_CHEST_RECHECK_TICKS = 20 * 10;
     private static final int FOOD_RESERVE = 6;
@@ -55,14 +57,17 @@ public class CheckHomeSuppliesGoal extends Goal {
     private static final int BLOCK_RESERVE = 24;
 
     private final PlayerNpcEntity playerNpc;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private PlayerNpcHomeUtil.HomeArea homeArea;
     private BlockPos targetPos;
     private BlockPos standPos;
     private Mode mode;
     private int actionDelayTicks;
+    private int repathTicks;
     private boolean finished;
     private boolean acted;
     private boolean chestOpen;
+    private SupplyNeedSnapshot supplyNeed;
 
     public CheckHomeSuppliesGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -79,6 +84,9 @@ public class CheckHomeSuppliesGoal extends Goal {
                 || this.playerNpc.getTarget() != null) {
             return false;
         }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
 
         this.resetPlan();
         this.homeArea = PlayerNpcHomeUtil.getHome(this.playerNpc).orElse(null);
@@ -87,17 +95,18 @@ public class CheckHomeSuppliesGoal extends Goal {
         }
 
         long day = this.currentDay(serverLevel);
-        if (!this.hasSupplyNeed(serverLevel)) {
+        this.supplyNeed = this.createSupplyNeedSnapshot(serverLevel);
+        if (!this.supplyNeed.hasAnyNeed()) {
             return false;
         }
 
-        boolean urgentChestNeed = this.needsToolSupply();
+        boolean urgentChestNeed = this.supplyNeed.needsToolSupply();
         if ((urgentChestNeed && this.canRetryToolChestCheck(serverLevel))
                 || (!urgentChestNeed && !this.checkedToday(LAST_CHEST_CHECK_DAY, day))) {
             BlockPos chest = this.findHomeChest(serverLevel);
             if (chest != null
                     && serverLevel.getBlockEntity(chest) instanceof Container container
-                    && this.hasWithdrawCandidate(container)
+                    && this.hasWithdrawCandidate(serverLevel, container)
                     && this.plan(serverLevel, chest, Mode.CHEST)) {
                 return true;
             }
@@ -132,6 +141,7 @@ public class CheckHomeSuppliesGoal extends Goal {
     @Override
     public void start() {
         this.actionDelayTicks = 0;
+        this.repathTicks = 0;
         this.finished = false;
         this.acted = false;
         this.chestOpen = false;
@@ -155,13 +165,16 @@ public class CheckHomeSuppliesGoal extends Goal {
         this.lookAtTarget();
         if (!this.isAtStand()) {
             this.playerNpc.setCurrentAiDetail("walking to home storage");
-            this.moveToStand();
+            if (!this.moveToStand()) {
+                this.markModeChecked(serverLevel);
+                this.finished = true;
+            }
             return;
         }
 
         this.playerNpc.getNavigation().stop();
         if (this.mode == Mode.CHEST && !this.chestOpen) {
-            this.openChest(serverLevel, this.targetPos);
+            ChestAi.openChest(serverLevel, this.targetPos);
             this.chestOpen = true;
             this.actionDelayTicks = ACTION_DELAY_TICKS;
             this.updateDetail();
@@ -175,7 +188,7 @@ public class CheckHomeSuppliesGoal extends Goal {
         if (this.mode == Mode.CHEST) {
             this.acted = this.withdrawFromChest(serverLevel);
             if (this.chestOpen) {
-                this.closeChest(serverLevel, this.targetPos);
+                ChestAi.closeChest(serverLevel, this.targetPos);
                 this.chestOpen = false;
             }
         } else {
@@ -192,7 +205,7 @@ public class CheckHomeSuppliesGoal extends Goal {
                 && this.targetPos != null
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
                 && serverLevel.getBlockState(this.targetPos).is(Blocks.CHEST)) {
-            this.closeChest(serverLevel, this.targetPos);
+            ChestAi.closeChest(serverLevel, this.targetPos);
         }
 
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -201,7 +214,9 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private boolean plan(ServerLevel serverLevel, BlockPos pos, Mode mode) {
-        BlockPos stand = this.findStand(serverLevel, pos);
+        BlockPos stand = mode == Mode.CHEST
+                ? ChestAi.findAdjacentStand(this.playerNpc, serverLevel, pos)
+                : this.findStand(serverLevel, pos);
         if (stand == null) {
             return false;
         }
@@ -220,11 +235,11 @@ public class CheckHomeSuppliesGoal extends Goal {
         int movedStacks = 0;
         for (int slot = 0; slot < chest.getContainerSize() && movedStacks < MAX_WITHDRAW_STACKS; slot++) {
             ItemStack stack = chest.getItem(slot);
-            if (stack.isEmpty() || !this.shouldWithdrawStack(stack)) {
+            if (stack.isEmpty() || !this.shouldWithdrawStack(serverLevel, stack)) {
                 continue;
             }
 
-            int moved = this.moveFromContainerToInventory(chest, slot, this.desiredWithdrawCount(stack));
+            int moved = this.moveFromContainerToInventory(chest, slot, this.desiredWithdrawCount(serverLevel, stack));
             if (moved <= 0) {
                 continue;
             }
@@ -238,10 +253,10 @@ public class CheckHomeSuppliesGoal extends Goal {
         return movedAny;
     }
 
-    private boolean hasWithdrawCandidate(Container container) {
+    private boolean hasWithdrawCandidate(ServerLevel serverLevel, Container container) {
         for (int slot = 0; slot < container.getContainerSize(); slot++) {
             ItemStack stack = container.getItem(slot);
-            if (!stack.isEmpty() && this.shouldWithdrawStack(stack)) {
+            if (!stack.isEmpty() && this.shouldWithdrawStack(serverLevel, stack)) {
                 return true;
             }
         }
@@ -329,32 +344,22 @@ public class CheckHomeSuppliesGoal extends Goal {
         return stack.isEmpty();
     }
 
-    private boolean hasSupplyNeed(ServerLevel serverLevel) {
-        return this.needsToolSupply()
-                || this.needsFood()
-                || this.needsWood()
-                || this.needsToolCraftingMaterials()
-                || this.needsFuel()
-                || this.needsArrows()
-                || this.needsBuildingBlocks()
-                || this.hasHomeFurnaceOutput(serverLevel);
-    }
-
-    private boolean shouldWithdrawStack(ItemStack stack) {
+    private boolean shouldWithdrawStack(ServerLevel serverLevel, ItemStack stack) {
         if (stack.isEmpty()) {
             return false;
         }
-        return this.needsMissingTool(stack)
-                || this.needsFood() && stack.isEdible()
-                || this.needsWood() && this.isWoodSupply(stack)
-                || this.needsToolCraftingMaterials() && this.isToolCraftingSupply(stack)
-                || this.needsFuel() && (this.isTorchFuel(stack) || this.isFuel(stack))
-                || this.needsArrows() && stack.getItem() instanceof ArrowItem
-                || this.needsBuildingBlocks() && this.isBuildingSupply(stack)
+        SupplyNeedSnapshot need = this.currentSupplyNeed(serverLevel);
+        return this.needsMissingTool(need, stack)
+                || need.food() && stack.isEdible()
+                || need.wood() && this.isWoodSupply(stack)
+                || need.toolCraftingMaterials() && this.isToolCraftingSupply(stack)
+                || need.fuel() && (this.isTorchFuel(stack) || this.isFuel(stack))
+                || need.arrows() && stack.getItem() instanceof ArrowItem
+                || need.buildingBlocks() && this.isCurrentBuildSupply(serverLevel, stack)
                 || this.isAlwaysUsefulSupply(stack);
     }
 
-    private int desiredWithdrawCount(ItemStack stack) {
+    private int desiredWithdrawCount(ServerLevel serverLevel, ItemStack stack) {
         if (this.isToolStack(stack)) {
             return 1;
         }
@@ -367,17 +372,18 @@ public class CheckHomeSuppliesGoal extends Goal {
         if (stack.getItem() instanceof ArrowItem) {
             return Math.min(stack.getCount(), 32);
         }
-        if (this.isWoodSupply(stack) || this.isBuildingSupply(stack)) {
+        SupplyNeedSnapshot need = this.currentSupplyNeed(serverLevel);
+        if (this.isWoodSupply(stack) || need.buildingBlocks() && this.isCurrentBuildSupply(serverLevel, stack)) {
             return Math.min(stack.getCount(), 32);
         }
         return Math.min(stack.getCount(), 16);
     }
 
-    private boolean needsMissingTool(ItemStack stack) {
-        return this.needsTool(AxeItem.class) && stack.getItem() instanceof AxeItem
-                || this.needsTool(PickaxeItem.class) && stack.getItem() instanceof PickaxeItem
-                || this.needsTool(ShovelItem.class) && stack.getItem() instanceof ShovelItem
-                || this.needsTool(SwordItem.class) && stack.getItem() instanceof SwordItem;
+    private boolean needsMissingTool(SupplyNeedSnapshot need, ItemStack stack) {
+        return need.axe() && stack.getItem() instanceof AxeItem
+                || need.pickaxe() && stack.getItem() instanceof PickaxeItem
+                || need.shovel() && stack.getItem() instanceof ShovelItem
+                || need.sword() && stack.getItem() instanceof SwordItem;
     }
 
     private boolean isToolStack(ItemStack stack) {
@@ -421,8 +427,42 @@ public class CheckHomeSuppliesGoal extends Goal {
         return this.hasRangedWeapon() && this.countInventory(stack -> stack.getItem() instanceof ArrowItem) < ARROW_RESERVE;
     }
 
-    private boolean needsBuildingBlocks() {
-        return this.countInventory(this::isBuildingSupply) < BLOCK_RESERVE;
+    private boolean needsBuildingBlocks(ServerLevel serverLevel) {
+        return PlayerNpcBuildStatusUtil.needsCurrentBuildMaterial(serverLevel, this.playerNpc);
+    }
+
+    private SupplyNeedSnapshot currentSupplyNeed(ServerLevel serverLevel) {
+        if (this.supplyNeed == null) {
+            this.supplyNeed = this.createSupplyNeedSnapshot(serverLevel);
+        }
+        return this.supplyNeed;
+    }
+
+    private SupplyNeedSnapshot createSupplyNeedSnapshot(ServerLevel serverLevel) {
+        boolean axe = this.needsTool(AxeItem.class);
+        boolean pickaxe = this.needsTool(PickaxeItem.class);
+        boolean shovel = this.needsTool(ShovelItem.class);
+        boolean sword = this.needsTool(SwordItem.class);
+        boolean food = this.needsFood();
+        boolean wood = this.needsWood();
+        boolean toolMaterials = axe || pickaxe;
+        boolean fuel = this.needsFuel();
+        boolean arrows = this.needsArrows();
+        boolean buildingBlocks = this.needsBuildingBlocks(serverLevel);
+        boolean furnaceOutput = this.hasHomeFurnaceOutput(serverLevel);
+        return new SupplyNeedSnapshot(
+                axe,
+                pickaxe,
+                shovel,
+                sword,
+                food,
+                wood,
+                toolMaterials,
+                fuel,
+                arrows,
+                buildingBlocks,
+                furnaceOutput
+        );
     }
 
     private boolean hasRangedWeapon() {
@@ -487,16 +527,8 @@ public class CheckHomeSuppliesGoal extends Goal {
         return !stack.isEmpty() && AbstractFurnaceBlockEntity.isFuel(stack);
     }
 
-    private boolean isBuildingSupply(ItemStack stack) {
-        return stack.is(Items.COBBLESTONE)
-                || stack.is(Items.COBBLED_DEEPSLATE)
-                || stack.is(Items.STONE)
-                || stack.is(Items.DEEPSLATE)
-                || stack.is(Items.DIRT)
-                || stack.is(Items.GRASS_BLOCK)
-                || stack.is(Items.GRAVEL)
-                || stack.is(Items.SAND)
-                || stack.getItem() instanceof BlockItem;
+    private boolean isCurrentBuildSupply(ServerLevel serverLevel, ItemStack stack) {
+        return PlayerNpcBuildStatusUtil.shouldKeepForCurrentBuild(serverLevel, this.playerNpc, stack);
     }
 
     private boolean isAlwaysUsefulSupply(ItemStack stack) {
@@ -516,19 +548,7 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private BlockPos findHomeChest(ServerLevel serverLevel) {
-        BlockPos ownedChestPos = this.playerNpc.getOwnedChestPos();
-        if (ownedChestPos != null) {
-            if (serverLevel.getBlockState(ownedChestPos).is(Blocks.CHEST)) {
-                return ownedChestPos.immutable();
-            }
-            this.playerNpc.setOwnedChestPos(null);
-        }
-
-        BlockPos chestPos = this.findBlock(serverLevel, Blocks.CHEST);
-        if (chestPos != null) {
-            this.playerNpc.setOwnedChestPos(chestPos);
-        }
-        return chestPos;
+        return ChestAi.findHomeSupplyChest(this.playerNpc, serverLevel, this.homeArea);
     }
 
     private BlockPos findHomeFurnace(ServerLevel serverLevel) {
@@ -551,7 +571,9 @@ public class CheckHomeSuppliesGoal extends Goal {
             return true;
         }
 
-        this.standPos = this.findStand(serverLevel, this.targetPos);
+        this.standPos = this.mode == Mode.CHEST
+                ? ChestAi.findAdjacentStand(this.playerNpc, serverLevel, this.targetPos)
+                : this.findStand(serverLevel, this.targetPos);
         return this.standPos != null;
     }
 
@@ -599,6 +621,13 @@ public class CheckHomeSuppliesGoal extends Goal {
         if (this.standPos == null) {
             return false;
         }
+        if (this.repathTicks > 0
+                && !this.playerNpc.getNavigation().isDone()
+                && !this.playerNpc.getNavigation().isStuck()) {
+            this.repathTicks--;
+            return true;
+        }
+        this.repathTicks = STORAGE_REPATH_INTERVAL_TICKS;
         Path path = this.playerNpc.getNavigation().createPath(this.standPos, 0);
         if (path == null || !path.canReach()) {
             return false;
@@ -658,22 +687,6 @@ public class CheckHomeSuppliesGoal extends Goal {
         );
     }
 
-    private void openChest(ServerLevel serverLevel, BlockPos pos) {
-        BlockState state = serverLevel.getBlockState(pos);
-        serverLevel.blockEvent(pos, state.getBlock(), 1, 1);
-        serverLevel.playSound(null, pos, SoundEvents.CHEST_OPEN, SoundSource.BLOCKS, 0.5F, 1.0F);
-    }
-
-    private void closeChest(ServerLevel serverLevel, BlockPos pos) {
-        if (!serverLevel.getBlockState(pos).is(Blocks.CHEST)) {
-            return;
-        }
-
-        BlockState state = serverLevel.getBlockState(pos);
-        serverLevel.blockEvent(pos, state.getBlock(), 1, 0);
-        serverLevel.playSound(null, pos, SoundEvents.CHEST_CLOSE, SoundSource.BLOCKS, 0.5F, 1.0F);
-    }
-
     private void updateDetail() {
         if (this.targetPos == null || this.mode == null) {
             this.playerNpc.setCurrentAiDetail("");
@@ -697,13 +710,44 @@ public class CheckHomeSuppliesGoal extends Goal {
         this.standPos = null;
         this.mode = null;
         this.actionDelayTicks = 0;
+        this.repathTicks = 0;
         this.finished = false;
         this.acted = false;
         this.chestOpen = false;
+        this.supplyNeed = null;
     }
 
     private enum Mode {
         CHEST,
         FURNACE
+    }
+
+    private record SupplyNeedSnapshot(
+            boolean axe,
+            boolean pickaxe,
+            boolean shovel,
+            boolean sword,
+            boolean food,
+            boolean wood,
+            boolean toolCraftingMaterials,
+            boolean fuel,
+            boolean arrows,
+            boolean buildingBlocks,
+            boolean furnaceOutput
+    ) {
+        private boolean needsToolSupply() {
+            return this.axe || this.pickaxe || this.shovel;
+        }
+
+        private boolean hasAnyNeed() {
+            return this.needsToolSupply()
+                    || this.food
+                    || this.wood
+                    || this.toolCraftingMaterials
+                    || this.fuel
+                    || this.arrows
+                    || this.buildingBlocks
+                    || this.furnaceOutput;
+        }
     }
 }

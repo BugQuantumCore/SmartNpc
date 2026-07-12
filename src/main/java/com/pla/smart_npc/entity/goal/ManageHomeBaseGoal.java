@@ -1,9 +1,14 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
-import com.pla.smart_npc.util.ChatUtil;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ChestAi;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
-import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
+import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
+import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
+import com.pla.smart_npc.util.PlayerNpcBuildStatusUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -43,13 +48,17 @@ public class ManageHomeBaseGoal extends Goal {
     private static final int BUILD_SITE_CRAFTING_TABLE_SCAN_ABOVE = 3;
 
     private final PlayerNpcEntity playerNpc;
+    private final ToolAi toolAi;
+    private final BreakingBlockAi breakingBlockAi;
+    private final PlacingBlockAi placingBlockAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private PlayerNpcHomeUtil.HomeArea homeArea;
     private BlockPos recoveryTablePos;
     private BlockPos depositChestPos;
+    private BlockPos depositChestStandPos;
     private BlockPos pendingCraftingTablePos;
     private BlockPos pendingCraftingTableStandPos;
     private ItemStack previousMainHand = ItemStack.EMPTY;
-    private int recoveryBreakTicks;
     private int depositDelayTicks;
     private boolean usingTemporaryTool;
     private boolean returnTemporaryMainHandOnRestore;
@@ -59,6 +68,9 @@ public class ManageHomeBaseGoal extends Goal {
 
     public ManageHomeBaseGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.toolAi = new ToolAi(playerNpc);
+        this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -71,6 +83,9 @@ public class ManageHomeBaseGoal extends Goal {
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getManageHomeCooldown() > 0) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
@@ -89,10 +104,22 @@ public class ManageHomeBaseGoal extends Goal {
             return false;
         }
 
-        return this.needsCraftingTable(serverLevel)
-                || this.needsBed(serverLevel)
-                || this.needsChest(serverLevel)
-                || this.shouldDepositToChest(serverLevel);
+        if (this.shouldYieldToBuildMaterialGathering(serverLevel)) {
+            return false;
+        }
+
+        boolean needsCraftingTable = this.needsCraftingTable(serverLevel);
+        boolean needsBed = this.needsBed(serverLevel);
+        boolean needsChest = this.needsChest(serverLevel);
+        if (needsCraftingTable || needsBed || needsChest) {
+            return true;
+        }
+        if (TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
+                || BuildHouseGoal.hasContinuableHomeBuildWork(this.playerNpc, serverLevel)) {
+            return false;
+        }
+
+        return this.shouldDepositToChest(serverLevel);
     }
 
     @Override
@@ -120,11 +147,13 @@ public class ManageHomeBaseGoal extends Goal {
 
         this.playerNpc.getNavigation().stop();
         this.playerNpc.setCurrentAiState("ai.player_npc.managing_home");
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
         this.recoveryTablePos = null;
         this.depositChestPos = null;
+        this.depositChestStandPos = null;
         this.pendingCraftingTablePos = null;
         this.pendingCraftingTableStandPos = null;
-        this.recoveryBreakTicks = 0;
         this.depositDelayTicks = 0;
         this.previousMainHand = ItemStack.EMPTY;
         this.usingTemporaryTool = false;
@@ -135,7 +164,6 @@ public class ManageHomeBaseGoal extends Goal {
 
         if (this.canRecoverTemporaryCraftingTable(serverLevel)) {
             this.recoveryTablePos = this.getTemporaryCraftingTablePos();
-            this.equipAxeOrEmptyForRecovery();
             this.updateRecoveryDetail(serverLevel);
             return;
         }
@@ -152,7 +180,6 @@ public class ManageHomeBaseGoal extends Goal {
         boolean acted = this.placeBed(serverLevel)
                 || this.placeChest(serverLevel);
         if (acted) {
-            this.playerNpc.triggerMainHandUseAnimation();
             this.finishHomeAction(true);
             return;
         }
@@ -182,27 +209,20 @@ public class ManageHomeBaseGoal extends Goal {
 
         BlockState state = serverLevel.getBlockState(this.recoveryTablePos);
         if (!state.is(Blocks.CRAFTING_TABLE)) {
-            this.playerNpc.clearBlockBreakProgress(this.recoveryTablePos);
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
             this.clearTemporaryCraftingTable();
             this.finishHomeAction(true);
             return;
         }
-        this.equipAxeOrEmptyForRecovery();
-
-        this.playerNpc.getLookControl().setLookAt(
-                this.recoveryTablePos.getX() + 0.5D,
-                this.recoveryTablePos.getY() + 0.5D,
-                this.recoveryTablePos.getZ() + 0.5D,
-                40.0F,
-                40.0F
-        );
 
         if (this.playerNpc.distanceToSqr(
                 this.recoveryTablePos.getX() + 0.5D,
                 this.recoveryTablePos.getY() + 0.5D,
                 this.recoveryTablePos.getZ() + 0.5D
         ) > RECOVER_TABLE_BREAK_DISTANCE_SQR) {
-            this.playerNpc.clearBlockBreakProgress(this.recoveryTablePos);
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
             this.playerNpc.getNavigation().moveTo(
                     this.recoveryTablePos.getX() + 0.5D,
                     this.recoveryTablePos.getY(),
@@ -214,31 +234,32 @@ public class ManageHomeBaseGoal extends Goal {
         }
 
         this.playerNpc.getNavigation().stop();
-        if (this.recoveryBreakTicks % 8 == 0) {
-            this.playerNpc.triggerMainHandAttackAnimation();
-            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, this.recoveryTablePos, state, this.playerNpc);
-        }
-
-        this.recoveryBreakTicks++;
-        int requiredBreakTicks = this.getRequiredBreakTicks(serverLevel, this.recoveryTablePos, state);
-        this.playerNpc.showBlockBreakProgress(this.recoveryTablePos, this.recoveryBreakTicks, requiredBreakTicks);
-        this.updateRecoveryDetail(serverLevel);
-        if (this.recoveryBreakTicks < requiredBreakTicks) {
+        this.toolAi.equipBestToolFor(state);
+        boolean dropRecoveredBlock = PlayerNpcBlockBreakUtil.shouldDropResources(state, this.playerNpc.getMainHandItem());
+        BreakingBlockAi.TickResult result = this.breakingBlockAi.tick(
+                serverLevel,
+                this.recoveryTablePos,
+                candidate -> candidate.is(Blocks.CRAFTING_TABLE),
+                MAX_RECOVER_TABLE_TICKS,
+                "recovering crafting table"
+        );
+        if (result == BreakingBlockAi.TickResult.RUNNING) {
             return;
         }
 
         BlockPos recoveredPos = this.recoveryTablePos;
-        if (!serverLevel.destroyBlock(recoveredPos, false, this.playerNpc)) {
-            this.playerNpc.clearBlockBreakProgress(recoveredPos);
+        if (result == BreakingBlockAi.TickResult.DONE) {
+            if (!dropRecoveredBlock) {
+                this.returnStack(new ItemStack(Items.CRAFTING_TABLE));
+            }
             this.clearTemporaryCraftingTable();
-            this.finishHomeAction(false);
+            this.finishHomeAction(true);
             return;
         }
+
         this.playerNpc.clearBlockBreakProgress(recoveredPos);
-        this.playerNpc.hurtMainHandItem(1);
-        this.returnStack(new ItemStack(Items.CRAFTING_TABLE));
         this.clearTemporaryCraftingTable();
-        this.finishHomeAction(true);
+        this.finishHomeAction(false);
     }
 
     @Override
@@ -246,16 +267,17 @@ public class ManageHomeBaseGoal extends Goal {
         if (this.depositChestOpen
                 && this.depositChestPos != null
                 && this.playerNpc.level() instanceof ServerLevel serverLevel) {
-            this.closeChest(serverLevel, this.depositChestPos);
+            ChestAi.closeChest(serverLevel, this.depositChestPos);
         }
-        this.playerNpc.clearBlockBreakProgress(this.recoveryTablePos);
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
         this.restorePreviousMainHand();
         this.homeArea = null;
         this.recoveryTablePos = null;
         this.depositChestPos = null;
+        this.depositChestStandPos = null;
         this.pendingCraftingTablePos = null;
         this.pendingCraftingTableStandPos = null;
-        this.recoveryBreakTicks = 0;
         this.depositDelayTicks = 0;
         this.depositChestOpen = false;
         this.depositFinished = false;
@@ -265,6 +287,8 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private void finishHomeAction(boolean acted) {
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
         int cooldown = acted
                 ? COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 8)
                 : 20 + this.playerNpc.getRandom().nextInt(20);
@@ -365,9 +389,11 @@ public class ManageHomeBaseGoal extends Goal {
         }
 
         this.showPlacementItem(table.isEmpty() ? new ItemStack(Items.CRAFTING_TABLE) : table);
-        serverLevel.setBlockAndUpdate(this.pendingCraftingTablePos, Blocks.CRAFTING_TABLE.defaultBlockState());
-        this.lookAndSound(serverLevel, this.pendingCraftingTablePos, SoundEvents.WOOD_PLACE);
-        this.playerNpc.triggerMainHandUseAnimation();
+        if (!this.placingBlockAi.placeBlock(serverLevel, this.pendingCraftingTablePos, Blocks.CRAFTING_TABLE.defaultBlockState())) {
+            this.returnStack(table.isEmpty() ? new ItemStack(Items.CRAFTING_TABLE) : table);
+            this.finishHomeAction(false);
+            return;
+        }
         this.finishHomeAction(true);
     }
 
@@ -402,9 +428,11 @@ public class ManageHomeBaseGoal extends Goal {
         }
 
         this.showPlacementItem(chest);
-        serverLevel.setBlockAndUpdate(pos, Blocks.CHEST.defaultBlockState());
+        if (!this.placingBlockAi.placeBlock(serverLevel, pos, Blocks.CHEST.defaultBlockState())) {
+            this.returnStack(chest);
+            return false;
+        }
         this.playerNpc.setOwnedChestPos(pos);
-        this.lookAndSound(serverLevel, pos, SoundEvents.WOOD_PLACE);
         return true;
     }
 
@@ -443,9 +471,16 @@ public class ManageHomeBaseGoal extends Goal {
                 .setValue(BedBlock.FACING, facing)
                 .setValue(BedBlock.PART, BedPart.HEAD);
         this.showPlacementItem(bedStack);
-        serverLevel.setBlockAndUpdate(foot, footState);
-        serverLevel.setBlockAndUpdate(head, headState);
-        this.lookAndSound(serverLevel, foot, SoundEvents.WOOD_PLACE);
+        if (!this.placingBlockAi.placeBlock(serverLevel, foot, footState, false)) {
+            this.returnStack(bedStack);
+            return false;
+        }
+        if (!this.placingBlockAi.placeBlock(serverLevel, head, headState, false)) {
+            serverLevel.setBlockAndUpdate(foot, Blocks.AIR.defaultBlockState());
+            this.returnStack(bedStack);
+            return false;
+        }
+        this.placingBlockAi.playPlaceEffects(serverLevel, foot, footState);
         return true;
     }
 
@@ -454,9 +489,21 @@ public class ManageHomeBaseGoal extends Goal {
                 && this.findHomeChest(serverLevel) != null;
     }
 
+    private boolean shouldYieldToBuildMaterialGathering(ServerLevel serverLevel) {
+        return !serverLevel.isNight()
+                && !serverLevel.isThundering()
+                && (PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, this.playerNpc)
+                || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, this.playerNpc)
+                || GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(this.playerNpc, serverLevel));
+    }
+
     private boolean beginDepositToChest(ServerLevel serverLevel) {
         BlockPos chestPos = this.findHomeChest(serverLevel);
         if (chestPos == null || !(serverLevel.getBlockEntity(chestPos) instanceof ChestBlockEntity chest)) {
+            return false;
+        }
+        BlockPos standPos = ChestAi.findAdjacentStand(this.playerNpc, serverLevel, chestPos);
+        if (standPos == null) {
             return false;
         }
         if (!this.hasDepositCandidate(chest)) {
@@ -464,6 +511,7 @@ public class ManageHomeBaseGoal extends Goal {
         }
 
         this.depositChestPos = chestPos.immutable();
+        this.depositChestStandPos = standPos.immutable();
         this.depositDelayTicks = 0;
         this.depositChestOpen = false;
         this.depositFinished = false;
@@ -479,7 +527,6 @@ public class ManageHomeBaseGoal extends Goal {
             return;
         }
 
-        this.playerNpc.getNavigation().stop();
         this.playerNpc.getLookControl().setLookAt(
                 this.depositChestPos.getX() + 0.5D,
                 this.depositChestPos.getY() + 0.5D,
@@ -487,9 +534,27 @@ public class ManageHomeBaseGoal extends Goal {
                 40.0F,
                 40.0F
         );
+        if (this.depositChestStandPos == null || !ChestAi.canStandAt(serverLevel, this.depositChestStandPos)) {
+            this.depositChestStandPos = ChestAi.findAdjacentStand(this.playerNpc, serverLevel, this.depositChestPos);
+            if (this.depositChestStandPos == null) {
+                this.finishHomeAction(this.depositMovedAny);
+                return;
+            }
+        }
+        if (!ChestAi.isAtStand(this.playerNpc, this.depositChestStandPos)) {
+            this.playerNpc.setCurrentAiDetail("walking to chest @ "
+                    + this.depositChestPos.getX() + " "
+                    + this.depositChestPos.getY() + " "
+                    + this.depositChestPos.getZ());
+            if (!ChestAi.moveToStand(this.playerNpc, this.depositChestStandPos, 1.0D)) {
+                this.finishHomeAction(this.depositMovedAny);
+            }
+            return;
+        }
 
+        this.playerNpc.getNavigation().stop();
         if (!this.depositChestOpen) {
-            this.openChest(serverLevel, this.depositChestPos);
+            ChestAi.openChest(serverLevel, this.depositChestPos);
             this.depositChestOpen = true;
             this.depositDelayTicks = DEPOSIT_INTERVAL_TICKS;
             this.updateDepositDetail();
@@ -502,7 +567,7 @@ public class ManageHomeBaseGoal extends Goal {
         }
 
         if (!this.inventoryMoreThanHalfFull()) {
-            this.closeChest(serverLevel, this.depositChestPos);
+            ChestAi.closeChest(serverLevel, this.depositChestPos);
             this.depositChestOpen = false;
             this.finishHomeAction(this.depositMovedAny);
             return;
@@ -518,7 +583,7 @@ public class ManageHomeBaseGoal extends Goal {
             return;
         }
 
-        this.closeChest(serverLevel, this.depositChestPos);
+        ChestAi.closeChest(serverLevel, this.depositChestPos);
         this.depositChestOpen = false;
         this.finishHomeAction(this.depositMovedAny);
     }
@@ -615,6 +680,11 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private boolean shouldKeepStack(ItemStack stack) {
+        if (this.playerNpc.level() instanceof ServerLevel serverLevel
+                && PlayerNpcBuildStatusUtil.shouldKeepForCurrentBuild(serverLevel, this.playerNpc, stack)) {
+            return true;
+        }
+
         return stack.getItem() instanceof SwordItem
                 || stack.getItem() instanceof DiggerItem
                 || stack.getItem() instanceof ArmorItem
@@ -818,20 +888,7 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private BlockPos findHomeChest(ServerLevel serverLevel) {
-        BlockPos ownedChestPos = this.playerNpc.getOwnedChestPos();
-        if (ownedChestPos != null) {
-            if (serverLevel.getBlockState(ownedChestPos).is(Blocks.CHEST)) {
-                return ownedChestPos.immutable();
-            }
-            ChatUtil.missingHomeChest(this.playerNpc);
-            this.playerNpc.setOwnedChestPos(null);
-        }
-
-        BlockPos chestPos = this.findBlock(serverLevel, Blocks.CHEST);
-        if (chestPos != null) {
-            this.playerNpc.setOwnedChestPos(chestPos);
-        }
-        return chestPos;
+        return ChestAi.findHomeSupplyChest(this.playerNpc, serverLevel, this.homeArea);
     }
 
     private BlockPos findBed(ServerLevel serverLevel) {
@@ -867,42 +924,6 @@ public class ManageHomeBaseGoal extends Goal {
         if (!stack.isEmpty() && !InventoryUtils.addItem(this.playerNpc, stack)) {
             this.playerNpc.spawnAtLocation(stack);
         }
-    }
-
-    private int getRequiredBreakTicks(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        float hardness = state.getDestroySpeed(serverLevel, pos);
-        if (hardness < 0.0F) {
-            return MAX_RECOVER_TABLE_TICKS;
-        }
-
-        ItemStack heldStack = this.playerNpc.getMainHandItem();
-        float toolSpeed = heldStack.isEmpty() ? 1.0F : heldStack.getDestroySpeed(state);
-        if (toolSpeed <= 0.0F) {
-            toolSpeed = 1.0F;
-        }
-
-        boolean correctTool = !state.requiresCorrectToolForDrops() || heldStack.isCorrectToolForDrops(state);
-        float progressPerTick = toolSpeed / hardness / (correctTool ? 30.0F : 100.0F);
-        if (progressPerTick <= 0.0F) {
-            return MAX_RECOVER_TABLE_TICKS;
-        }
-
-        return Math.min(MAX_RECOVER_TABLE_TICKS, Math.max(1, (int) Math.ceil(1.0F / progressPerTick)));
-    }
-
-    private void equipAxeOrEmptyForRecovery() {
-        if (this.playerNpc.getMainHandItem().getItem() instanceof AxeItem) {
-            return;
-        }
-
-        ItemStack axe = this.playerNpc.consumeInventoryItem(stack -> stack.getItem() instanceof AxeItem, 1)
-                .orElse(ItemStack.EMPTY);
-        if (!axe.isEmpty()) {
-            this.setTemporaryMainHand(axe);
-            return;
-        }
-
-        this.setTemporaryMainHand(ItemStack.EMPTY);
     }
 
     private void setTemporaryMainHand(ItemStack stack) {
@@ -956,8 +977,12 @@ public class ManageHomeBaseGoal extends Goal {
             return;
         }
 
-        BlockState state = serverLevel.getBlockState(this.recoveryTablePos);
-        int requiredTicks = this.getRequiredBreakTicks(serverLevel, this.recoveryTablePos, state);
+        String breakingDetail = this.breakingBlockAi.detail();
+        if (!breakingDetail.isBlank()) {
+            this.playerNpc.setCurrentAiDetail(breakingDetail);
+            return;
+        }
+
         boolean inBreakRange = this.playerNpc.distanceToSqr(
                 this.recoveryTablePos.getX() + 0.5D,
                 this.recoveryTablePos.getY() + 0.5D,
@@ -969,7 +994,7 @@ public class ManageHomeBaseGoal extends Goal {
                 this.recoveryTablePos.getX(),
                 this.recoveryTablePos.getY(),
                 this.recoveryTablePos.getZ(),
-                inBreakRange ? String.format(java.util.Locale.ROOT, "%d/%dt", Math.min(this.recoveryBreakTicks, requiredTicks), requiredTicks) : "walking"
+                inBreakRange ? "recovering" : "walking"
         ));
     }
 
@@ -986,22 +1011,6 @@ public class ManageHomeBaseGoal extends Goal {
                 this.depositChestPos.getY(),
                 this.depositChestPos.getZ()
         ));
-    }
-
-    private void openChest(ServerLevel serverLevel, BlockPos pos) {
-        BlockState state = serverLevel.getBlockState(pos);
-        serverLevel.blockEvent(pos, state.getBlock(), 1, 1);
-        serverLevel.playSound(null, pos, SoundEvents.CHEST_OPEN, SoundSource.BLOCKS, 0.5F, 1.0F);
-    }
-
-    private void closeChest(ServerLevel serverLevel, BlockPos pos) {
-        if (!serverLevel.getBlockState(pos).is(Blocks.CHEST)) {
-            return;
-        }
-
-        BlockState state = serverLevel.getBlockState(pos);
-        serverLevel.blockEvent(pos, state.getBlock(), 1, 0);
-        serverLevel.playSound(null, pos, SoundEvents.CHEST_CLOSE, SoundSource.BLOCKS, 0.5F, 1.0F);
     }
 
     private void lookAndSound(ServerLevel serverLevel, BlockPos pos, net.minecraft.sounds.SoundEvent soundEvent) {

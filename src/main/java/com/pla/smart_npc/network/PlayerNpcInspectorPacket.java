@@ -16,6 +16,7 @@ public class PlayerNpcInspectorPacket {
     private final List<ItemStack> items;
     private final String buildStatusText;
     private final String performanceText;
+    private final String requirementsText;
     private final boolean traceEnabled;
 
     public PlayerNpcInspectorPacket(int entityId, List<ItemStack> items) {
@@ -31,10 +32,22 @@ public class PlayerNpcInspectorPacket {
     }
 
     public PlayerNpcInspectorPacket(int entityId, List<ItemStack> items, String buildStatusText, String performanceText, boolean traceEnabled) {
+        this(entityId, items, buildStatusText, performanceText, "", traceEnabled);
+    }
+
+    public PlayerNpcInspectorPacket(
+            int entityId,
+            List<ItemStack> items,
+            String buildStatusText,
+            String performanceText,
+            String requirementsText,
+            boolean traceEnabled
+    ) {
         this.entityId = entityId;
         this.items = List.copyOf(items);
         this.buildStatusText = buildStatusText == null ? "" : buildStatusText;
         this.performanceText = performanceText == null ? "" : performanceText;
+        this.requirementsText = requirementsText == null ? "" : requirementsText;
         this.traceEnabled = traceEnabled;
     }
 
@@ -58,6 +71,10 @@ public class PlayerNpcInspectorPacket {
         return performanceText;
     }
 
+    public String requirementsText() {
+        return requirementsText;
+    }
+
     public boolean traceEnabled() {
         return traceEnabled;
     }
@@ -70,6 +87,7 @@ public class PlayerNpcInspectorPacket {
         }
         buffer.writeUtf(packet.buildStatusText);
         buffer.writeUtf(packet.performanceText);
+        buffer.writeUtf(packet.requirementsText);
         buffer.writeBoolean(packet.traceEnabled);
     }
 
@@ -82,8 +100,9 @@ public class PlayerNpcInspectorPacket {
         }
         String buildStatusText = buffer.readUtf();
         String performanceText = buffer.readUtf();
+        String requirementsText = buffer.readUtf();
         boolean traceEnabled = buffer.readBoolean();
-        return new PlayerNpcInspectorPacket(entityId, items, buildStatusText, performanceText, traceEnabled);
+        return new PlayerNpcInspectorPacket(entityId, items, buildStatusText, performanceText, requirementsText, traceEnabled);
     }
 
     public static void handle(PlayerNpcInspectorPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {

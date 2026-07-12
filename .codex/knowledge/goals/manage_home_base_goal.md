@@ -25,6 +25,8 @@ If `CraftBasicGearGoal` had placed a temporary crafting table outside the saved 
 
 The goal clears crack progress when recovery moves out of range, completes, fails, or stops.
 
-Places a chest when the NPC can provide one or can craft one from eight planks. If the recorded owned chest position no longer contains a chest, the NPC chats a missing-storage reaction, clears that stale marker, and can place/craft a new chest when materials are available. If the custom inventory is more than half full, the goal moves partial non-combat stacks into the home chest while keeping weapons, tools, armor, food, arrows, ender pearls, buckets, beds, tables, and chests.
+Places a chest when the NPC can provide one or can craft one from eight planks. If the recorded owned chest position no longer contains a chest, the NPC chats a missing-storage reaction, clears that stale marker, and can place/craft a new chest when materials are available. If the custom inventory is more than half full, the goal moves partial non-combat stacks into the home chest while keeping weapons, tools, armor, food, arrows, ender pearls, buckets, beds, tables, chests, and any stack that can satisfy the currently unfinished blueprint. Build-resource protection is requirement-driven through `PlayerNpcBuildStatusUtil.shouldKeepForCurrentBuild(...)`, so wood-like, stone-like, glass/sand, torch fuel/sticks, wool/bed, potted plant, and other active build inputs must not be deposited while the house is still missing those blocks.
+
+`CheckHomeSuppliesGoal` uses the same current-build material guard when it decides which build supplies to pull back out of the chest. Do not reintroduce broad "any BlockItem" chest withdrawals; they cause storage/build loops and make the NPC take useless blocks.
 
 Places a bed when the NPC has a bed item or can craft one from three same-color wool plus three planks.

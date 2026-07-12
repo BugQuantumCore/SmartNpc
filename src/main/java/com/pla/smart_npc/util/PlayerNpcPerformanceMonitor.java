@@ -34,6 +34,7 @@ public final class PlayerNpcPerformanceMonitor {
     private static double latestMspt;
     private static long tickStartNanos = -1L;
     private static long lastWarningServerTick = Long.MIN_VALUE;
+    private static long lastSuppressedWarningServerTick = Long.MIN_VALUE;
 
     private PlayerNpcPerformanceMonitor() {
     }
@@ -136,9 +137,18 @@ public final class PlayerNpcPerformanceMonitor {
                 && serverTick - lastWarningServerTick < cooldownTicks) {
             return;
         }
+        if (lastSuppressedWarningServerTick != Long.MIN_VALUE
+                && serverTick - lastSuppressedWarningServerTick < Math.min(20, cooldownTicks)) {
+            return;
+        }
+
+        NpcTraceSummary summary = collectNpcTrace(server, SmartNpcConfig.PERFORMANCE_WARNING_NPC_TRACE_LIMIT.get());
+        if (summary.activeNpcCount() <= 0) {
+            lastSuppressedWarningServerTick = serverTick;
+            return;
+        }
 
         lastWarningServerTick = serverTick;
-        NpcTraceSummary summary = collectNpcTrace(server, SmartNpcConfig.PERFORMANCE_WARNING_NPC_TRACE_LIMIT.get());
         SmartNpc.LOGGER.warn(
                 "Smart NPC TPS warning: server tick is slow; latestMspt={}, averageMspt={}, effectiveTps={}/20, sampleWindowTicks={}, reason={}, activePlayerNpcGoals={}, totalPlayerNpcs={}",
                 format(currentMspt),
@@ -149,11 +159,6 @@ public final class PlayerNpcPerformanceMonitor {
                 summary.activeNpcCount(),
                 summary.totalNpcCount()
         );
-
-        if (summary.activeNpcCount() <= 0) {
-            SmartNpc.LOGGER.warn("Smart NPC TPS trace: no active Smart NPC goals were running when the slowdown was sampled.");
-            return;
-        }
 
         SmartNpc.LOGGER.warn("Smart NPC TPS trace states: {}", summary.stateCountsText());
         for (String traceLine : summary.traceLines()) {

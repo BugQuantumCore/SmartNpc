@@ -62,7 +62,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int ROUTE_NAV_VERTICAL_DOWN = 3;
     private static final int ROUTE_NAV_VERTICAL_UP = 12;
     private static final int ROUTE_NAV_MIN_UPWARD_GAIN = 2;
-    private static final int ROUTE_NAV_MAX_PATH_CHECKS = 24;
+    private static final int ROUTE_NAV_MAX_PATH_CHECKS = 10;
     private static final double ROUTE_NAV_REACHED_SQR = 2.0D * 2.0D;
 
     private final PlayerNpcEntity playerNpc;
@@ -115,6 +115,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         BlockPos feet = this.playerNpc.blockPosition();
         BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+        if (requestedTarget != null && this.hasSatisfiedRequestedRoute(serverLevel, feet, requestedTarget)) {
+            this.playerNpc.clearUpwardEscapeTarget();
+            return false;
+        }
         boolean trapped = this.hasOpenBodySpace(serverLevel, feet)
                 && this.isWalkableFloor(serverLevel, feet.below())
                 && this.isActuallyTrapped(serverLevel, feet);
@@ -333,6 +337,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
             }
             this.finished = true;
             return;
+        }
+
+        if (this.routeNavigationTarget != null && this.isSameOrNearbyRouteBlock(feet, this.routeNavigationTarget)) {
+            this.routeNavigationTarget = null;
+            this.repathTicks = 0;
         }
 
         if (this.routeNavigationTarget == null
@@ -1211,6 +1220,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (routeTarget == null) {
             return false;
         }
+        if (this.isSameOrNearbyRouteBlock(feet, routeTarget)) {
+            return false;
+        }
 
         boolean targetIsHigher = routeTarget.getY() > feet.getY() + 2;
         boolean requestedSurfaceRoute = this.isRequestedSurfaceRoute(serverLevel, feet, routeTarget);
@@ -1281,6 +1293,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean isUsableUpwardRouteTarget(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
+        if (this.isSameOrNearbyRouteBlock(feet, routeTarget)) {
+            return false;
+        }
         return routeTarget.getY() > feet.getY() + 2
                 || this.isRequestedSurfaceRoute(serverLevel, feet, routeTarget);
     }
@@ -1318,6 +1333,17 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
         return feet.getY() >= nearbySurfaceY
                 || this.hasStepExitToward(serverLevel, feet, routeTarget);
+    }
+
+    private boolean hasSatisfiedRequestedRoute(ServerLevel serverLevel, BlockPos feet, BlockPos requestedTarget) {
+        return this.isSameOrNearbyRouteBlock(feet, requestedTarget)
+                || this.hasReachedRequestedSurfaceExit(serverLevel, feet, requestedTarget);
+    }
+
+    private boolean isSameOrNearbyRouteBlock(BlockPos feet, BlockPos routeTarget) {
+        return routeTarget != null
+                && Math.abs(routeTarget.getY() - feet.getY()) <= 1
+                && routeTarget.distSqr(feet) <= ROUTE_NAV_REACHED_SQR;
     }
 
     private int nearbySurfaceY(ServerLevel serverLevel, BlockPos center) {

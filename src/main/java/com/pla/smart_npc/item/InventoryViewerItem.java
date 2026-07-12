@@ -44,7 +44,14 @@ public class InventoryViewerItem extends Item {
         if (player instanceof ServerPlayer serverPlayer) {
             SmartNpcNetwork.CHANNEL.send(
                     PacketDistributor.PLAYER.with(() -> serverPlayer),
-                    new PlayerNpcInspectorPacket(target.getId(), PlayerNpcInspectorData.createSnapshot(playerNpcEntity))
+                    new PlayerNpcInspectorPacket(
+                            target.getId(),
+                            PlayerNpcInspectorData.createSnapshot(playerNpcEntity),
+                            PlayerNpcInspectorData.createBuildStatusText(playerNpcEntity),
+                            PlayerNpcInspectorData.createPerformanceText(),
+                            PlayerNpcInspectorData.createBuildRequirementsText(playerNpcEntity),
+                            false
+                    )
             );
         }
 

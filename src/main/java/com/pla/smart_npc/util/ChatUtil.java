@@ -16,6 +16,7 @@ public class ChatUtil {
     private static final int CALL_FOR_HELP_MESSAGES = 5;
     private static final int WARN_DEATH_MESSAGES = 5;
     private static final int MISSING_HOME_CHEST_MESSAGES = 4;
+    private static final int BROKEN_BED_MESSAGES = 4;
     private static final int KILLER_TAUNT_MESSAGES = 20;
     private static final int DEATH_REACTION_MESSAGES = 20;
 
@@ -45,6 +46,10 @@ public class ChatUtil {
 
     public static void missingHomeChest(PlayerNpcEntity speaker) {
         broadcastNpcChat(speaker, randomKey(speaker, "chat.player_npc.missing_home_chest", MISSING_HOME_CHEST_MESSAGES));
+    }
+
+    public static void brokenBedWhileSleeping(PlayerNpcEntity speaker, Entity breaker) {
+        broadcastNpcChat(speaker, randomKey(speaker, "chat.player_npc.broken_bed", BROKEN_BED_MESSAGES), breaker.getDisplayName());
     }
 
     public static void broadcastDeathSummary(PlayerNpcEntity victim, Entity killer) {

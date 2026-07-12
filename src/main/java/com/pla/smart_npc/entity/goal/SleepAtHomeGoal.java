@@ -41,6 +41,10 @@ public class SleepAtHomeGoal extends Goal {
                 || this.playerNpc.getRandom().nextFloat() > 0.35F) {
             return false;
         }
+        if (TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
+                || BuildHouseGoal.hasContinuableHomeBuildWork(this.playerNpc, serverLevel)) {
+            return false;
+        }
 
         this.bedPos = this.findHomeBed(serverLevel);
         return this.bedPos != null;
@@ -81,7 +85,7 @@ public class SleepAtHomeGoal extends Goal {
 
         this.playerNpc.getNavigation().stop();
         if (!this.playerNpc.isSleeping()) {
-            this.playerNpc.startSleeping(this.bedPos);
+            this.startSleepingInBed(serverLevel);
         }
         this.sleepTicks--;
     }
@@ -96,7 +100,11 @@ public class SleepAtHomeGoal extends Goal {
         }
         this.bedPos = null;
         this.sleepTicks = 0;
-        this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+        if (this.playerNpc.getTarget() == null) {
+            this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+        } else {
+            this.playerNpc.setCurrentAiState("ai.player_npc.retaliating");
+        }
     }
 
     private void moveToBed() {
@@ -112,6 +120,26 @@ public class SleepAtHomeGoal extends Goal {
         this.playerNpc.setCurrentAiDetail("bed missing");
         this.bedPos = null;
         this.sleepTicks = 0;
+    }
+
+    private void startSleepingInBed(ServerLevel serverLevel) {
+        if (this.bedPos == null || !this.isValidBed(serverLevel, this.bedPos)) {
+            this.wakeFromInvalidBed();
+            return;
+        }
+
+        BlockState foot = serverLevel.getBlockState(this.bedPos);
+        Direction facing = foot.getValue(BedBlock.FACING);
+        BlockPos headPos = this.bedPos.relative(facing);
+        if (!serverLevel.getBlockState(headPos).getBlock().equals(foot.getBlock())) {
+            this.wakeFromInvalidBed();
+            return;
+        }
+
+        this.playerNpc.setYRot(facing.toYRot());
+        this.playerNpc.yBodyRot = facing.toYRot();
+        this.playerNpc.yHeadRot = facing.toYRot();
+        this.playerNpc.startSleeping(headPos);
     }
 
     private BlockPos findHomeBed(ServerLevel serverLevel) {

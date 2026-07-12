@@ -18,6 +18,10 @@ import java.util.function.Predicate;
 
 public final class StoneAi {
     private static final int MAX_CLUSTER_BLOCKS = 192;
+    private static final int SEARCH_VERTICAL_DOWN = 6;
+    private static final int SEARCH_VERTICAL_UP = 6;
+    private static final int MAX_SEARCH_CLUSTERS = 6;
+    private static final int MAX_SEARCH_POSITIONS = 4096;
 
     private StoneAi() {
     }
@@ -31,17 +35,29 @@ public final class StoneAi {
         Set<BlockPos> visited = new HashSet<>();
         List<StoneCluster> clusters = new ArrayList<>();
 
-        for (BlockPos mutable : BlockPos.betweenClosed(
-                center.offset(-radius, -6, -radius),
-                center.offset(radius, 6, radius))) {
-            BlockPos pos = mutable.immutable();
-            if (visited.contains(pos) || !canUseStone(serverLevel, pos, allowedStone)) {
-                continue;
-            }
+        int inspected = 0;
+        for (int ring = 0; ring <= radius && inspected < MAX_SEARCH_POSITIONS && clusters.size() < MAX_SEARCH_CLUSTERS; ring++) {
+            for (int dx = -ring; dx <= ring && inspected < MAX_SEARCH_POSITIONS && clusters.size() < MAX_SEARCH_CLUSTERS; dx++) {
+                for (int dz = -ring; dz <= ring && inspected < MAX_SEARCH_POSITIONS && clusters.size() < MAX_SEARCH_CLUSTERS; dz++) {
+                    if (ring > 0 && Math.max(Math.abs(dx), Math.abs(dz)) != ring) {
+                        continue;
+                    }
+                    for (int dy = -SEARCH_VERTICAL_DOWN; dy <= SEARCH_VERTICAL_UP && inspected < MAX_SEARCH_POSITIONS; dy++) {
+                        inspected++;
+                        BlockPos pos = center.offset(dx, dy, dz);
+                        if (visited.contains(pos) || !canUseStone(serverLevel, pos, allowedStone)) {
+                            continue;
+                        }
 
-            StoneCluster cluster = scan(serverLevel, pos, visited, allowedStone);
-            if (!cluster.stones().isEmpty()) {
-                clusters.add(cluster);
+                        StoneCluster cluster = scan(serverLevel, pos, visited, allowedStone);
+                        if (!cluster.stones().isEmpty()) {
+                            clusters.add(cluster);
+                            if (clusters.size() >= MAX_SEARCH_CLUSTERS) {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
 

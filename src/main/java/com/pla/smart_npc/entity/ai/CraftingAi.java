@@ -14,9 +14,11 @@ import net.minecraft.world.level.block.Blocks;
 
 public final class CraftingAi {
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
 
     public CraftingAi(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
     }
 
     public boolean canCraft(ServerLevel serverLevel, ItemLike result, boolean craftingTable, int rawLogReserve) {
@@ -74,12 +76,19 @@ public final class CraftingAi {
         }
 
         ItemStack table = this.playerNpc.consumeInventoryItem(Items.CRAFTING_TABLE, 1).orElse(ItemStack.EMPTY);
+        boolean consumedTableItem = !table.isEmpty();
         if (table.isEmpty()
                 && !PlayerNpcCraftingUtil.tryConsumePlanks(this.playerNpc.getInventory(), 4, rawLogReserve)) {
             return false;
         }
 
-        serverLevel.setBlockAndUpdate(tablePos, Blocks.CRAFTING_TABLE.defaultBlockState());
+        if (!this.placingBlockAi.placeBlock(serverLevel, tablePos, Blocks.CRAFTING_TABLE.defaultBlockState())) {
+            InventoryUtils.addItem(
+                    this.playerNpc,
+                    consumedTableItem ? table : new ItemStack(Items.CRAFTING_TABLE)
+            );
+            return false;
+        }
         this.playerNpc.getLookControl().setLookAt(
                 tablePos.getX() + 0.5D,
                 tablePos.getY() + 0.5D,
@@ -87,7 +96,7 @@ public final class CraftingAi {
                 40.0F,
                 40.0F
         );
-        this.playCraftStep(serverLevel, "placed crafting table", tablePos);
+        this.playerNpc.setCurrentAiDetail("placed crafting table");
         return true;
     }
 

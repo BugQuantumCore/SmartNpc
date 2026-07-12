@@ -19,8 +19,8 @@ public final class ReturnPositionAi {
     private static final int CLEAR_ROUTE_TICKS = 28;
     private static final int UPWARD_ESCAPE_REQUEST_TICKS = 80;
     private static final int MAX_SAFE_DROP_BLOCKS = 5;
-    private static final int MAX_RETURN_PILLAR_BLOCKS = 8;
-    private static final int MAX_DIRECT_RETURN_PILLAR_BLOCKS = 5;
+    private static final int MAX_RETURN_PILLAR_BLOCKS = 10;
+    private static final int MAX_DIRECT_RETURN_PILLAR_BLOCKS = 10;
     private static final int LOCAL_ROUTE_HORIZONTAL_RADIUS = 14;
     private static final int LOCAL_ROUTE_VERTICAL_DOWN = 5;
     private static final int LOCAL_ROUTE_VERTICAL_UP = 6;
@@ -279,7 +279,7 @@ public final class ReturnPositionAi {
     }
 
     private boolean isClearable(BlockState state) {
-        return !state.isAir();
+        return ClearBlockAi.isPhysicalObstructionState(state);
     }
 
     private boolean needsVerticalEscape(ServerLevel serverLevel, BlockPos target) {

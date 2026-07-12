@@ -65,4 +65,6 @@ The old generated shelter JSON library and the hand-authored `player_npc:structu
 
 The inspector shows a `Build:` line from `PlayerNpcBuildStatusUtil`, including whether a builder has no selected build, has a missing layout, has a finished layout, or has required blocks still missing.
 
+The X-key requirements panel uses a versioned server payload from `PlayerNpcBuildStatusUtil.describeRequirements(...)`. Structured rows include the blueprint name, item registry id, required count, placed count, carried count, and missing count. The client overlay renders those rows in the existing left-side panel with the item texture, translated item name, carried/remaining count, and placed/missing detail instead of raw registry text.
+
 This is not a full Structurize hologram/build-tool UI yet. It is server-authoritative progress/missing-block status attached to the existing PlayerNpc inspector.

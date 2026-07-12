@@ -56,6 +56,7 @@ public class PlayerNpcGoalTracePacket {
                             PlayerNpcInspectorData.createSnapshot(playerNpc),
                             PlayerNpcInspectorData.createBuildStatusText(playerNpc),
                             PlayerNpcInspectorData.createPerformanceText(),
+                            PlayerNpcInspectorData.createBuildRequirementsText(playerNpc),
                             PlayerNpcGoalTraceLogger.isTracing(sender, playerNpc)
                     )
             );

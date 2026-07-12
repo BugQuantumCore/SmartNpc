@@ -16,7 +16,7 @@ public final class PathNavigationAi {
     private static final double PATH_END_DISTANCE_SQR = 3.0D * 3.0D;
     private static final int PATH_END_VERTICAL_TOLERANCE = 2;
     private static final double DIRECT_STEP_REACHED_SQR = 0.75D * 0.75D;
-    private static final int MAX_LOCAL_ROUTE_PATH_CHECKS = 64;
+    private static final int MAX_LOCAL_ROUTE_PATH_CHECKS = 16;
     private static final double LOCAL_ROUTE_MAX_BACKTRACK_SQR = 8.0D * 8.0D;
 
     private final PlayerNpcEntity playerNpc;
@@ -30,6 +30,18 @@ public final class PathNavigationAi {
     }
 
     public boolean moveTo(ServerLevel serverLevel, BlockPos target, double speed, int maxSafeDrop) {
+        if (this.isAlreadyAtTarget(target)) {
+            this.lastMoveFailureDetail = "";
+            this.playerNpc.getNavigation().stop();
+            return true;
+        }
+
+        if (this.shouldStepDownBeforePath(target, maxSafeDrop)
+                && this.moveToSafeDropStep(serverLevel, target, speed, maxSafeDrop)) {
+            this.lastMoveFailureDetail = "";
+            return true;
+        }
+
         Path path = this.playerNpc.getNavigation().createPath(target, 0);
         if (this.isValidPathTo(target, path)) {
             this.lastMoveFailureDetail = "";
@@ -43,6 +55,35 @@ public final class PathNavigationAi {
         }
 
         this.lastMoveFailureDetail = this.pathDebug(target, path) + " safeDrop=none";
+        return false;
+    }
+
+    public boolean moveToExact(ServerLevel serverLevel, BlockPos target, double speed, int maxSafeDrop) {
+        if (this.isAlreadyAtTarget(target)) {
+            this.lastMoveFailureDetail = "";
+            this.playerNpc.getNavigation().stop();
+            return true;
+        }
+
+        if (this.shouldStepDownBeforePath(target, maxSafeDrop)
+                && this.moveToSafeDropStep(serverLevel, target, speed, maxSafeDrop)) {
+            this.lastMoveFailureDetail = "";
+            return true;
+        }
+
+        Path path = this.playerNpc.getNavigation().createPath(target, 0);
+        if (this.isExactPathTo(target, path)) {
+            this.lastMoveFailureDetail = "";
+            return this.playerNpc.getNavigation().moveTo(path, speed);
+        }
+
+        boolean movedToSafeDrop = this.moveToSafeDropStep(serverLevel, target, speed, maxSafeDrop);
+        if (movedToSafeDrop) {
+            this.lastMoveFailureDetail = "";
+            return true;
+        }
+
+        this.lastMoveFailureDetail = this.pathDebug(target, path) + " exact=false safeDrop=none";
         return false;
     }
 
@@ -92,6 +133,11 @@ public final class PathNavigationAi {
         return this.isValidPathTo(target, path);
     }
 
+    public boolean hasExactPathTo(BlockPos target) {
+        Path path = this.playerNpc.getNavigation().createPath(target, 0);
+        return this.isExactPathTo(target, path);
+    }
+
     public boolean isValidPathTo(BlockPos target, Path path) {
         if (path == null || !path.canReach()) {
             return false;
@@ -105,6 +151,26 @@ public final class PathNavigationAi {
         BlockPos endPos = endNode.asBlockPos();
         return Math.abs(endPos.getY() - target.getY()) <= PATH_END_VERTICAL_TOLERANCE
                 && blockDistanceSqr(endPos, target) <= PATH_END_DISTANCE_SQR;
+    }
+
+    private boolean isExactPathTo(BlockPos target, Path path) {
+        if (path == null || !path.canReach()) {
+            return false;
+        }
+
+        Node endNode = path.getEndNode();
+        return endNode != null && endNode.asBlockPos().equals(target);
+    }
+
+    private boolean shouldStepDownBeforePath(BlockPos target, int maxSafeDrop) {
+        return target != null
+                && maxSafeDrop > 0
+                && this.playerNpc.onGround()
+                && this.playerNpc.blockPosition().getY() - target.getY() > PATH_END_VERTICAL_TOLERANCE;
+    }
+
+    private boolean isAlreadyAtTarget(BlockPos target) {
+        return target != null && this.playerNpc.blockPosition().equals(target);
     }
 
     private boolean moveToSafeDropStep(ServerLevel serverLevel, BlockPos target, double speed, int maxSafeDrop) {

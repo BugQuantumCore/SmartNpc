@@ -1,6 +1,7 @@
 package com.pla.smart_npc.util;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.FurnaceAi;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
@@ -17,6 +18,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.ButtonBlock;
 import net.minecraft.world.level.block.CarpetBlock;
+import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.DoublePlantBlock;
 import net.minecraft.world.level.block.FenceBlock;
@@ -27,8 +29,11 @@ import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.StairBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.WeightedPressurePlateBlock;
+import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BedPart;
+import net.minecraft.world.level.block.state.properties.ChestType;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraftforge.registries.ForgeRegistries;
@@ -37,13 +42,17 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 public final class PlayerNpcBuildMaterialUtil {
     private static final int BUILD_CRAFT_RAW_LOG_RESERVE = 0;
     private static final int GLASS_PANE_CRAFT_INPUT = 6;
+    private static final int MISSING_NEED_CACHE_TICKS = 20;
     private static final EnumMap<MaterialFamily, List<Item>> CANDIDATE_CACHE = new EnumMap<>(MaterialFamily.class);
+    private static final Map<PlayerNpcEntity, MissingNeedCache> MISSING_NEED_CACHE = new WeakHashMap<>();
     private static final Set<String> WOOD_PREFIXES = Set.of(
             "oak",
             "spruce",
@@ -238,6 +247,17 @@ public final class PlayerNpcBuildMaterialUtil {
             Items.WITHER_ROSE,
             Items.TORCHFLOWER
     );
+    private static final List<Item> DECORATIVE_PLANTS = List.of(
+            Items.FERN,
+            Items.DEAD_BUSH,
+            Items.RED_MUSHROOM,
+            Items.BROWN_MUSHROOM,
+            Items.CRIMSON_FUNGUS,
+            Items.WARPED_FUNGUS,
+            Items.CRIMSON_ROOTS,
+            Items.WARPED_ROOTS
+    );
+    private static final List<Item> BUILD_PLANTS = buildPlantCandidates();
     private static final List<Item> POTTABLE_PLANTS = List.of(
             Items.DANDELION,
             Items.POPPY,
@@ -282,6 +302,9 @@ public final class PlayerNpcBuildMaterialUtil {
         if (existingState.equals(targetState)) {
             return true;
         }
+        if (isPartialDoubleChestMatch(existingState, targetState)) {
+            return true;
+        }
         if (targetState.isAir()) {
             return existingState.isAir();
         }
@@ -324,6 +347,9 @@ public final class PlayerNpcBuildMaterialUtil {
         Optional<Item> item = findCraftableItem(serverLevel, playerNpc, block.state());
         if (item.isEmpty()) {
             return false;
+        }
+        if (item.get() == Items.TORCH) {
+            return PlayerNpcCraftingUtil.tryCraftTorches(playerNpc.getInventory(), BUILD_CRAFT_RAW_LOG_RESERVE);
         }
         if (item.get() == Items.GLASS_PANE && tryCraftGlassPaneFromAnyGlass(playerNpc.getInventory())) {
             return true;
@@ -391,11 +417,24 @@ public final class PlayerNpcBuildMaterialUtil {
             return Optional.empty();
         }
 
-        Optional<PlayerNpcBuildLayout> layout = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc)
-                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
+        Optional<String> layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc);
+        MissingNeedCache cache = MISSING_NEED_CACHE.get(playerNpc);
+        if (cache != null && cache.matches(playerNpc.tickCount, home.get(), layoutId.orElse(""))) {
+            return cache.need();
+        }
+
+        Optional<PlayerNpcBuildLayout> layout = layoutId.flatMap(PlayerNpcBuildLayoutLoader::getLayout);
         if (layout.isEmpty()
                 || layout.get().width() != home.get().width()
                 || layout.get().depth() != home.get().depth()) {
+            MISSING_NEED_CACHE.put(playerNpc, new MissingNeedCache(
+                    playerNpc.tickCount,
+                    home.get().origin(),
+                    home.get().width(),
+                    home.get().depth(),
+                    layoutId.orElse(""),
+                    Optional.empty()
+            ));
             return Optional.empty();
         }
 
@@ -410,8 +449,25 @@ public final class PlayerNpcBuildMaterialUtil {
             }
 
             MissingBuildMaterialKind kind = missingKindFor(serverLevel, playerNpc, block, origin);
-            return Optional.of(new MissingBuildMaterialNeed(kind, block.state(), block.toWorld(origin), describeTarget(block.state())));
+            Optional<MissingBuildMaterialNeed> need = Optional.of(new MissingBuildMaterialNeed(kind, block.state(), block.toWorld(origin), describeTarget(block.state())));
+            MISSING_NEED_CACHE.put(playerNpc, new MissingNeedCache(
+                    playerNpc.tickCount,
+                    home.get().origin(),
+                    home.get().width(),
+                    home.get().depth(),
+                    layoutId.orElse(""),
+                    need
+            ));
+            return need;
         }
+        MISSING_NEED_CACHE.put(playerNpc, new MissingNeedCache(
+                playerNpc.tickCount,
+                home.get().origin(),
+                home.get().width(),
+                home.get().depth(),
+                layoutId.orElse(""),
+                Optional.empty()
+        ));
         return Optional.empty();
     }
 
@@ -420,8 +476,54 @@ public final class PlayerNpcBuildMaterialUtil {
                 .map(MissingBuildMaterialNeed::kind)
                 .map(kind -> kind != MissingBuildMaterialKind.LOG
                         && kind != MissingBuildMaterialKind.STONE
+                        && kind != MissingBuildMaterialKind.TORCH
                         && kind != MissingBuildMaterialKind.NONE)
                 .orElse(false);
+    }
+
+    public static boolean needsLogsForCurrentBuild(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        Optional<MissingBuildMaterialNeed> need = findMissingBuildMaterialNeed(serverLevel, playerNpc);
+        if (need.isEmpty()) {
+            return false;
+        }
+
+        MissingBuildMaterialNeed materialNeed = need.get();
+        MissingBuildMaterialKind kind = materialNeed.kind();
+        if (kind == MissingBuildMaterialKind.LOG) {
+            return true;
+        }
+        if (kind != MissingBuildMaterialKind.TORCH
+                || canCraftCharcoalBuildTarget(serverLevel, playerNpc, materialNeed.targetState())) {
+            return false;
+        }
+
+        if (isCampfireTarget(materialNeed.targetState())) {
+            return countTorchFuel(playerNpc) <= 0
+                    ? !canProvideCampfireWood(playerNpc, 1)
+                    : !canProvideCampfireWood(playerNpc, 0);
+        }
+        if (countTorchFuel(playerNpc) <= 0) {
+            return countLogs(playerNpc) < requiredLogsForTorchCharcoal(playerNpc);
+        }
+        return !PlayerNpcCraftingUtil.canProvidePlanksAndSticks(playerNpc.getInventory(), 0, 1, BUILD_CRAFT_RAW_LOG_RESERVE);
+    }
+
+    public static boolean needsStoneForCurrentBuild(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        Optional<MissingBuildMaterialNeed> need = findMissingBuildMaterialNeed(serverLevel, playerNpc);
+        if (need.isEmpty()) {
+            return false;
+        }
+
+        MissingBuildMaterialNeed materialNeed = need.get();
+        MissingBuildMaterialKind kind = materialNeed.kind();
+        if (kind == MissingBuildMaterialKind.STONE) {
+            return !needsStoneSmelting(serverLevel, playerNpc);
+        }
+        return kind == MissingBuildMaterialKind.TORCH
+                && !canCraftCharcoalBuildTarget(serverLevel, playerNpc, materialNeed.targetState())
+                && countTorchFuel(playerNpc) <= 0
+                && canProvideCharcoalTargetWood(playerNpc, materialNeed.targetState())
+                && !canUseOrCreateHomeFurnace(serverLevel, playerNpc);
     }
 
     public static boolean needsBedForCurrentBuild(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
@@ -438,7 +540,7 @@ public final class PlayerNpcBuildMaterialUtil {
     public static boolean isGatherablePlantBlock(BlockState state) {
         Item item = state.getBlock().asItem();
         return item != Items.AIR
-                && (containsItem(FLOWERS, item) || containsItem(POTTABLE_PLANTS, item));
+                && containsItem(BUILD_PLANTS, item);
     }
 
     private static MissingBuildMaterialKind missingKindFor(
@@ -469,7 +571,67 @@ public final class PlayerNpcBuildMaterialUtil {
         if (family == MaterialFamily.LOOSE_FILL && isSandSourceBlock(targetState)) {
             return MissingBuildMaterialKind.SAND;
         }
+        if (isTorchTarget(targetState) || isCampfireTarget(targetState)) {
+            return MissingBuildMaterialKind.TORCH;
+        }
         return MissingBuildMaterialKind.OTHER;
+    }
+
+    private static boolean isTorchTarget(BlockState state) {
+        return state.is(Blocks.TORCH) || state.is(Blocks.WALL_TORCH);
+    }
+
+    private static boolean isCampfireTarget(BlockState state) {
+        return state.is(Blocks.CAMPFIRE);
+    }
+
+    private static boolean canCraftCharcoalBuildTarget(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockState targetState) {
+        if (isTorchTarget(targetState)) {
+            return PlayerNpcCraftingUtil.canCraftTorches(playerNpc.getInventory(), BUILD_CRAFT_RAW_LOG_RESERVE);
+        }
+        if (isCampfireTarget(targetState)) {
+            return PlayerNpcCraftingUtil.canCraftWithLogConversion(
+                    serverLevel,
+                    playerNpc.getInventory(),
+                    Items.CAMPFIRE,
+                    true,
+                    BUILD_CRAFT_RAW_LOG_RESERVE
+            );
+        }
+        return false;
+    }
+
+    private static boolean canProvideCharcoalTargetWood(PlayerNpcEntity playerNpc, BlockState targetState) {
+        if (isCampfireTarget(targetState)) {
+            return canProvideCampfireWood(playerNpc, 1);
+        }
+        return countLogs(playerNpc) >= requiredLogsForTorchCharcoal(playerNpc);
+    }
+
+    private static boolean canProvideCampfireWood(PlayerNpcEntity playerNpc, int charcoalLogReserve) {
+        int reservedLogs = 3 + Math.max(0, charcoalLogReserve);
+        return countLogs(playerNpc) >= reservedLogs
+                && PlayerNpcCraftingUtil.canProvidePlanksAndSticks(playerNpc.getInventory(), 0, 3, reservedLogs);
+    }
+
+    private static int requiredLogsForTorchCharcoal(PlayerNpcEntity playerNpc) {
+        if (countItems(playerNpc, stack -> stack.is(Items.STICK)) > 0
+                || countItems(playerNpc, stack -> stack.is(ItemTags.PLANKS)) >= 2) {
+            return 2;
+        }
+        return 3;
+    }
+
+    private static int countTorchFuel(PlayerNpcEntity playerNpc) {
+        return countItems(playerNpc, stack -> stack.is(Items.COAL) || stack.is(Items.CHARCOAL));
+    }
+
+    private static int countLogs(PlayerNpcEntity playerNpc) {
+        return countItems(playerNpc, stack -> stack.is(ItemTags.LOGS));
+    }
+
+    private static int countItems(PlayerNpcEntity playerNpc, java.util.function.Predicate<ItemStack> matcher) {
+        return countHeldAndInventoryItems(playerNpc, matcher);
     }
 
     private static boolean isWoodSupplyFamily(MaterialFamily family) {
@@ -521,6 +683,65 @@ public final class PlayerNpcBuildMaterialUtil {
         return missingGlassForProduction(serverLevel, playerNpc) > 0 && countGlassSmeltingInput(playerNpc) > 0;
     }
 
+    public static boolean needsStoneSmelting(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        return missingStoneForProduction(serverLevel, playerNpc) > 0
+                && (hasStoneProductionFurnaceWork(serverLevel, playerNpc)
+                || countStoneSmeltingInput(playerNpc) > 0
+                && hasFuel(playerNpc)
+                && canUseOrCreateHomeFurnace(serverLevel, playerNpc));
+    }
+
+    public static boolean hasMissingTorchBuildMaterial(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        return missingTorchesForProduction(serverLevel, playerNpc) > 0;
+    }
+
+    public static boolean needsTorchCharcoalSmelting(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        Optional<MissingBuildMaterialNeed> need = findMissingBuildMaterialNeed(serverLevel, playerNpc);
+        return need.isPresent()
+                && need.get().kind() == MissingBuildMaterialKind.TORCH
+                && !canCraftCharcoalBuildTarget(serverLevel, playerNpc, need.get().targetState())
+                && countTorchFuel(playerNpc) <= 0
+                && canProvideCharcoalTargetWood(playerNpc, need.get().targetState());
+    }
+
+    public static boolean hasMissingCharcoalBuildMaterial(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        Optional<MissingBuildMaterialNeed> need = findMissingBuildMaterialNeed(serverLevel, playerNpc);
+        return need.isPresent()
+                && need.get().kind() == MissingBuildMaterialKind.TORCH
+                && (isTorchTarget(need.get().targetState()) || isCampfireTarget(need.get().targetState()))
+                && !canCraftCharcoalBuildTarget(serverLevel, playerNpc, need.get().targetState());
+    }
+
+    public static int missingTorchesForProduction(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        if (home.isEmpty()) {
+            return 0;
+        }
+
+        Optional<PlayerNpcBuildLayout> layout = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc)
+                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
+        if (layout.isEmpty()
+                || layout.get().width() != home.get().width()
+                || layout.get().depth() != home.get().depth()) {
+            return 0;
+        }
+
+        int missing = 0;
+        BlockPos origin = home.get().origin();
+        for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
+            if (block.optional()
+                    || block.state().isAir()
+                    || block.isSecondHalfOfSingleItemBlock()
+                    || !isTorchTarget(block.state())
+                    || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())
+                    || hasMaterialFor(serverLevel, playerNpc, block, origin)) {
+                continue;
+            }
+            missing++;
+        }
+        return missing;
+    }
+
     public static int missingGlassForProduction(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
         Optional<GlassProductionNeed> need = findGlassProductionNeed(serverLevel, playerNpc);
         if (need.isEmpty()) {
@@ -530,8 +751,96 @@ public final class PlayerNpcBuildMaterialUtil {
         return Math.max(0, need.get().requiredGlass() - countFamilyItems(playerNpc, MaterialFamily.GLASS_BLOCKS));
     }
 
+    public static int missingStoneForProduction(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        Optional<StoneProductionNeed> need = findStoneProductionNeed(serverLevel, playerNpc);
+        if (need.isEmpty()) {
+            return 0;
+        }
+
+        return Math.max(0, need.get().requiredStone() - countFamilyItems(playerNpc, MaterialFamily.STONE_MASONRY));
+    }
+
     public static boolean isGlassSmeltingInput(ItemStack stack) {
         return !stack.isEmpty() && (stack.is(Items.SAND) || stack.is(Items.RED_SAND));
+    }
+
+    public static boolean isStoneSmeltingInput(ItemStack stack) {
+        return !stack.isEmpty() && (stack.is(Items.COBBLESTONE) || stack.is(Items.COBBLED_DEEPSLATE));
+    }
+
+    public static boolean isTorchCharcoalInput(ItemStack stack) {
+        return !stack.isEmpty() && stack.is(ItemTags.LOGS);
+    }
+
+    public static boolean isCurrentBuildInputForTarget(ItemStack stack, BlockState targetState) {
+        if (stack.isEmpty() || targetState.isAir()) {
+            return false;
+        }
+
+        Item item = stack.getItem();
+        if (item == targetState.getBlock().asItem()) {
+            return true;
+        }
+
+        MaterialFamily targetFamily = familyForState(targetState);
+        MaterialFamily stackFamily = familyForItem(item);
+        if (targetFamily != null && targetFamily == stackFamily) {
+            return true;
+        }
+
+        if (isWoodSupplyFamily(targetFamily)) {
+            return stack.is(ItemTags.LOGS)
+                    || stack.is(ItemTags.PLANKS)
+                    || stack.is(Items.STICK)
+                    || isWoodSupplyFamily(stackFamily);
+        }
+
+        if (isStoneSupplyFamily(targetFamily)) {
+            return stack.is(Items.COBBLESTONE)
+                    || stack.is(Items.COBBLED_DEEPSLATE)
+                    || stack.is(Items.STONE)
+                    || stack.is(Items.DEEPSLATE)
+                    || isStoneSupplyFamily(stackFamily);
+        }
+
+        if (targetFamily == MaterialFamily.GLASS_BLOCKS || targetFamily == MaterialFamily.GLASS_PANES) {
+            return isGlassSmeltingInput(stack)
+                    || stackFamily == MaterialFamily.GLASS_BLOCKS
+                    || stackFamily == MaterialFamily.GLASS_PANES;
+        }
+
+        if (targetFamily == MaterialFamily.BEDS || targetFamily == MaterialFamily.CARPETS) {
+            return item instanceof BedItem
+                    || stack.is(ItemTags.WOOL)
+                    || stackFamily == MaterialFamily.BEDS
+                    || stackFamily == MaterialFamily.CARPETS;
+        }
+
+        if (targetFamily == MaterialFamily.FLOWER_POTS || targetFamily == MaterialFamily.POTTED_FLOWERS) {
+            return stack.is(Items.FLOWER_POT)
+                    || isPottablePlantStack(stack)
+                    || stackFamily == MaterialFamily.FLOWERS;
+        }
+
+        if (isTorchTarget(targetState)) {
+            return stack.is(Items.TORCH)
+                    || stack.is(Items.COAL)
+                    || stack.is(Items.CHARCOAL)
+                    || stack.is(Items.STICK)
+                    || stack.is(ItemTags.LOGS)
+                    || stack.is(ItemTags.PLANKS);
+        }
+
+        if (isCampfireTarget(targetState)) {
+            return stack.is(Items.CAMPFIRE)
+                    || stack.is(Items.COAL)
+                    || stack.is(Items.CHARCOAL)
+                    || stack.is(Items.STICK)
+                    || stack.is(ItemTags.LOGS)
+                    || stack.is(ItemTags.PLANKS);
+        }
+
+        return false;
     }
 
     private static Optional<Item> findAvailableItem(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockState targetState) {
@@ -562,6 +871,10 @@ public final class PlayerNpcBuildMaterialUtil {
     private static Optional<Item> findCraftableItem(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockState targetState) {
         Item targetItem = targetState.getBlock().asItem();
         MaterialFamily family = familyForState(targetState);
+        if (targetItem == Items.TORCH
+                && PlayerNpcCraftingUtil.canCraftTorches(playerNpc.getInventory(), BUILD_CRAFT_RAW_LOG_RESERVE)) {
+            return Optional.of(Items.TORCH);
+        }
         if (family == MaterialFamily.GLASS_PANES && canCraftGlassPaneFromAnyGlass(playerNpc.getInventory())) {
             return Optional.of(Items.GLASS_PANE);
         }
@@ -590,6 +903,10 @@ public final class PlayerNpcBuildMaterialUtil {
         }
 
         if (item == Items.GLASS_PANE && tryCraftGlassPaneFromAnyGlass(playerNpc.getInventory())) {
+            return playerNpc.consumeInventoryItem(item, 1).orElse(ItemStack.EMPTY);
+        }
+        if (item == Items.TORCH
+                && PlayerNpcCraftingUtil.tryCraftTorches(playerNpc.getInventory(), BUILD_CRAFT_RAW_LOG_RESERVE)) {
             return playerNpc.consumeInventoryItem(item, 1).orElse(ItemStack.EMPTY);
         }
         if (item instanceof BedItem
@@ -650,13 +967,16 @@ public final class PlayerNpcBuildMaterialUtil {
             case STONE_OR_METAL_PRESSURE_PLATES -> STONE_OR_METAL_PRESSURE_PLATES;
             case GLASS_BLOCKS -> GLASS_BLOCKS;
             case GLASS_PANES -> GLASS_PANES;
-            case FLOWERS -> FLOWERS;
+            case FLOWERS -> BUILD_PLANTS;
             case FLOWER_POTS -> List.of(Items.FLOWER_POT);
             default -> List.of();
         };
     }
 
     private static Optional<BlockState> stateForItem(BlockState targetState, Item item) {
+        if (item == Items.TORCH && isTorchTarget(targetState)) {
+            return Optional.of(targetState);
+        }
         if (!(item instanceof BlockItem blockItem)) {
             return Optional.empty();
         }
@@ -745,7 +1065,7 @@ public final class PlayerNpcBuildMaterialUtil {
         if (containsItem(GLASS_PANES, item)) {
             return MaterialFamily.GLASS_PANES;
         }
-        if (containsItem(FLOWERS, item)) {
+        if (containsItem(BUILD_PLANTS, item)) {
             return MaterialFamily.FLOWERS;
         }
         if (stack.is(ItemTags.PLANKS)) {
@@ -808,6 +1128,16 @@ public final class PlayerNpcBuildMaterialUtil {
         return false;
     }
 
+    private static List<Item> buildPlantCandidates() {
+        ArrayList<Item> result = new ArrayList<>(FLOWERS);
+        for (Item item : DECORATIVE_PLANTS) {
+            if (!result.contains(item)) {
+                result.add(item);
+            }
+        }
+        return List.copyOf(result);
+    }
+
     private static Optional<PlacementMaterial> resolvePottedPlantPlacement(PlayerNpcEntity playerNpc, BlockState targetState) {
         ItemStack pot = playerNpc.consumeInventoryItem(Items.FLOWER_POT, 1).orElse(ItemStack.EMPTY);
         if (pot.isEmpty()) {
@@ -836,7 +1166,7 @@ public final class PlayerNpcBuildMaterialUtil {
     }
 
     private static boolean isFlowerStack(ItemStack stack) {
-        return !stack.isEmpty() && containsItem(FLOWERS, stack.getItem());
+        return !stack.isEmpty() && containsItem(BUILD_PLANTS, stack.getItem());
     }
 
     private static boolean isPottablePlantStack(ItemStack stack) {
@@ -850,6 +1180,28 @@ public final class PlayerNpcBuildMaterialUtil {
 
         ResourceLocation key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
         return key != null && key.getPath().startsWith("potted_");
+    }
+
+    private static boolean isPartialDoubleChestMatch(BlockState existingState, BlockState targetState) {
+        if (!isChestState(existingState) || !isChestState(targetState)) {
+            return false;
+        }
+        if (existingState.getBlock() != targetState.getBlock()
+                || existingState.getValue(ChestBlock.FACING) != targetState.getValue(ChestBlock.FACING)) {
+            return false;
+        }
+
+        ChestType existingType = existingState.getValue(ChestBlock.TYPE);
+        ChestType targetType = targetState.getValue(ChestBlock.TYPE);
+        return existingType == targetType
+                || existingType == ChestType.SINGLE && targetType != ChestType.SINGLE;
+    }
+
+    private static boolean isChestState(BlockState state) {
+        return state != null
+                && state.getBlock() instanceof ChestBlock
+                && state.hasProperty(ChestBlock.TYPE)
+                && state.hasProperty(ChestBlock.FACING);
     }
 
     private static Optional<GlassProductionNeed> findGlassProductionNeed(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
@@ -875,9 +1227,82 @@ public final class PlayerNpcBuildMaterialUtil {
                     && !hasMaterialFor(serverLevel, playerNpc, block, origin)) {
                 return Optional.of(new GlassProductionNeed(requiredGlassFor(family)));
             }
-            return Optional.empty();
         }
         return Optional.empty();
+    }
+
+    private static Optional<StoneProductionNeed> findStoneProductionNeed(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        if (home.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Optional<PlayerNpcBuildLayout> layout = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc)
+                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
+        if (layout.isEmpty()) {
+            return Optional.empty();
+        }
+
+        BlockPos origin = home.get().origin();
+        for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
+            if (block.optional() || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
+                continue;
+            }
+
+            MaterialFamily family = familyForState(block.state());
+            if (family == MaterialFamily.STONE_MASONRY
+                    && !hasMaterialFor(serverLevel, playerNpc, block, origin)) {
+                return Optional.of(new StoneProductionNeed(1));
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static boolean hasStoneProductionFurnaceWork(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        boolean hasInventoryFuel = hasFuel(playerNpc);
+        BlockPos temporaryFurnace = getTemporaryFurnacePos(playerNpc);
+        if (temporaryFurnace != null && hasStoneProductionFurnaceWorkAt(serverLevel, temporaryFurnace, hasInventoryFuel)) {
+            return true;
+        }
+
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        if (home.isEmpty()) {
+            return false;
+        }
+
+        PlayerNpcHomeUtil.HomeArea homeArea = home.get();
+        for (BlockPos pos : BlockPos.betweenClosed(
+                homeArea.origin(),
+                homeArea.origin().offset(homeArea.width() - 1, 3, homeArea.depth() - 1))) {
+            if (hasStoneProductionFurnaceWorkAt(serverLevel, pos, hasInventoryFuel)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasStoneProductionFurnaceWorkAt(ServerLevel serverLevel, BlockPos pos, boolean hasInventoryFuel) {
+        if (!(serverLevel.getBlockEntity(pos) instanceof FurnaceBlockEntity furnace)) {
+            return false;
+        }
+
+        ItemStack input = furnace.getItem(0);
+        ItemStack fuel = furnace.getItem(1);
+        ItemStack output = furnace.getItem(2);
+        return familyForItem(output.getItem()) == MaterialFamily.STONE_MASONRY
+                || isStoneSmeltingInput(input) && (!fuel.isEmpty() || hasInventoryFuel);
+    }
+
+    private static BlockPos getTemporaryFurnacePos(PlayerNpcEntity playerNpc) {
+        if (!playerNpc.getPersistentData().contains(FurnaceAi.TEMP_FURNACE_X)) {
+            return null;
+        }
+
+        return new BlockPos(
+                playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_X),
+                playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Y),
+                playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Z)
+        );
     }
 
     private static int requiredGlassFor(MaterialFamily family) {
@@ -886,6 +1311,33 @@ public final class PlayerNpcBuildMaterialUtil {
 
     private static int countGlassSmeltingInput(PlayerNpcEntity playerNpc) {
         return countHeldAndInventoryItems(playerNpc, PlayerNpcBuildMaterialUtil::isGlassSmeltingInput);
+    }
+
+    private static int countStoneSmeltingInput(PlayerNpcEntity playerNpc) {
+        return countHeldAndInventoryItems(playerNpc, PlayerNpcBuildMaterialUtil::isStoneSmeltingInput);
+    }
+
+    private static boolean hasFuel(PlayerNpcEntity playerNpc) {
+        return InventoryUtils.hasItem(playerNpc, stack -> !stack.isEmpty() && AbstractFurnaceBlockEntity.isFuel(stack));
+    }
+
+    private static boolean canUseOrCreateHomeFurnace(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        if (home.isEmpty()) {
+            return InventoryUtils.hasItem(playerNpc, Items.FURNACE)
+                    || PlayerNpcCraftingUtil.canCraftFurnace(playerNpc.getInventory());
+        }
+
+        PlayerNpcHomeUtil.HomeArea homeArea = home.get();
+        for (BlockPos pos : BlockPos.betweenClosed(
+                homeArea.origin(),
+                homeArea.origin().offset(homeArea.width() - 1, 3, homeArea.depth() - 1))) {
+            if (serverLevel.getBlockState(pos).is(Blocks.FURNACE)) {
+                return true;
+            }
+        }
+        return InventoryUtils.hasItem(playerNpc, Items.FURNACE)
+                || PlayerNpcCraftingUtil.canCraftFurnace(playerNpc.getInventory());
     }
 
     private static int countFamilyItems(PlayerNpcEntity playerNpc, MaterialFamily family) {
@@ -993,10 +1445,30 @@ public final class PlayerNpcBuildMaterialUtil {
         SAND,
         PLANT,
         BED,
+        TORCH,
         OTHER
     }
 
     private record GlassProductionNeed(int requiredGlass) {
+    }
+
+    private record StoneProductionNeed(int requiredStone) {
+    }
+
+    private record MissingNeedCache(
+            int tick,
+            BlockPos homeOrigin,
+            int homeWidth,
+            int homeDepth,
+            String layoutId,
+            Optional<MissingBuildMaterialNeed> need) {
+        private boolean matches(int currentTick, PlayerNpcHomeUtil.HomeArea homeArea, String currentLayoutId) {
+            return currentTick - this.tick <= MISSING_NEED_CACHE_TICKS
+                    && this.homeOrigin.equals(homeArea.origin())
+                    && this.homeWidth == homeArea.width()
+                    && this.homeDepth == homeArea.depth()
+                    && this.layoutId.equals(currentLayoutId);
+        }
     }
 
     private enum MaterialFamily {
@@ -1021,7 +1493,7 @@ public final class PlayerNpcBuildMaterialUtil {
         STONE_OR_METAL_PRESSURE_PLATES("any stone or metal pressure plate"),
         GLASS_BLOCKS("any glass"),
         GLASS_PANES("any glass pane"),
-        FLOWERS("any flower"),
+        FLOWERS("any plant"),
         FLOWER_POTS("flower pot"),
         POTTED_FLOWERS("potted flower");
 

@@ -2,13 +2,12 @@ package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.InventoryUtils;
-import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
+import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.block.state.BlockState;
@@ -26,7 +25,6 @@ public final class PillarUpAi {
     }
 
     private static final int JUMP_WINDUP_TICKS = 2;
-    private static final int PLACE_DELAY_TICKS = 1;
     private static final int MAX_PLACE_WAIT_TICKS = 32;
     private static final int FORCE_PLACE_TICKS = 3;
     private static final double PLACE_CLEARANCE_Y = 0.65D;
@@ -37,6 +35,7 @@ public final class PillarUpAi {
 
     private final PlayerNpcEntity playerNpc;
     private final ToolAi toolAi;
+    private final PlacingBlockAi placingBlockAi;
     private final ItemLike blockItem;
     private final BlockState placeState;
     private BlockPos placePos;
@@ -44,12 +43,12 @@ public final class PillarUpAi {
     private BlockPos lastFailureBlockerPos;
     private String lastFailureDetail = "";
     private int jumpDelayTicks;
-    private int placeDelayTicks;
     private int placeWaitTicks;
 
     public PillarUpAi(PlayerNpcEntity playerNpc, ToolAi toolAi, ItemLike blockItem, BlockState placeState) {
         this.playerNpc = playerNpc;
         this.toolAi = toolAi;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.blockItem = blockItem;
         this.placeState = placeState;
     }
@@ -117,7 +116,7 @@ public final class PillarUpAi {
         this.lastFailureBlockerPos = null;
         this.lastFailureDetail = "";
         this.jumpDelayTicks = JUMP_WINDUP_TICKS;
-        this.placeDelayTicks = PLACE_DELAY_TICKS;
+        this.placingBlockAi.resetDelay();
         this.placeWaitTicks = 0;
         this.playerNpc.getNavigation().stop();
         this.lookDownAt(this.placePos);
@@ -146,8 +145,7 @@ public final class PillarUpAi {
             return TickResult.RUNNING;
         }
 
-        if (this.placeDelayTicks > 0) {
-            this.placeDelayTicks--;
+        if (this.placingBlockAi.tickDelay(PlacingBlockAi.PILLAR_PLACE_DELAY)) {
             return TickResult.RUNNING;
         }
 
@@ -179,14 +177,12 @@ public final class PillarUpAi {
             return this.fail("failed to consume pillar block", null);
         }
 
-        if (!serverLevel.setBlockAndUpdate(this.placePos, this.placeState)) {
+        if (!this.placingBlockAi.placeBlock(serverLevel, this.placePos, this.placeState)) {
             InventoryUtils.addItem(this.playerNpc.getInventory(), new ItemStack(this.blockItem));
             return this.fail("failed to set pillar block", this.placePos);
         }
 
         this.snapAbovePillarIfNeeded(this.placePos);
-        this.playerNpc.triggerMainHandUseAnimation();
-        PlayerNpcBlockSoundUtil.playPlaceSound(serverLevel, this.placePos, this.placeState, this.playerNpc);
         this.lastPlacedPos = this.placePos.immutable();
         this.clear();
         return TickResult.PLACED;
@@ -213,7 +209,7 @@ public final class PillarUpAi {
     public void clear() {
         this.placePos = null;
         this.jumpDelayTicks = 0;
-        this.placeDelayTicks = 0;
+        this.placingBlockAi.resetDelay();
         this.placeWaitTicks = 0;
     }
 
@@ -335,7 +331,7 @@ public final class PillarUpAi {
 
         AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
         return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
-                && serverLevel.noCollision(this.playerNpc, snappedBox);
+                && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox);
     }
 
     private boolean centerOnPillarBase(ServerLevel serverLevel, BlockPos pos) {
@@ -349,7 +345,7 @@ public final class PillarUpAi {
 
         AABB centeredBox = this.playerNpc.getBoundingBox().move(dx, 0.0D, dz);
         BlockPos blocker = this.findCollisionBlocker(serverLevel, centeredBox, CENTER_BLOCKER_PADDING, 0.12D);
-        if (blocker != null || !serverLevel.noCollision(this.playerNpc, centeredBox)) {
+        if (blocker != null || !PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, centeredBox)) {
             this.lastFailureBlockerPos = blocker == null ? null : blocker.immutable();
             this.lastFailureDetail = "pillar center blocked"
                     + (blocker == null ? "" : " by " + blockText(serverLevel.getBlockState(blocker)) + " @ " + posText(blocker));
@@ -437,14 +433,7 @@ public final class PillarUpAi {
     }
 
     private List<Entity> blockingEntitiesInBlock(ServerLevel serverLevel, BlockPos pos) {
-        return serverLevel.getEntities(
-                this.playerNpc,
-                new AABB(pos).inflate(0.05D),
-                entity -> entity.isAlive()
-                        && !(entity instanceof ItemEntity)
-                        && entity.getVehicle() != this.playerNpc
-                        && !entity.isSpectator()
-        );
+        return PlayerNpcCollisionUtil.blockingEntitiesInBox(serverLevel, this.playerNpc, new AABB(pos).inflate(0.05D));
     }
 
     private void lookDownAt(BlockPos pos) {

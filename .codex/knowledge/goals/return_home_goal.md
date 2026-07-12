@@ -24,6 +24,8 @@ Night/thunder shelter return bypasses that material-reserve gate. If a home/base
 
 In the building-interest bootstrap flow, the base is selected before stone gathering. Stone gathering and dig-down mining therefore use the saved home center as the known return destination. After the stone target is met, return/build behavior should route the NPC back to that base instead of choosing a build area from the mine location.
 
+If the NPC finishes its stone supply while below the saved home/base area, `ReturnHomeGoal` can bypass both the ordinary return cooldown and the material-reserve gate even when logs have dipped below the daily target. This uses the `returning from dig site` detail and lets `ReturnPositionAi` own pathing, safe drops, route clearing, and upward escape requests. Log gathering and log exploration should yield to this condition first; otherwise the NPC can sit in a dig pit and repeatedly request exploration climbs instead of returning to the known base.
+
 Movement is delegated to `ReturnPositionAi`, which wraps `PathNavigationAi`, `ClearBlockAi`, `BreakingBlockAi`, `ToolAi`, a bounded dirt `PillarUpAi` step, and upward escape requests. It can safely step down, clear local body/head/path blockers outside the protected home box, direct-pillar a short upward return path, and request broader pillar escape if the NPC is stuck underground while returning.
 
 When the final home-center path is `path=none`, `ReturnPositionAi` should call `PathNavigationAi.moveToWithLocalFallback(...)`. That helper scans nearby standable cells and path-checks a bounded number of local waypoints, preferring cells that are closer to home, under open sky, or upward enough to leave a pit/corner. This prevents return-home from standing still when the home is reachable only after first walking to a nearby exit.
@@ -33,6 +35,7 @@ Trace strings include:
 - `ai.player_npc.returning_home`
 - `returning to home shelter`
 - `returning to build site`
+- `returning from dig site`
 - `returning to home utility`
 - `local route @ x y z`
 - `clearing return path @ x y z`

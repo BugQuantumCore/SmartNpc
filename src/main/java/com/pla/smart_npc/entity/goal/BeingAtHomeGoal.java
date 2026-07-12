@@ -44,7 +44,7 @@ public class BeingAtHomeGoal extends Goal {
     private static final int MIN_HOME_ACTIVITY_TICKS = 20 * 4;
     private static final int RANDOM_HOME_ACTIVITY_TICKS = 20 * 7;
     private static final float WALK_SNEAK_CHANCE = 0.35F;
-    private static final int BUILD_WORK_CHECK_INTERVAL_TICKS = 20;
+    private static final int BUILD_WORK_CHECK_INTERVAL_TICKS = 20 * 3;
 
     private final PlayerNpcEntity playerNpc;
     private final SneakingAi sneakingAi;
@@ -90,9 +90,6 @@ public class BeingAtHomeGoal extends Goal {
         if (this.shouldHuntMonstersTonight(serverLevel)) {
             return false;
         }
-        if (this.hasReadyHomeWork(serverLevel, true)) {
-            return false;
-        }
         if (this.cooldownTicks > 0 && !shelterNow) {
             this.cooldownTicks--;
             return false;
@@ -111,6 +108,9 @@ public class BeingAtHomeGoal extends Goal {
         if (!this.sheltering
                 && (this.playerNpc.shouldPrioritizeLogGathering()
                 || this.playerNpc.shouldPrioritizeCobblestoneGathering())) {
+            return false;
+        }
+        if (this.hasReadyHomeWork(serverLevel, false)) {
             return false;
         }
         if (!this.sheltering && !this.isFinishedHouse(serverLevel, this.homeArea)) {
@@ -225,6 +225,7 @@ public class BeingAtHomeGoal extends Goal {
         this.cachedReadyBuildWork = false;
         this.walkSneaking = false;
         this.playerNpc.getNavigation().stop();
+        this.stopCustomHomeIdleAnimation(this.playerNpc);
         this.sneakingAi.stopSneaking();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }
@@ -271,7 +272,7 @@ public class BeingAtHomeGoal extends Goal {
         for (int x = 1; x < homeArea.width() - 1; x++) {
             for (int z = 1; z < homeArea.depth() - 1; z++) {
                 BlockPos candidate = PlayerNpcHomeUtil.interiorPos(homeArea, x, z);
-                if (this.canStandAt(serverLevel, candidate) && this.canReachOrAlreadyAt(serverLevel, candidate)) {
+                if (this.canStandAt(serverLevel, candidate) && this.canReachOrAlreadyAt(serverLevel, homeArea, candidate)) {
                     candidates.add(candidate.immutable());
                 }
             }
@@ -297,7 +298,7 @@ public class BeingAtHomeGoal extends Goal {
             for (int z = homeCenter.getZ() - radius; z <= homeCenter.getZ() + radius; z++) {
                 for (int y = homeCenter.getY() - 2; y <= homeCenter.getY() + 4; y++) {
                     BlockPos candidate = new BlockPos(x, y, z);
-                    if (this.canStandAt(serverLevel, candidate) && this.canReachOrAlreadyAt(serverLevel, candidate)) {
+                    if (this.canStandAt(serverLevel, candidate) && this.canReachOrAlreadyAt(serverLevel, homeArea, candidate)) {
                         candidates.add(candidate.immutable());
                     }
                 }
@@ -371,15 +372,20 @@ public class BeingAtHomeGoal extends Goal {
         if (candidates.contains(immutable)
                 || !PlayerNpcHomeUtil.isInside(homeArea, immutable)
                 || !this.canStandAt(serverLevel, immutable)
-                || !this.canReachOrAlreadyAt(serverLevel, immutable)) {
+                || !this.canReachOrAlreadyAt(serverLevel, homeArea, immutable)) {
             return;
         }
 
         candidates.add(immutable);
     }
 
-    private boolean canReachOrAlreadyAt(ServerLevel serverLevel, BlockPos pos) {
+    private boolean canReachOrAlreadyAt(ServerLevel serverLevel, PlayerNpcHomeUtil.HomeArea homeArea, BlockPos pos) {
         if (this.distanceToPosSqr(pos) <= AFK_REACHED_DISTANCE_SQR) {
+            return true;
+        }
+        if (homeArea != null
+                && PlayerNpcHomeUtil.isInside(homeArea, this.playerNpc.blockPosition())
+                && PlayerNpcHomeUtil.isInside(homeArea, pos)) {
             return true;
         }
 
@@ -471,7 +477,7 @@ public class BeingAtHomeGoal extends Goal {
 
         this.buildWorkCheckCooldown = BUILD_WORK_CHECK_INTERVAL_TICKS + this.playerNpc.getRandom().nextInt(6);
         this.cachedReadyBuildWork = TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
-                || BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
+                || BuildHouseGoal.hasContinuableHomeBuildWork(this.playerNpc, serverLevel);
         return this.cachedReadyBuildWork;
     }
 
@@ -496,10 +502,15 @@ public class BeingAtHomeGoal extends Goal {
     }
 
     private void openNearbyHomeDoor(ServerLevel serverLevel, PlayerNpcHomeUtil.HomeArea homeArea, double maxDistanceSqr) {
-        for (BlockPos pos : BlockPos.betweenClosed(
-                homeArea.origin(),
-                homeArea.origin().offset(homeArea.width() - 1, 6, homeArea.depth() - 1))) {
+        int radius = Math.max(1, (int) Math.ceil(Math.sqrt(maxDistanceSqr)));
+        BlockPos center = this.playerNpc.blockPosition();
+        BlockPos from = center.offset(-radius, -2, -radius);
+        BlockPos to = center.offset(radius, 3, radius);
+        for (BlockPos pos : BlockPos.betweenClosed(from, to)) {
             BlockPos immutable = pos.immutable();
+            if (!PlayerNpcHomeUtil.isInside(homeArea, immutable)) {
+                continue;
+            }
             if (this.distanceToPosSqr(immutable) > maxDistanceSqr) {
                 continue;
             }
@@ -531,7 +542,11 @@ public class BeingAtHomeGoal extends Goal {
     }
 
     private void tickSneakAtHome() {
-        this.sneakingAi.setSneaking(true);
+        if (this.tickCustomHomeIdleAnimation(this.playerNpc)) {
+            this.sneakingAi.setSneaking(false);
+        } else {
+            this.sneakingAi.setSneaking(true);
+        }
         this.lookAroundAtHome();
     }
 
@@ -560,6 +575,7 @@ public class BeingAtHomeGoal extends Goal {
 
     private void switchHomeActivity() {
         ActivityMode previous = this.activityMode;
+        this.stopCustomHomeIdleAnimation(this.playerNpc);
         this.sneakingAi.setSneaking(false);
         this.walkSneaking = false;
         this.activityMode = this.randomActivityMode(previous);
@@ -608,6 +624,13 @@ public class BeingAtHomeGoal extends Goal {
                 30.0F
         );
         this.lookTicks = MIN_LOOK_AROUND_TICKS + this.playerNpc.getRandom().nextInt(RANDOM_LOOK_AROUND_TICKS + 1);
+    }
+
+    protected boolean tickCustomHomeIdleAnimation(PlayerNpcEntity playerNpc) {
+        return false;
+    }
+
+    protected void stopCustomHomeIdleAnimation(PlayerNpcEntity playerNpc) {
     }
 
     private enum ActivityMode {

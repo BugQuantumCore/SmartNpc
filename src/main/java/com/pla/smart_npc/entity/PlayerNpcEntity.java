@@ -192,6 +192,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int manageHomeCooldown = 0;
     private int fishingCooldown = 0;
     private int returnHomeCooldown = 0;
+    private int explorationReturnHomeRequestTicks = 0;
     private int sleepCooldown = 0;
     private int craftCooldown = 0;
     private int oreMiningCooldown = 0;
@@ -213,6 +214,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private long lastSupplyGoalRerollDay = -1L;
     private ItemStack mainWeaponItem = ItemStack.EMPTY;
     private ItemStack offWeaponItem = ItemStack.EMPTY;
+    private boolean suppressHeldItemCacheUpdate = false;
     private boolean healing = false;
     private boolean useBow = true;
     @Nullable
@@ -584,6 +586,25 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.returnHomeCooldown = normalizeCooldown(ticks);
     }
 
+    public boolean requestReturnHomeAfterExplorationFailure(String reason, int ticks) {
+        if (!(this.level() instanceof ServerLevel) || PlayerNpcHomeUtil.getHome(this).isEmpty()) {
+            return false;
+        }
+
+        this.explorationReturnHomeRequestTicks = normalizeCooldown(ticks);
+        this.returnHomeCooldown = 0;
+        this.setCurrentAiDetail(reason == null || reason.isBlank() ? "exploration failed; returning home" : reason);
+        return true;
+    }
+
+    public boolean hasExplorationReturnHomeRequest() {
+        return this.explorationReturnHomeRequestTicks > 0;
+    }
+
+    public void clearExplorationReturnHomeRequest() {
+        this.explorationReturnHomeRequestTicks = 0;
+    }
+
     public void setSleepCooldown(int ticks) {
         this.sleepCooldown = normalizeCooldown(ticks);
     }
@@ -641,6 +662,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.craftGearCooldown = 0;
         this.manageHomeCooldown = 0;
         this.returnHomeCooldown = 0;
+        this.explorationReturnHomeRequestTicks = 0;
         this.craftCooldown = 0;
         this.farmCooldown = 0;
         this.gatherCooldown = 0;
@@ -734,7 +756,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     private boolean hasHeldOrInventoryTool(Class<?> toolClass) {
         if (toolClass.isInstance(this.getMainHandItem().getItem())
-                || toolClass.isInstance(this.getOffhandItem().getItem())) {
+                || toolClass.isInstance(this.getOffhandItem().getItem())
+                || toolClass.isInstance(this.mainWeaponItem.getItem())
+                || toolClass.isInstance(this.offWeaponItem.getItem())) {
             return true;
         }
 
@@ -823,10 +847,107 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public void setMainWeaponItem(ItemStack mainWeaponItem) {
-        this.mainWeaponItem = mainWeaponItem.copy();
+        this.replaceMainWeaponItem(mainWeaponItem, true, ItemStack.EMPTY);
+    }
+
+    public void cacheMainWeaponItemForAi(ItemStack mainWeaponItem) {
+        this.replaceMainWeaponItem(mainWeaponItem, false, ItemStack.EMPTY);
+    }
+
+    public ItemStack takeMainWeaponItem(Predicate<ItemStack> matcher) {
+        if (this.mainWeaponItem.isEmpty() || matcher == null || !matcher.test(this.mainWeaponItem)) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack weapon = this.mainWeaponItem.copy();
+        this.mainWeaponItem = ItemStack.EMPTY;
+        return weapon;
+    }
+
+    public ItemStack takeOffWeaponItem(Predicate<ItemStack> matcher) {
+        if (this.offWeaponItem.isEmpty() || matcher == null || !matcher.test(this.offWeaponItem)) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack weapon = this.offWeaponItem.copy();
+        this.offWeaponItem = ItemStack.EMPTY;
+        return weapon;
+    }
+
+    public boolean hasCarriedTool(Class<?> toolClass) {
+        return this.hasHeldOrInventoryTool(toolClass);
+    }
+
+    public boolean promoteMainWeaponItem(ItemStack stack) {
+        if (!this.isCombatMainHandGear(stack)
+                || this.gearScore(stack) <= this.gearScore(this.mainWeaponItem) + 0.05D) {
+            return false;
+        }
+        this.setMainWeaponItem(stack);
+        return true;
+    }
+
+    private boolean promoteMainWeaponItemFromEquip(ItemStack newItem, ItemStack oldItem) {
+        if (!this.isCombatMainHandGear(newItem)
+                || this.gearScore(newItem) <= this.gearScore(this.mainWeaponItem) + 0.05D) {
+            return false;
+        }
+        this.replaceMainWeaponItem(newItem, true, oldItem);
+        return true;
+    }
+
+    public void setMainHandItemForAi(ItemStack stack) {
+        this.suppressHeldItemCacheUpdate = true;
+        try {
+            this.setItemInHand(InteractionHand.MAIN_HAND, stack == null ? ItemStack.EMPTY : stack.copy());
+        } finally {
+            this.suppressHeldItemCacheUpdate = false;
+        }
+    }
+
+    private void replaceMainWeaponItem(ItemStack stack, boolean moveOldToInventory, ItemStack oldEquippedItem) {
+        ItemStack next = stack == null ? ItemStack.EMPTY : stack.copy();
+        if (!next.isEmpty()) {
+            next.setCount(1);
+        }
+
+        if (ItemStack.isSameItemSameTags(this.mainWeaponItem, next)) {
+            this.mainWeaponItem = next;
+            if (!this.mainWeaponItem.isEmpty()) {
+                this.mainWeaponDisarmed = false;
+            }
+            return;
+        }
+
+        ItemStack previous = this.mainWeaponItem.copy();
+        this.mainWeaponItem = next;
 
         if (!this.mainWeaponItem.isEmpty()) {
             this.mainWeaponDisarmed = false;
+        }
+
+        if (!moveOldToInventory
+                || previous.isEmpty()
+                || (!oldEquippedItem.isEmpty() && ItemStack.isSameItemSameTags(previous, oldEquippedItem))
+                || this.isCurrentlyHeld(previous)
+                || ItemStack.isSameItemSameTags(previous, this.mainWeaponItem)) {
+            return;
+        }
+
+        this.addOrDropInventoryItem(previous);
+    }
+
+    private boolean isCurrentlyHeld(ItemStack stack) {
+        return !stack.isEmpty()
+                && (ItemStack.isSameItemSameTags(stack, this.getMainHandItem())
+                || ItemStack.isSameItemSameTags(stack, this.getOffhandItem()));
+    }
+
+    private void addOrDropInventoryItem(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return;
+        }
+        ItemStack copy = stack.copy();
+        if (!InventoryUtils.addItem(this.inventory, copy)) {
+            this.spawnAtLocation(copy);
         }
     }
 
@@ -852,7 +973,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     public ItemStack getOffWeaponItem() { return offWeaponItem; }
 
     public void setOffWeaponItem(ItemStack offWeaponItem) {
-        this.offWeaponItem = offWeaponItem;
+        this.offWeaponItem = offWeaponItem == null ? ItemStack.EMPTY : offWeaponItem.copy();
     }
 
     public void setUseBow(boolean useBow) {
@@ -912,6 +1033,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         tag.putInt("ManageHomeCooldown", this.manageHomeCooldown);
         tag.putInt("FishingCooldown", this.fishingCooldown);
         tag.putInt("ReturnHomeCooldown", this.returnHomeCooldown);
+        tag.putInt("ExplorationReturnHomeRequestTicks", this.explorationReturnHomeRequestTicks);
         tag.putInt("SleepCooldown", this.sleepCooldown);
         tag.putInt("CraftCooldown", this.craftCooldown);
         tag.putInt("OreMiningCooldown", this.oreMiningCooldown);
@@ -980,6 +1102,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.manageHomeCooldown = tag.getInt("ManageHomeCooldown");
         this.fishingCooldown = tag.getInt("FishingCooldown");
         this.returnHomeCooldown = tag.getInt("ReturnHomeCooldown");
+        this.explorationReturnHomeRequestTicks = tag.getInt("ExplorationReturnHomeRequestTicks");
         this.sleepCooldown = tag.getInt("SleepCooldown");
         this.craftCooldown = tag.getInt("CraftCooldown");
         this.oreMiningCooldown = tag.getInt("OreMiningCooldown");
@@ -1157,49 +1280,81 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     protected void registerGoals() {
         this.goalSelector.addGoal(0, new FloatGoal(this));
+        this.registerVanillaCombatReplacementGoals();
         this.goalSelector.addGoal(1, new EscapeHoleWithBlockGoal(this));
+        this.goalSelector.addGoal(1, new CallForHelpGoal(this));
         this.goalSelector.addGoal(2, this.gated(new SleepAtHomeGoal(this), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(3, new PickupNearbyItemGoal(this, 1.1D));
+        this.goalSelector.addGoal(2, this.gated(new ScaredHideGoal(this), PlayerNpcInterest.CAUTIOUS));
+        this.goalSelector.addGoal(3, new PickupNearbyItemGoal(this, 1.0D));
+        this.goalSelector.addGoal(3, new RecoverWeaponInCombatGoal(this, 1.0D, 8.0D));
+        this.goalSelector.addGoal(3, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS));
         this.goalSelector.addGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, this.gated(new TerraformBuildSiteGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
+        this.goalSelector.addGoal(5, new MeleeAttackGoal(this, 1.0D, true));
+        this.goalSelector.addGoal(5, new BuildHouseGoal(this));
+        this.goalSelector.addGoal(5, new CookFoodGoal(this));
+        this.goalSelector.addGoal(5, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
+        this.goalSelector.addGoal(5, this.gated(new CraftCropFoodGoal(this), PlayerNpcInterest.FARMING));
+        this.goalSelector.addGoal(5, this.gated(new PlayerNpcFishingGoal(this), PlayerNpcInterest.FISHING));
+        this.goalSelector.addGoal(5, this.gated(new LootNearbyChestGoal(this, 1.0D), PlayerNpcInterest.LOOTING));
+        this.goalSelector.addGoal(5, this.gated(new JukeboxDanceGoal(this, 1.0D), PlayerNpcInterest.TROLL_HIT));
+        this.goalSelector.addGoal(5, this.gated(new TrollHitGoal(this), PlayerNpcInterest.TROLL_HIT));
+        this.goalSelector.addGoal(5, this.gated(new IronGolemTrollGoal(this), PlayerNpcInterest.TROLL_HIT));
         this.goalSelector.addGoal(5, this.gated(new ManageHomeBaseGoal(this), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(5, new CheckHomeSuppliesGoal(this));
+        this.goalSelector.addGoal(5, this.gated(new CheckHomeSuppliesGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new CraftBasicGearGoal(this));
-        this.goalSelector.addGoal(6, new GatherLogsGoal(this, 1.0D));
-        this.goalSelector.addGoal(6, new GatherStoneGoal(this, 1.0D));
-        this.goalSelector.addGoal(6, new DigDownForStoneGoal(this, 1.0D));
+        this.goalSelector.addGoal(5, new BreakTargetObstructionGoal(this));
+        this.goalSelector.addGoal(5, this.gated(new CraftIronGearGoal(this), PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
+        this.goalSelector.addGoal(5, this.gated(new CraftShieldGoal(this), PlayerNpcInterest.CAUTIOUS, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
+        this.goalSelector.addGoal(5, this.gated(new UtilityCraftingGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.FISHING, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
+        this.goalSelector.addGoal(5, this.gated(new BoatStockpileGoal(this), PlayerNpcInterest.FISHING, PlayerNpcInterest.EXPLORING));
+        this.goalSelector.addGoal(5, this.gated(new PlantSaplingGoal(this), PlayerNpcInterest.FARMING));
+        this.goalSelector.addGoal(5, this.gated(new UseSpyglassGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.CAUTIOUS));
+        this.goalSelector.addGoal(6, this.gated(new GatherLogsGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.EXPLORING));
+        this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, new GatherMissingBuildMaterialGoal(this, 1.0D));
-        this.goalSelector.addGoal(7, new ExploreAroundGoal(
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for logs",
-                level -> this.shouldPrioritizeLogGathering() && !this.shouldStayHomeForWeather(level),
+                level -> (this.shouldPrioritizeLogGathering()
+                        || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(level, this))
+                        && this.getGatherCooldown() <= 0
+                        && !GatherStoneGoal.isStoneSupplyPhaseActive(this, level)
+                        && !this.shouldStayHomeForWeather(level)
+                        && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> GatherLogsGoal.hasNearbyLogTarget(this, level)
-        ));
-        this.goalSelector.addGoal(7, new ExploreAroundGoal(
+        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.EXPLORING));
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for stone",
-                level -> !this.shouldPrioritizeLogGathering()
-                        && this.shouldPrioritizeCobblestoneGathering()
-                        && PlayerNpcHomeUtil.getHome(this).isPresent()
-                        && !TerraformBuildSiteGoal.hasActionablePrepWork(this, level)
+                level -> GatherStoneGoal.isStoneSupplyPhaseActive(this, level)
+                        && this.getGatherCooldown() <= 0
                         && !this.shouldStayHomeForWeather(level),
-                level -> GatherStoneGoal.hasNearbyStoneTarget(this, level)
-        ));
-        this.goalSelector.addGoal(7, new ExploreAroundGoal(
+                level -> GatherStoneGoal.hasNearbyStoneTarget(this, level),
+                false
+        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for build materials",
                 level -> GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(this, level)
-                        && !this.shouldStayHomeForWeather(level),
+                        && this.getGatherCooldown() <= 0
+                        && !this.shouldStayHomeForWeather(level)
+                        && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> GatherMissingBuildMaterialGoal.hasNearbyGatherTarget(this, level)
-        ));
-        this.goalSelector.addGoal(8, new BeingAtHomeGoal(this, 1.0D));
+        ), PlayerNpcInterest.BUILDING));
+        this.goalSelector.addGoal(8, this.gated(new BeingAtHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
         ((GroundPathNavigation) this.getNavigation()).setCanOpenDoors(true);
         ((GroundPathNavigation) this.getNavigation()).setCanFloat(true);
+        this.targetSelector.addGoal(1, new HurtByTargetGoal(this));
+        this.targetSelector.addGoal(2, new RetargetCloserThreatGoal(this));
+        this.targetSelector.addGoal(3, new RespondToNpcAlertGoal(this));
+        this.targetSelector.addGoal(4, this.gated(new PlayerNpcSmartTargetGoal(this), PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
     }
 
     private Goal gated(Goal goal, PlayerNpcInterest... interests) {
@@ -1220,10 +1375,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(2, new WaterEnderPearlEscapeGoal(this));
         this.goalSelector.addGoal(2, new RandomCombatJumpGoal(this));
         this.goalSelector.addGoal(2, new PlayerNpcRangedBowAttackGoal(this, 1.0D, 20, 18.0F));
-        this.goalSelector.addGoal(3, new CombatFishingRodGoal(this));
+        this.goalSelector.addGoal(3, this.gated(new CombatFishingRodGoal(this), PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(3, new ThrowEnderPearlGoal(this));
-        this.goalSelector.addGoal(4, new UseFlintAndSteelGoal(this));
-        this.goalSelector.addGoal(4, new UseLavaBucketGoal(this));
+        this.goalSelector.addGoal(4, this.gated(new BoatTrapMonsterGoal(this), PlayerNpcInterest.HUNT_MONSTERS));
+        this.goalSelector.addGoal(4, this.gated(new UseFlintAndSteelGoal(this), PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS, PlayerNpcInterest.TROLL_HIT));
+        this.goalSelector.addGoal(4, this.gated(new UseLavaBucketGoal(this), PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS, PlayerNpcInterest.TROLL_HIT));
         this.goalSelector.addGoal(8, new FillWaterBucketGoal(this, 1.0D));
     }
 
@@ -1277,11 +1433,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (hurt && !this.level().isClientSide() && damageSource.getEntity() instanceof LivingEntity attacker
                 && attacker.isAlive()
                 && attacker != this
-                && !this.isAlliedTo(attacker)) {
-            if (!this.hasInterest(PlayerNpcInterest.HUNT_PLAYERS)
-                    && this.isPassiveBuildingBlockedByPlayerTarget(attacker)) {
-                return true;
-            }
+                && !this.isAlliedTo(attacker)
+                && !attacker.isAlliedTo(this)) {
             this.setTarget(attacker);
             this.lastCombatProgressTick = this.tickCount;
             this.staleTargetTicks = 0;
@@ -1511,6 +1664,16 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || stack.getItem() instanceof AxeItem
                 || stack.getItem() instanceof TridentItem
                 || stack.getItem() instanceof DiggerItem
+                || stack.getItem() instanceof BowItem
+                || stack.getItem() instanceof CrossbowItem
+                || stack.getItem() instanceof ProjectileWeaponItem);
+    }
+
+    private boolean isCombatMainHandGear(ItemStack stack) {
+        return !stack.isEmpty()
+                && (stack.getItem() instanceof SwordItem
+                || stack.getItem() instanceof AxeItem
+                || stack.getItem() instanceof TridentItem
                 || stack.getItem() instanceof BowItem
                 || stack.getItem() instanceof CrossbowItem
                 || stack.getItem() instanceof ProjectileWeaponItem);
@@ -1815,6 +1978,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.manageHomeCooldown = tickCooldown(this.manageHomeCooldown);
         this.fishingCooldown = tickCooldown(this.fishingCooldown);
         this.returnHomeCooldown = tickCooldown(this.returnHomeCooldown);
+        this.explorationReturnHomeRequestTicks = tickCooldown(this.explorationReturnHomeRequestTicks);
         this.sleepCooldown = tickCooldown(this.sleepCooldown);
         this.craftCooldown = tickCooldown(this.craftCooldown);
         this.oreMiningCooldown = tickCooldown(this.oreMiningCooldown);
@@ -1837,6 +2001,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.playingIdleCooldown = tickCooldown(this.playingIdleCooldown);
         this.upwardEscapeRequestTicks = tickCooldown(this.upwardEscapeRequestTicks);
         if (this.upwardEscapeRequestTicks <= 0) {
+            if (this.upwardEscapeTarget != null
+                    && AI_IDLE.equals(this.getCurrentAiState())
+                    && this.getCurrentAiDetail().startsWith("exploration climb request")) {
+                this.setCurrentAiDetail("");
+            }
             this.upwardEscapeTarget = null;
             this.upwardEscapeMaxPillarBlocks = 0;
         }
@@ -1983,7 +2152,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         if (currentTarget != null
                 && !this.hasInterest(PlayerNpcInterest.HUNT_PLAYERS)
-                && this.isPassiveBuildingBlockedByPlayerTarget(currentTarget)) {
+                && this.isPassiveBuildingBlockedByPlayerTarget(currentTarget)
+                && !this.isRecentRetaliationTarget(currentTarget)) {
             this.setTarget(null);
             this.staleTargetTicks = 0;
             this.staleTargetEntityId = -1;
@@ -2038,6 +2208,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return target instanceof net.minecraft.world.entity.player.Player
                 || target instanceof PlayerNpcEntity
                 || this.isSmartNpcCompatPlayerLikeTarget(target);
+    }
+
+    private boolean isRecentRetaliationTarget(LivingEntity target) {
+        return target != null && target == this.getLastHurtByMob();
     }
 
     private boolean isCombatAiState(String state) {
@@ -2229,15 +2403,13 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public void onEquipItem(@NotNull EquipmentSlot pSlot, @NotNull ItemStack pOldItem, @NotNull ItemStack pNewItem) {
-        if (pSlot == EquipmentSlot.MAINHAND &&
-                (pNewItem.getItem() instanceof SwordItem || pNewItem.getItem() instanceof AxeItem)) {
-            this.mainWeaponItem = pNewItem.copy();
-            this.mainWeaponDisarmed = false;
+        if (pSlot == EquipmentSlot.MAINHAND && !this.suppressHeldItemCacheUpdate) {
+            this.promoteMainWeaponItemFromEquip(pNewItem, pOldItem);
         }
 
         if (pSlot == EquipmentSlot.OFFHAND &&
                 (pNewItem.getItem() instanceof SwordItem || pNewItem.getItem() instanceof AxeItem || pNewItem.getItem() instanceof ShieldItem)) {
-            this.offWeaponItem = pNewItem.copy();
+            this.setOffWeaponItem(pNewItem);
         }
 
         super.onEquipItem(pSlot, pOldItem, pNewItem);

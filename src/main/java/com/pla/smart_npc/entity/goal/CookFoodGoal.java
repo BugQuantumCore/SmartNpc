@@ -1,8 +1,12 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.FurnaceAi;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
-import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
+import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
@@ -11,13 +15,11 @@ import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.item.PickaxeItem;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
@@ -44,15 +46,21 @@ public class CookFoodGoal extends Goal {
     private static final double RECOVER_FURNACE_MOVE_SPEED = 1.0D;
     private static final int ACTION_DELAY_TICKS = 12;
     private static final int MAX_RECOVER_FURNACE_TICKS = 20 * 10;
+    private static final int MAX_COOK_TICKS = 20 * 30;
 
     private final PlayerNpcEntity playerNpc;
+    private final ToolAi toolAi;
+    private final BreakingBlockAi breakingBlockAi;
+    private final FurnaceAi furnaceAi;
+    private final PlacingBlockAi placingBlockAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private PlayerNpcHomeUtil.HomeArea homeArea;
     private BlockPos furnacePos;
     private BlockPos furnaceStandPos;
     private Mode mode = Mode.INTERACT;
     private ItemStack previousMainHand = ItemStack.EMPTY;
     private int actionDelayTicks;
-    private int recoveryBreakTicks;
+    private int cookTicks;
     private boolean finished;
     private boolean acted;
     private boolean temporaryFurnace;
@@ -61,6 +69,10 @@ public class CookFoodGoal extends Goal {
 
     public CookFoodGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.toolAi = new ToolAi(playerNpc);
+        this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
+        this.furnaceAi = new FurnaceAi(playerNpc);
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -75,6 +87,12 @@ public class CookFoodGoal extends Goal {
                 || this.playerNpc.getCookFoodCooldown() > 0) {
             return false;
         }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
+        if (this.shouldDeferForPrimaryStoneSupply(serverLevel)) {
+            return false;
+        }
 
         this.resetPlan();
         this.homeArea = PlayerNpcHomeUtil.getHome(this.playerNpc).orElse(null);
@@ -83,10 +101,10 @@ public class CookFoodGoal extends Goal {
         if (temporary != null) {
             if (serverLevel.getBlockState(temporary).is(Blocks.FURNACE)
                     && serverLevel.getBlockEntity(temporary) instanceof FurnaceBlockEntity furnace) {
-                if (this.hasFurnaceWork(furnace)) {
+                if (this.furnaceAi.hasFurnaceWork(serverLevel, furnace)) {
                     return this.planInteraction(serverLevel, temporary, true);
                 }
-                if (this.isFurnaceEmpty(furnace)) {
+                if (this.furnaceAi.isFurnaceEmpty(furnace)) {
                     return this.planRecovery(serverLevel, temporary);
                 }
                 return false;
@@ -97,22 +115,25 @@ public class CookFoodGoal extends Goal {
         if (this.homeArea != null && this.isNearHome()) {
             BlockPos homeFurnace = this.findHomeFurnace(serverLevel);
             if (homeFurnace != null && serverLevel.getBlockEntity(homeFurnace) instanceof FurnaceBlockEntity furnace) {
-                return this.hasFurnaceWork(furnace) && this.planInteraction(serverLevel, homeFurnace, false);
+                if (this.furnaceAi.hasFurnaceWork(serverLevel, furnace) && this.planInteraction(serverLevel, homeFurnace, false)) {
+                    return true;
+                }
             }
 
             BlockPos placement = this.findHomeFurnacePlacement(serverLevel);
-            if (placement != null && this.shouldPlaceFurnaceForWork()) {
+            if (placement != null && this.furnaceAi.shouldPlaceFurnaceForWork(serverLevel)) {
                 return this.planPlacement(serverLevel, placement, Mode.PLACE_HOME, false);
             }
-            return false;
         }
 
         BlockPos nearbyFurnace = this.findNearbyFurnace(serverLevel);
         if (nearbyFurnace != null && serverLevel.getBlockEntity(nearbyFurnace) instanceof FurnaceBlockEntity furnace) {
-            return this.hasFurnaceWork(furnace) && this.planInteraction(serverLevel, nearbyFurnace, false);
+            if (this.furnaceAi.hasFurnaceWork(serverLevel, furnace) && this.planInteraction(serverLevel, nearbyFurnace, false)) {
+                return true;
+            }
         }
 
-        if (!this.shouldPlaceFurnaceForWork()) {
+        if (!this.furnaceAi.shouldPlaceFurnaceForWork(serverLevel)) {
             return false;
         }
 
@@ -120,10 +141,17 @@ public class CookFoodGoal extends Goal {
         return placement != null && this.planPlacement(serverLevel, placement, Mode.PLACE_TEMPORARY, true);
     }
 
+    private boolean shouldDeferForPrimaryStoneSupply(ServerLevel serverLevel) {
+        return !serverLevel.isNight()
+                && !serverLevel.isThundering()
+                && GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel);
+    }
+
     @Override
     public boolean canContinueToUse() {
         return !this.finished
                 && this.furnacePos != null
+                && this.cookTicks < MAX_COOK_TICKS
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
                 && !this.playerNpc.isPassenger()
@@ -134,13 +162,13 @@ public class CookFoodGoal extends Goal {
     @Override
     public void start() {
         this.actionDelayTicks = 0;
-        this.recoveryBreakTicks = 0;
+        this.cookTicks = 0;
         this.finished = false;
         this.acted = false;
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
+        this.playerNpc.getNavigation().stop();
         this.playerNpc.setCurrentAiState("ai.player_npc.cooking");
-        if (this.mode == Mode.RECOVER_TEMPORARY) {
-            this.equipPickaxeOrEmptyForRecovery();
-        }
         this.updateDetail(null);
     }
 
@@ -151,6 +179,7 @@ public class CookFoodGoal extends Goal {
             return;
         }
 
+        this.cookTicks++;
         if (this.mode == Mode.RECOVER_TEMPORARY) {
             this.tickRecoverTemporaryFurnace(serverLevel);
             return;
@@ -175,7 +204,9 @@ public class CookFoodGoal extends Goal {
         this.lookAtFurnace();
         if (!this.isAtFurnaceStand()) {
             this.playerNpc.setCurrentAiDetail("walking to furnace");
-            this.moveToFurnaceStand();
+            if (!this.moveToFurnaceStand()) {
+                this.finished = true;
+            }
             return;
         }
 
@@ -186,17 +217,16 @@ public class CookFoodGoal extends Goal {
         }
         this.actionDelayTicks = 0;
 
-        boolean moved = this.takeCookedOutput(serverLevel, furnace) || this.fillFurnace(serverLevel, furnace);
+        boolean moved = this.furnaceAi.takeOutput(serverLevel, this.furnacePos, furnace)
+                || this.furnaceAi.fillFurnace(serverLevel, this.furnacePos, furnace);
         this.acted |= moved;
-        if (moved) {
-            this.playerNpc.triggerMainHandUseAnimation();
-        }
         this.finished = true;
     }
 
     @Override
     public void stop() {
-        this.playerNpc.clearBlockBreakProgress(this.furnacePos);
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
         this.restorePreviousMainHand();
         int cooldown = this.acted
                 ? COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 20)
@@ -248,7 +278,9 @@ public class CookFoodGoal extends Goal {
         this.lookAtFurnace();
         if (!this.isAtFurnaceStand()) {
             this.playerNpc.setCurrentAiDetail("walking to furnace placement");
-            this.moveToFurnaceStand();
+            if (!this.moveToFurnaceStand()) {
+                this.finished = true;
+            }
             return;
         }
 
@@ -272,12 +304,14 @@ public class CookFoodGoal extends Goal {
         }
 
         this.showPlacementItem(furnace);
-        serverLevel.setBlockAndUpdate(this.furnacePos, Blocks.FURNACE.defaultBlockState());
+        if (!this.placingBlockAi.placeBlock(serverLevel, this.furnacePos, Blocks.FURNACE.defaultBlockState())) {
+            this.returnStack(furnace);
+            this.finished = true;
+            return;
+        }
         if (this.temporaryFurnace) {
             this.saveTemporaryFurnace(this.furnacePos);
         }
-        serverLevel.playSound(null, this.furnacePos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
-        this.playerNpc.triggerMainHandUseAnimation();
         this.acted = true;
         this.mode = Mode.INTERACT;
         this.actionDelayTicks = 0;
@@ -290,26 +324,29 @@ public class CookFoodGoal extends Goal {
     private void tickRecoverTemporaryFurnace(ServerLevel serverLevel) {
         BlockState state = serverLevel.getBlockState(this.furnacePos);
         if (!state.is(Blocks.FURNACE)) {
-            this.playerNpc.clearBlockBreakProgress(this.furnacePos);
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
             this.clearTemporaryFurnace();
             this.acted = true;
             this.finished = true;
             return;
         }
 
-        if (serverLevel.getBlockEntity(this.furnacePos) instanceof FurnaceBlockEntity furnace && !this.isFurnaceEmpty(furnace)) {
+        if (serverLevel.getBlockEntity(this.furnacePos) instanceof FurnaceBlockEntity furnace && !this.furnaceAi.isFurnaceEmpty(furnace)) {
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
             this.finished = true;
             return;
         }
 
-        this.equipPickaxeOrEmptyForRecovery();
         this.lookAtFurnace();
         if (this.playerNpc.distanceToSqr(
                 this.furnacePos.getX() + 0.5D,
                 this.furnacePos.getY() + 0.5D,
                 this.furnacePos.getZ() + 0.5D
         ) > RECOVER_FURNACE_BREAK_DISTANCE_SQR) {
-            this.playerNpc.clearBlockBreakProgress(this.furnacePos);
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
             this.playerNpc.getNavigation().moveTo(
                     this.furnacePos.getX() + 0.5D,
                     this.furnacePos.getY(),
@@ -321,31 +358,33 @@ public class CookFoodGoal extends Goal {
         }
 
         this.playerNpc.getNavigation().stop();
-        if (this.recoveryBreakTicks % 8 == 0) {
-            this.playerNpc.triggerMainHandAttackAnimation();
-            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, this.furnacePos, state, this.playerNpc);
-        }
-
-        this.recoveryBreakTicks++;
-        int requiredBreakTicks = this.getRequiredBreakTicks(serverLevel, this.furnacePos, state);
-        this.playerNpc.showBlockBreakProgress(this.furnacePos, this.recoveryBreakTicks, requiredBreakTicks);
-        this.updateDetail(serverLevel);
-        if (this.recoveryBreakTicks < requiredBreakTicks) {
+        this.toolAi.equipBestToolFor(state);
+        boolean dropRecoveredBlock = PlayerNpcBlockBreakUtil.shouldDropResources(state, this.playerNpc.getMainHandItem());
+        BreakingBlockAi.TickResult result = this.breakingBlockAi.tick(
+                serverLevel,
+                this.furnacePos,
+                candidate -> candidate.is(Blocks.FURNACE),
+                MAX_RECOVER_FURNACE_TICKS,
+                "recovering furnace",
+                true
+        );
+        if (result == BreakingBlockAi.TickResult.RUNNING) {
             return;
         }
 
         BlockPos recoveredPos = this.furnacePos;
-        if (!serverLevel.destroyBlock(recoveredPos, false, this.playerNpc)) {
-            this.playerNpc.clearBlockBreakProgress(recoveredPos);
+        if (result == BreakingBlockAi.TickResult.DONE) {
+            if (!dropRecoveredBlock) {
+                this.returnStack(new ItemStack(Items.FURNACE));
+            }
             this.clearTemporaryFurnace();
+            this.acted = true;
             this.finished = true;
             return;
         }
+
         this.playerNpc.clearBlockBreakProgress(recoveredPos);
-        this.playerNpc.hurtMainHandItem(1);
-        this.returnStack(new ItemStack(Items.FURNACE));
         this.clearTemporaryFurnace();
-        this.acted = true;
         this.finished = true;
     }
 
@@ -462,6 +501,19 @@ public class CookFoodGoal extends Goal {
             candidates.add(center.relative(direction));
         }
         candidates.add(center.above());
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -3; dx <= 3; dx++) {
+                for (int dz = -3; dz <= 3; dz++) {
+                    if (Math.abs(dx) + Math.abs(dz) <= 1) {
+                        continue;
+                    }
+                    BlockPos candidate = center.offset(dx, dy, dz);
+                    if (!candidate.equals(center) && !candidates.contains(candidate)) {
+                        candidates.add(candidate);
+                    }
+                }
+            }
+        }
         candidates.sort(Comparator.comparingDouble(center::distSqr));
 
         for (BlockPos candidate : candidates) {
@@ -689,16 +741,6 @@ public class CookFoodGoal extends Goal {
         this.setTemporaryMainHand(stack, false);
     }
 
-    private void equipPickaxeOrEmptyForRecovery() {
-        if (this.playerNpc.getMainHandItem().getItem() instanceof PickaxeItem) {
-            return;
-        }
-
-        ItemStack pickaxe = this.playerNpc.consumeInventoryItem(stack -> stack.getItem() instanceof PickaxeItem, 1)
-                .orElse(ItemStack.EMPTY);
-        this.setTemporaryMainHand(pickaxe, true);
-    }
-
     private void setTemporaryMainHand(ItemStack stack, boolean returnCurrentOnRestore) {
         ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
         if (!this.usingTemporaryTool) {
@@ -734,27 +776,7 @@ public class CookFoodGoal extends Goal {
         this.previousMainHand = ItemStack.EMPTY;
         this.usingTemporaryTool = false;
         this.returnTemporaryMainHandOnRestore = false;
-    }
-
-    private int getRequiredBreakTicks(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        float hardness = state.getDestroySpeed(serverLevel, pos);
-        if (hardness < 0.0F) {
-            return MAX_RECOVER_FURNACE_TICKS;
-        }
-
-        ItemStack heldStack = this.playerNpc.getMainHandItem();
-        float toolSpeed = heldStack.isEmpty() ? 1.0F : heldStack.getDestroySpeed(state);
-        if (toolSpeed <= 0.0F) {
-            toolSpeed = 1.0F;
-        }
-
-        boolean correctTool = !state.requiresCorrectToolForDrops() || heldStack.isCorrectToolForDrops(state);
-        float progressPerTick = toolSpeed / hardness / (correctTool ? 30.0F : 100.0F);
-        if (progressPerTick <= 0.0F) {
-            return MAX_RECOVER_FURNACE_TICKS;
-        }
-
-        return Math.min(MAX_RECOVER_FURNACE_TICKS, Math.max(1, (int) Math.ceil(1.0F / progressPerTick)));
+        this.cookTicks = 0;
     }
 
     private void updateDetail(ServerLevel serverLevel) {
@@ -764,8 +786,12 @@ public class CookFoodGoal extends Goal {
         }
 
         if (this.mode == Mode.RECOVER_TEMPORARY && serverLevel != null) {
-            BlockState state = serverLevel.getBlockState(this.furnacePos);
-            int requiredTicks = this.getRequiredBreakTicks(serverLevel, this.furnacePos, state);
+            String breakingDetail = this.breakingBlockAi.detail();
+            if (!breakingDetail.isBlank()) {
+                this.playerNpc.setCurrentAiDetail(breakingDetail);
+                return;
+            }
+
             boolean inBreakRange = this.playerNpc.distanceToSqr(
                     this.furnacePos.getX() + 0.5D,
                     this.furnacePos.getY() + 0.5D,
@@ -777,7 +803,7 @@ public class CookFoodGoal extends Goal {
                     this.furnacePos.getX(),
                     this.furnacePos.getY(),
                     this.furnacePos.getZ(),
-                    inBreakRange ? String.format(java.util.Locale.ROOT, "%d/%dt", Math.min(this.recoveryBreakTicks, requiredTicks), requiredTicks) : "walking"
+                    inBreakRange ? "recovering" : "walking"
             ));
             return;
         }
@@ -810,7 +836,6 @@ public class CookFoodGoal extends Goal {
         this.mode = Mode.INTERACT;
         this.previousMainHand = ItemStack.EMPTY;
         this.actionDelayTicks = 0;
-        this.recoveryBreakTicks = 0;
         this.finished = false;
         this.acted = false;
         this.temporaryFurnace = false;

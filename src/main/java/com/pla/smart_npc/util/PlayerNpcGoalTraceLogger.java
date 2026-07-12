@@ -1,8 +1,13 @@
 package com.pla.smart_npc.util;
 
 import com.pla.smart_npc.SmartNpc;
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.FurnaceAi;
+import com.pla.smart_npc.entity.ai.ResourceAi;
+import com.pla.smart_npc.entity.goal.BuildHouseGoal;
 import com.pla.smart_npc.entity.goal.InterestGatedGoal;
+import com.pla.smart_npc.entity.goal.TerraformBuildSiteGoal;
 import com.pla.smart_npc.network.PlayerNpcInspectatorModePacket;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -19,8 +24,10 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
 import java.util.Locale;
+import java.util.Map;
 import java.util.StringJoiner;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.stream.Collectors;
 
 @Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
@@ -31,7 +38,9 @@ public final class PlayerNpcGoalTraceLogger {
     private static final String LAST_LOG_TICK_KEY = "PlayerNpcGoalTraceLastLogTick";
     private static final String LAST_STATE_KEY = "PlayerNpcGoalTraceLastState";
     private static final int TRACE_INTERVAL_TICKS = 20;
+    private static final int BUILDING_TEXT_CACHE_TICKS = 40;
     private static final double MAX_NON_INSPECTATOR_TRACE_DISTANCE_SQR = 64.0D * 64.0D;
+    private static final Map<PlayerNpcEntity, BuildingTextCache> BUILDING_TEXT_CACHE = new WeakHashMap<>();
 
     private PlayerNpcGoalTraceLogger() {
     }
@@ -159,7 +168,7 @@ public final class PlayerNpcGoalTraceLogger {
         String detail = sanitize(playerNpc.getCurrentAiDetail());
         String result = traceResult(playerNpc, state);
         SmartNpc.LOGGER.info(
-                "Smart NPC goal trace: viewer={} tick={} npc={}#{} dim={} pos={} health={}/{} flags={} state={} stateChange={} detail=\"{}\" result={} target={} navigation={} cooldowns={} runningGoals={} runningTargetGoals={}",
+                "Smart NPC goal trace: viewer={} tick={} npc={}#{} dim={} pos={} health={}/{} flags={} state={} stateChange={} detail=\"{}\" result={} target={} navigation={} cooldowns={} building={} runningGoals={} runningTargetGoals={}",
                 viewer.getGameProfile().getName(),
                 serverTick,
                 sanitize(playerNpc.getDisplayName().getString()),
@@ -176,6 +185,7 @@ public final class PlayerNpcGoalTraceLogger {
                 targetText(playerNpc.getTarget()),
                 navigationText(playerNpc.getNavigation()),
                 cooldownsText(playerNpc),
+                buildingText(playerNpc),
                 runningGoalsText(playerNpc.goalSelector.getRunningGoals().collect(Collectors.toList())),
                 runningGoalsText(playerNpc.targetSelector.getRunningGoals().collect(Collectors.toList()))
         );
@@ -296,6 +306,54 @@ public final class PlayerNpcGoalTraceLogger {
         return text.isBlank() ? "none" : text;
     }
 
+    private static String buildingText(PlayerNpcEntity playerNpc) {
+        if (!(playerNpc.level() instanceof ServerLevel serverLevel)
+                || !playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
+            return "none";
+        }
+
+        int logs = ResourceAi.countLogs(playerNpc);
+        int stone = ResourceAi.countStone(playerNpc);
+        String homeKey = PlayerNpcHomeUtil.getHome(playerNpc)
+                .map(home -> home.origin() + ":" + home.width() + "x" + home.depth())
+                .orElse("none");
+        String layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc).orElse("");
+        BuildingTextCache cache = BUILDING_TEXT_CACHE.get(playerNpc);
+        if (cache != null && cache.matches(playerNpc.tickCount, homeKey, layoutId, logs, stone, playerNpc.getLogSupplyGoal(), playerNpc.getStoneSupplyGoal())) {
+            return cache.text();
+        }
+
+        String missing = PlayerNpcBuildMaterialUtil.findMissingBuildMaterialNeed(serverLevel, playerNpc)
+                .map(need -> need.kind().name().toLowerCase(Locale.ROOT)
+                        + ":"
+                        + sanitize(need.description()))
+                .orElse("none");
+        FurnaceAi furnaceAi = new FurnaceAi(playerNpc);
+        String text = "logs=" + logs + "/" + playerNpc.getLogSupplyGoal()
+                + ",stone=" + stone + "/" + playerNpc.getStoneSupplyGoal()
+                + ",prep=" + TerraformBuildSiteGoal.hasActionablePrepWork(playerNpc, serverLevel)
+                + ",prepNeedsShovel=" + TerraformBuildSiteGoal.needsShovelForPrep(playerNpc, serverLevel)
+                + ",build=" + BuildHouseGoal.hasReadyHomeBuildWork(playerNpc, serverLevel)
+                + ",needLogs=" + PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, playerNpc)
+                + ",needStone=" + PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, playerNpc)
+                + ",torchCharcoal=" + PlayerNpcBuildMaterialUtil.needsTorchCharcoalSmelting(serverLevel, playerNpc)
+                + ",furnaceInput=" + furnaceAi.hasInputForWork(serverLevel)
+                + ",furnaceFuel=" + furnaceAi.hasFuel()
+                + ",furnacePlace=" + furnaceAi.shouldPlaceFurnaceForWork(serverLevel)
+                + ",missing=" + missing;
+        BUILDING_TEXT_CACHE.put(playerNpc, new BuildingTextCache(
+                playerNpc.tickCount,
+                homeKey,
+                layoutId,
+                logs,
+                stone,
+                playerNpc.getLogSupplyGoal(),
+                playerNpc.getStoneSupplyGoal(),
+                text
+        ));
+        return text;
+    }
+
     private static void appendCooldown(StringJoiner joiner, String name, int ticks) {
         if (ticks > 0) {
             joiner.add(name + "=" + ticks);
@@ -373,5 +431,26 @@ public final class PlayerNpcGoalTraceLogger {
         data.remove(ENTITY_ID_KEY);
         data.remove(LAST_LOG_TICK_KEY);
         data.remove(LAST_STATE_KEY);
+    }
+
+    private record BuildingTextCache(
+            int tick,
+            String homeKey,
+            String layoutId,
+            int logs,
+            int stone,
+            int logGoal,
+            int stoneGoal,
+            String text
+    ) {
+        private boolean matches(int currentTick, String currentHomeKey, String currentLayoutId, int currentLogs, int currentStone, int currentLogGoal, int currentStoneGoal) {
+            return currentTick - this.tick <= BUILDING_TEXT_CACHE_TICKS
+                    && this.homeKey.equals(currentHomeKey)
+                    && this.layoutId.equals(currentLayoutId)
+                    && this.logs == currentLogs
+                    && this.stone == currentStone
+                    && this.logGoal == currentLogGoal
+                    && this.stoneGoal == currentStoneGoal;
+        }
     }
 }

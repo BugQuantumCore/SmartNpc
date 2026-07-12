@@ -6,6 +6,7 @@ import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.function.Predicate;
@@ -19,7 +20,8 @@ public final class BreakingBlockAi {
     }
 
     private static final int HIT_SOUND_INTERVAL_TICKS = 8;
-    private static final int ATTACK_ANIMATION_INTERVAL_TICKS = 6;
+    private static final int ATTACK_ANIMATION_INTERVAL_TICKS = 10;
+    private static final int MAX_REQUIRED_BREAK_TICKS = 20 * 30;
     private static final float MINING_SNEAK_CHANCE = 0.12F;
     private static final int MINING_SNEAK_MIN_TICKS = 20;
     private static final int MINING_SNEAK_RANDOM_TICKS = 35;
@@ -54,6 +56,17 @@ public final class BreakingBlockAi {
             int requiredTicks,
             String detail
     ) {
+        return this.tick(serverLevel, targetPos, targetPredicate, requiredTicks, detail, false);
+    }
+
+    public TickResult tick(
+            ServerLevel serverLevel,
+            BlockPos targetPos,
+            Predicate<BlockState> targetPredicate,
+            int requiredTicks,
+            String detail,
+            boolean allowBlockEntity
+    ) {
         if (targetPos == null || targetPredicate == null) {
             this.stop();
             return TickResult.FAILED;
@@ -68,13 +81,14 @@ public final class BreakingBlockAi {
             this.stop();
             return TickResult.DONE;
         }
-        if (!this.canBreak(serverLevel, targetPos, state)) {
+        if (!this.canBreak(serverLevel, targetPos, state, allowBlockEntity)) {
             this.stop();
             return TickResult.FAILED;
         }
 
-        this.toolDetail = this.toolAi.hasPreferredToolFor(state) ? "" : " without preferred tool";
         this.toolAi.equipBestToolFor(state);
+        this.toolDetail = this.toolAi.hasPreferredToolFor(state) ? "" : " without preferred tool";
+        this.requiredTicks = requiredBreakTicks(serverLevel, targetPos, state, this.playerNpc.getMainHandItem());
         this.playerNpc.getLookControl().setLookAt(
                 targetPos.getX() + 0.5D,
                 targetPos.getY() + 0.5D,
@@ -84,10 +98,7 @@ public final class BreakingBlockAi {
         );
         this.sneakingAi.tickHeldSneak();
         this.breakTicks++;
-        this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
-        if (this.breakTicks == 1 || this.breakTicks % ATTACK_ANIMATION_INTERVAL_TICKS == 0) {
-            this.playerNpc.triggerMainHandAttackAnimation();
-        }
+        this.tickMiningSwing();
         this.playerNpc.showBlockBreakProgress(targetPos, this.breakTicks, this.requiredTicks);
         if (this.breakTicks % HIT_SOUND_INTERVAL_TICKS == 0) {
             PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, targetPos, state, this.playerNpc);
@@ -104,6 +115,30 @@ public final class BreakingBlockAi {
         }
         this.stop();
         return destroyed ? TickResult.DONE : TickResult.FAILED;
+    }
+
+    public static int requiredBreakTicks(ServerLevel serverLevel, BlockPos pos, BlockState state, ItemStack heldStack) {
+        if (state == null) {
+            return MAX_REQUIRED_BREAK_TICKS;
+        }
+
+        float hardness = state.getDestroySpeed(serverLevel, pos);
+        if (hardness < 0.0F) {
+            return MAX_REQUIRED_BREAK_TICKS;
+        }
+
+        ItemStack stack = heldStack == null ? ItemStack.EMPTY : heldStack;
+        float toolSpeed = stack.isEmpty() ? 1.0F : stack.getDestroySpeed(state);
+        if (toolSpeed <= 0.0F) {
+            toolSpeed = 1.0F;
+        }
+
+        boolean correctTool = !state.requiresCorrectToolForDrops() || stack.isCorrectToolForDrops(state);
+        float progressPerTick = toolSpeed / hardness / (correctTool ? 30.0F : 100.0F);
+        if (progressPerTick <= 0.0F) {
+            return MAX_REQUIRED_BREAK_TICKS;
+        }
+        return Math.min(MAX_REQUIRED_BREAK_TICKS, Math.max(1, (int) Math.ceil(1.0F / progressPerTick)));
     }
 
     public void stop() {
@@ -142,12 +177,12 @@ public final class BreakingBlockAi {
         this.updateDetail();
     }
 
-    private boolean canBreak(ServerLevel serverLevel, BlockPos targetPos, BlockState state) {
+    private boolean canBreak(ServerLevel serverLevel, BlockPos targetPos, BlockState state, boolean allowBlockEntity) {
         return serverLevel.isInWorldBounds(targetPos)
                 && serverLevel.getWorldBorder().isWithinBounds(targetPos)
                 && state.getDestroySpeed(serverLevel, targetPos) >= 0.0F
                 && state.getFluidState().isEmpty()
-                && serverLevel.getBlockEntity(targetPos) == null;
+                && (allowBlockEntity || serverLevel.getBlockEntity(targetPos) == null);
     }
 
     private void updateDetail() {
@@ -155,5 +190,14 @@ public final class BreakingBlockAi {
         if (!currentDetail.isBlank()) {
             this.playerNpc.setCurrentAiDetail(currentDetail);
         }
+    }
+
+    private void tickMiningSwing() {
+        if (this.breakTicks != 1 && this.breakTicks % ATTACK_ANIMATION_INTERVAL_TICKS != 0) {
+            return;
+        }
+
+        this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+        this.playerNpc.triggerMainHandAttackAnimation();
     }
 }

@@ -9,6 +9,7 @@ import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.entity.ai.TreeAi;
 import com.pla.smart_npc.entity.ai.TreeAi.Tree;
+import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -65,6 +66,7 @@ public class GatherLogsGoal extends Goal {
     private final ClearBlockAi clearBlockAi;
     private final PathNavigationAi pathNavigationAi;
     private final PillarUpAi pillarUpAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private BlockPos targetPos;
     private BlockPos standPos;
     private BlockPos dirtTargetPos;
@@ -102,6 +104,9 @@ public class GatherLogsGoal extends Goal {
             if (canMineFromCurrentPosition(playerNpc, candidate)) {
                 return true;
             }
+            if (canPillarTowardFrom(playerNpc.blockPosition(), candidate)) {
+                return true;
+            }
             if (pathChecks++ >= MAX_LOG_PATH_CHECKS) {
                 break;
             }
@@ -120,9 +125,16 @@ public class GatherLogsGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.getGatherCooldown() > 0
-                || this.shouldStayHomeForWeather(serverLevel)
-                || !this.playerNpc.shouldPrioritizeLogGathering()
+                || this.playerNpc.getGatherCooldown() > 0) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
+        if (this.shouldStayHomeForWeather(serverLevel)
+                || ReturnHomeGoal.shouldSuppressExplorationForHome(this.playerNpc, serverLevel)
+                || GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
+                || !this.needsLogs(serverLevel)
                 || TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
                 || BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel)) {
             return false;
@@ -141,8 +153,9 @@ public class GatherLogsGoal extends Goal {
                 && this.playerNpc.getTarget() == null
                 && (this.descendingFromPillar
                 || this.playerNpc.level() instanceof ServerLevel serverLevel
-                && !this.shouldStayHomeForWeather(serverLevel))
-                && (this.descendingFromPillar || this.playerNpc.shouldPrioritizeLogGathering());
+                && !this.shouldStayHomeForWeather(serverLevel)
+                && !ReturnHomeGoal.shouldSuppressExplorationForHome(this.playerNpc, serverLevel)
+                && this.needsLogs(serverLevel));
     }
 
     @Override
@@ -599,11 +612,16 @@ public class GatherLogsGoal extends Goal {
             this.pillarTraceDetail = "pillar dirt collected; dirt=" + ResourceAi.countDirt(this.playerNpc);
             this.prepareLogQueue(serverLevel);
         } else if (result == BreakingBlockAi.TickResult.DONE
-                && !this.playerNpc.shouldPrioritizeLogGathering()
+                && !this.needsLogs(serverLevel)
                 && this.tryStartPillarDescent(serverLevel)) {
             return;
         }
         this.selectNextTarget(serverLevel);
+    }
+
+    private boolean needsLogs(ServerLevel serverLevel) {
+        return this.playerNpc.shouldPrioritizeLogGathering()
+                || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, this.playerNpc);
     }
 
     private boolean tryStartPillarDescent(ServerLevel serverLevel) {

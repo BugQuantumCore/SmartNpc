@@ -2,7 +2,9 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcGearUtil;
 import com.pla.smart_npc.util.PlayerNpcGearUtil.ToolKind;
@@ -89,6 +91,8 @@ public class CraftBasicGearGoal extends Goal {
     }
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private BlockPos craftingTablePos;
     private BlockPos craftingStandPos;
     private int actionDelayTicks;
@@ -97,6 +101,7 @@ public class CraftBasicGearGoal extends Goal {
 
     public CraftBasicGearGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -110,6 +115,9 @@ public class CraftBasicGearGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || "ai.player_npc.gathering_materials".equals(this.playerNpc.getCurrentAiState())
                 || "ai.player_npc.digging_down_for_stone".equals(this.playerNpc.getCurrentAiState())) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
@@ -258,12 +266,16 @@ public class CraftBasicGearGoal extends Goal {
             return;
         }
 
-        serverLevel.setBlockAndUpdate(this.craftingTablePos, Blocks.CRAFTING_TABLE.defaultBlockState());
+        if (!this.placingBlockAi.placeBlock(serverLevel, this.craftingTablePos, Blocks.CRAFTING_TABLE.defaultBlockState())) {
+            InventoryUtils.addItem(this.playerNpc, tableStack.isEmpty() ? new ItemStack(Items.CRAFTING_TABLE) : tableStack);
+            this.finished = true;
+            return;
+        }
         this.playerNpc.getPersistentData().putInt(TEMP_TABLE_X, this.craftingTablePos.getX());
         this.playerNpc.getPersistentData().putInt(TEMP_TABLE_Y, this.craftingTablePos.getY());
         this.playerNpc.getPersistentData().putInt(TEMP_TABLE_Z, this.craftingTablePos.getZ());
         this.craftingStandPos = this.findCraftingStand(serverLevel, this.craftingTablePos);
-        this.playCraftStep(serverLevel, "placed crafting table");
+        this.playerNpc.setCurrentAiDetail("placed crafting table");
     }
 
     private void tickCraftAtTable(ServerLevel serverLevel) {
@@ -357,6 +369,14 @@ public class CraftBasicGearGoal extends Goal {
     }
 
     private ToolRecipe nextToolRecipe() {
+        ToolRecipe stoneGatheringRecipe = this.nextStoneGatheringRecipe();
+        if (stoneGatheringRecipe != null) {
+            return stoneGatheringRecipe;
+        }
+        if (this.isActiveStoneGatheringPhase()) {
+            return null;
+        }
+
         ToolRecipe criticalRecipe = this.nextCriticalStarterRecipe();
         if (criticalRecipe != null) {
             return criticalRecipe;
@@ -387,6 +407,19 @@ public class CraftBasicGearGoal extends Goal {
         if (!this.hasTool(FishingRodItem.class)
                 && PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(Items.STRING)) >= 2) {
             return new ToolRecipe(Items.FISHING_ROD.getDefaultInstance(), null, ToolTier.NONE, 0, 3);
+        }
+        return null;
+    }
+
+    private ToolRecipe nextStoneGatheringRecipe() {
+        if (!this.isActiveStoneGatheringPhase()) {
+            return null;
+        }
+        if (!this.hasTool(PickaxeItem.class)) {
+            return this.bestCraftableToolRecipe(ToolKind.PICKAXE);
+        }
+        if (!this.hasTool(ShovelItem.class)) {
+            return this.bestCraftableToolRecipe(ToolKind.SHOVEL);
         }
         return null;
     }
@@ -462,10 +495,7 @@ public class CraftBasicGearGoal extends Goal {
     }
 
     private boolean hasTool(Class<?> toolClass) {
-        if (toolClass.isInstance(this.playerNpc.getMainHandItem().getItem())) {
-            return true;
-        }
-        return InventoryUtils.hasItem(this.playerNpc, stack -> toolClass.isInstance(stack.getItem()));
+        return this.playerNpc.hasCarriedTool(toolClass);
     }
 
     private int countStone() {
@@ -544,6 +574,11 @@ public class CraftBasicGearGoal extends Goal {
         return TerraformBuildSiteGoal.needsShovelForPrep(this.playerNpc, serverLevel);
     }
 
+    private boolean isActiveStoneGatheringPhase() {
+        return this.playerNpc.level() instanceof ServerLevel serverLevel
+                && GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel);
+    }
+
     private ToolTier bestToolTier(ToolKind kind) {
         ToolTier best = PlayerNpcGearUtil.bestToolTier(
                 this.playerNpc.getMainHandItem(),
@@ -551,6 +586,14 @@ public class CraftBasicGearGoal extends Goal {
                 this.playerNpc.getInventory(),
                 kind
         );
+        ToolTier mainWeaponTier = PlayerNpcGearUtil.tierFor(this.playerNpc.getMainWeaponItem(), kind);
+        if (best.isBelow(mainWeaponTier)) {
+            best = mainWeaponTier;
+        }
+        ToolTier offWeaponTier = PlayerNpcGearUtil.tierFor(this.playerNpc.getOffWeaponItem(), kind);
+        if (best.isBelow(offWeaponTier)) {
+            best = offWeaponTier;
+        }
         return best;
     }
 

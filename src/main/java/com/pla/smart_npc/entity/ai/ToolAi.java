@@ -16,6 +16,7 @@ import net.minecraft.world.level.block.state.BlockState;
 public final class ToolAi {
     private final PlayerNpcEntity playerNpc;
     private ItemStack previousMainHand = ItemStack.EMPTY;
+    private MainHandSource currentMainHandSource = MainHandSource.NONE;
     private boolean swappedMainHand;
 
     public ToolAi(PlayerNpcEntity playerNpc) {
@@ -42,17 +43,7 @@ public final class ToolAi {
     }
 
     public boolean hasTool(Class<?> toolClass) {
-        if (toolClass.isInstance(this.playerNpc.getMainHandItem().getItem())
-                || toolClass.isInstance(this.playerNpc.getOffhandItem().getItem())) {
-            return true;
-        }
-        for (int i = 0; i < this.playerNpc.getInventory().getContainerSize(); i++) {
-            ItemStack stack = this.playerNpc.getInventory().getItem(i);
-            if (!stack.isEmpty() && toolClass.isInstance(stack.getItem())) {
-                return true;
-            }
-        }
-        return false;
+        return this.playerNpc.hasCarriedTool(toolClass);
     }
 
     public static Class<?> preferredToolFor(BlockState state) {
@@ -87,6 +78,18 @@ public final class ToolAi {
             this.swapMainHandWithSlot(i, stack);
             return true;
         }
+
+        ItemStack mainWeaponTool = this.playerNpc.takeMainWeaponItem(stack -> toolClass.isInstance(stack.getItem()));
+        if (!mainWeaponTool.isEmpty()) {
+            this.swapMainHandWithReserved(mainWeaponTool, MainHandSource.MAIN_WEAPON);
+            return true;
+        }
+
+        ItemStack offWeaponTool = this.playerNpc.takeOffWeaponItem(stack -> toolClass.isInstance(stack.getItem()));
+        if (!offWeaponTool.isEmpty()) {
+            this.swapMainHandWithReserved(offWeaponTool, MainHandSource.OFF_WEAPON);
+            return true;
+        }
         return false;
     }
 
@@ -111,12 +114,12 @@ public final class ToolAi {
             return;
         }
         ItemStack current = this.playerNpc.getMainHandItem().copy();
-        this.playerNpc.setItemInHand(InteractionHand.MAIN_HAND, this.previousMainHand);
-        if (!current.isEmpty()) {
-            InventoryUtils.addItem(this.playerNpc.getInventory(), current);
-        }
+        this.stashCurrentMainHand(current);
+        this.playerNpc.setMainHandItemForAi(this.previousMainHand);
+        this.playerNpc.promoteMainWeaponItem(this.previousMainHand);
         this.swappedMainHand = false;
         this.previousMainHand = ItemStack.EMPTY;
+        this.currentMainHandSource = MainHandSource.NONE;
     }
 
     private void equipEmptyMainHand() {
@@ -125,23 +128,58 @@ public final class ToolAi {
             return;
         }
         if (!this.swappedMainHand) {
-            this.previousMainHand = current;
+            this.previousMainHand = current.copy();
             this.swappedMainHand = true;
-        } else if (!InventoryUtils.addItem(this.playerNpc.getInventory(), current)) {
-            this.playerNpc.spawnAtLocation(current);
+        } else {
+            this.stashCurrentMainHand(current);
         }
-        this.playerNpc.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+        this.playerNpc.setMainHandItemForAi(ItemStack.EMPTY);
+        this.currentMainHandSource = MainHandSource.NONE;
     }
 
     private void swapMainHandWithSlot(int slot, ItemStack stack) {
         ItemStack current = this.playerNpc.getMainHandItem().copy();
         if (!this.swappedMainHand) {
-            this.previousMainHand = current;
+            this.previousMainHand = current.copy();
             this.swappedMainHand = true;
-        } else if (!current.isEmpty() && !InventoryUtils.addItem(this.playerNpc.getInventory(), current)) {
-            this.playerNpc.spawnAtLocation(current);
+        } else {
+            this.stashCurrentMainHand(current);
         }
-        this.playerNpc.setItemInHand(InteractionHand.MAIN_HAND, stack.copy());
+        this.playerNpc.setMainHandItemForAi(stack.copy());
         this.playerNpc.getInventory().setItem(slot, ItemStack.EMPTY);
+        this.currentMainHandSource = MainHandSource.INVENTORY;
+    }
+
+    private void swapMainHandWithReserved(ItemStack stack, MainHandSource source) {
+        ItemStack current = this.playerNpc.getMainHandItem().copy();
+        if (!this.swappedMainHand) {
+            this.previousMainHand = current.copy();
+            this.swappedMainHand = true;
+        } else {
+            this.stashCurrentMainHand(current);
+        }
+        this.playerNpc.setMainHandItemForAi(stack.copy());
+        this.currentMainHandSource = source;
+    }
+
+    private void stashCurrentMainHand(ItemStack stack) {
+        if (stack.isEmpty()) {
+            this.currentMainHandSource = MainHandSource.NONE;
+            return;
+        }
+
+        if (this.currentMainHandSource == MainHandSource.OFF_WEAPON) {
+            this.playerNpc.setOffWeaponItem(stack);
+        } else if (!InventoryUtils.addItem(this.playerNpc.getInventory(), stack)) {
+            this.playerNpc.spawnAtLocation(stack);
+        }
+        this.currentMainHandSource = MainHandSource.NONE;
+    }
+
+    private enum MainHandSource {
+        NONE,
+        INVENTORY,
+        MAIN_WEAPON,
+        OFF_WEAPON
     }
 }

@@ -4,6 +4,7 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
+import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -61,7 +62,7 @@ public class PickupNearbyItemGoal extends Goal {
     private static final double ACTIVE_APPROACH_PUSH_SPEED = 0.22D;
     private static final double ACTIVE_APPROACH_JUMP_Y = 0.42D;
     private static final int ACTIVE_APPROACH_JUMP_COOLDOWN_TICKS = 10;
-    private static final double HIGH_ITEM_VERTICAL_GAP = 1.2D;
+    private static final int HIGH_ITEM_VERTICAL_BLOCK_GAP = 2;
     private static final double PICKUP_PILLAR_BASE_REACHED_SQR = 1.2D * 1.2D;
     private static final int PICKUP_PILLAR_SEARCH_RADIUS = 2;
     private static final int PICKUP_PILLAR_PLACE_DELAY_TICKS = 6;
@@ -72,6 +73,7 @@ public class PickupNearbyItemGoal extends Goal {
 
     private final PlayerNpcEntity playerNpc;
     private final double speed;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private final Set<BlockPos> skippedObstructions = new HashSet<>();
     private ItemEntity targetItem;
     private BlockPos prioritySearchCenter;
@@ -93,7 +95,7 @@ public class PickupNearbyItemGoal extends Goal {
 
     public PickupNearbyItemGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
-        this.speed = speed;
+        this.speed = Math.min(speed, 1.0D);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -105,6 +107,9 @@ public class PickupNearbyItemGoal extends Goal {
         }
 
         if (!canCollectRightNow()) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
@@ -353,6 +358,11 @@ public class PickupNearbyItemGoal extends Goal {
             return;
         }
 
+        if (isHighPickupTarget(targetItem) && tryMoveToPickupPillarBase()) {
+            failedPathTicks = 0;
+            return;
+        }
+
         Path itemPath = playerNpc.getNavigation().createPath(targetItem, 0);
         if (itemPath != null && itemPath.canReach() && playerNpc.getNavigation().moveTo(itemPath, speed)) {
             failedPathTicks = 0;
@@ -360,8 +370,6 @@ public class PickupNearbyItemGoal extends Goal {
             BlockPos stand = findStandNearItem(targetItem);
             Path standPath = stand == null ? null : playerNpc.getNavigation().createPath(stand, 0);
             if (standPath != null && standPath.canReach() && playerNpc.getNavigation().moveTo(standPath, speed)) {
-                failedPathTicks = 0;
-            } else if (isHighPickupTarget(targetItem) && tryMoveToPickupPillarBase()) {
                 failedPathTicks = 0;
             } else if (tryStartPathObstructionMining(stand) || tryStartPathObstructionMining(targetItem.blockPosition())) {
                 failedPathTicks = 0;
@@ -409,12 +417,13 @@ public class PickupNearbyItemGoal extends Goal {
         }
 
         activeApproachTicks++;
-        playerNpc.getNavigation().moveTo(targetItem, Math.max(speed, 1.15D));
+        double approachSpeed = Math.min(1.0D, Math.max(speed, 0.95D));
+        playerNpc.getNavigation().moveTo(targetItem, approachSpeed);
         playerNpc.getMoveControl().setWantedPosition(
                 targetItem.getX(),
                 targetItem.getY(),
                 targetItem.getZ(),
-                Math.max(speed, 1.15D)
+                approachSpeed
         );
 
         if (activeApproachTicks >= 12
@@ -534,7 +543,7 @@ public class PickupNearbyItemGoal extends Goal {
     private boolean isHighPickupTarget(ItemEntity item) {
         return item != null
                 && item.isAlive()
-                && item.getY() - playerNpc.getY() >= HIGH_ITEM_VERTICAL_GAP
+                && item.blockPosition().getY() - playerNpc.blockPosition().getY() >= HIGH_ITEM_VERTICAL_BLOCK_GAP
                 && horizontalDistanceSqrToItem(item, playerNpc.blockPosition()) <= 4.0D * 4.0D;
     }
 
@@ -582,10 +591,17 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private boolean canUsePickupPillarBase(ServerLevel serverLevel, BlockPos base, ItemEntity item) {
-        if (base == null || item == null || !canStandAt(serverLevel, base)) {
+        if (base == null || item == null) {
             return false;
         }
         BlockPos feet = playerNpc.blockPosition();
+        boolean currentFeetBase = feet.getX() == base.getX()
+                && feet.getY() == base.getY()
+                && feet.getZ() == base.getZ();
+        if (!canStandAt(serverLevel, base)
+                && !(currentFeetBase && canUseCurrentFeetAsPillarBase(serverLevel, base))) {
+            return false;
+        }
         if (!(feet.getX() == base.getX() && feet.getZ() == base.getZ())
                 && !canReach(base)
                 && findPathObstructionToward(base) == null) {
@@ -595,7 +611,7 @@ public class PickupNearbyItemGoal extends Goal {
             return false;
         }
 
-        int blocksNeeded = Math.max(1, item.blockPosition().getY() - base.getY());
+        int blocksNeeded = blocksNeededToReachItem(base, item);
         if (blocksNeeded > Math.max(1, countPickupPillarBlocks())) {
             return false;
         }
@@ -607,6 +623,25 @@ public class PickupNearbyItemGoal extends Goal {
             }
         }
         return true;
+    }
+
+    private int blocksNeededToReachItem(BlockPos base, ItemEntity item) {
+        int targetFeetY = Math.max(base.getY() + 1, item.blockPosition().getY() - 1);
+        return Math.max(1, targetFeetY - base.getY());
+    }
+
+    private boolean canUseCurrentFeetAsPillarBase(ServerLevel serverLevel, BlockPos feet) {
+        if (!playerNpc.onGround() || feet == null) {
+            return false;
+        }
+        BlockState feetState = serverLevel.getBlockState(feet);
+        BlockState headState = serverLevel.getBlockState(feet.above());
+        BlockState floorState = serverLevel.getBlockState(feet.below());
+        return feetState.getCollisionShape(serverLevel, feet).isEmpty()
+                && headState.getCollisionShape(serverLevel, feet.above()).isEmpty()
+                && feetState.getFluidState().isEmpty()
+                && headState.getFluidState().isEmpty()
+                && !floorState.getCollisionShape(serverLevel, feet.below()).isEmpty();
     }
 
     private double horizontalDistanceSqrToItem(ItemEntity item, BlockPos pos) {
@@ -807,15 +842,11 @@ public class PickupNearbyItemGoal extends Goal {
 
         AABB snappedBox = playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
         return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
-                && serverLevel.noCollision(playerNpc, snappedBox);
+                && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, playerNpc, snappedBox);
     }
 
     private boolean hasOtherEntityInBlock(ServerLevel serverLevel, BlockPos pos) {
-        return !serverLevel.getEntities(
-                playerNpc,
-                new AABB(pos).inflate(0.05D),
-                entity -> entity.isAlive() && !(entity instanceof ItemEntity)
-        ).isEmpty();
+        return !PlayerNpcCollisionUtil.blockingEntitiesInBox(serverLevel, playerNpc, new AABB(pos).inflate(0.05D)).isEmpty();
     }
 
     private void snapAbovePickupPillarIfNeeded(BlockPos pos) {
@@ -1101,10 +1132,9 @@ public class PickupNearbyItemGoal extends Goal {
 
     private boolean isPathObstructionBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
         boolean blocksMovement = !state.getCollisionShape(serverLevel, pos).isEmpty();
-        boolean replaceableClutter = state.canBeReplaced() && !state.isAir();
         return !state.isAir()
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
-                && (blocksMovement || replaceableClutter)
+                && blocksMovement
                 && state.getFluidState().isEmpty()
                 && !CraftBasicGearGoal.isTemporaryCraftingTable(playerNpc, serverLevel, pos)
                 && !isProtectedHomeBlock(pos)
