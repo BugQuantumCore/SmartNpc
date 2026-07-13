@@ -1,13 +1,11 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.sounds.SoundEvents;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.ItemTags;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
@@ -20,11 +18,13 @@ public class PlantSaplingGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 25;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private BlockPos plantPos;
     private ItemStack saplingStack = ItemStack.EMPTY;
 
     public PlantSaplingGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -77,11 +77,15 @@ public class PlantSaplingGoal extends Goal {
             return;
         }
 
-        serverLevel.setBlockAndUpdate(this.plantPos, state);
+        if (!this.placingBlockAi.placeBlock(serverLevel, this.plantPos, state)) {
+            if (!InventoryUtils.addItem(this.playerNpc, consumed)) {
+                this.playerNpc.spawnAtLocation(consumed);
+            }
+            this.clear();
+            return;
+        }
         this.playerNpc.getLookControl().setLookAt(this.plantPos.getX() + 0.5D, this.plantPos.getY() + 0.5D, this.plantPos.getZ() + 0.5D, 40.0F, 40.0F);
-        this.playerNpc.triggerMainHandUseAnimation();
         this.playerNpc.setCurrentAiState("ai.player_npc.planting_sapling");
-        serverLevel.playSound(null, this.plantPos, SoundEvents.GRASS_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
         this.playerNpc.setSaplingPlantCooldown(COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 35));
         this.clear();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);

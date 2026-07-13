@@ -2,6 +2,7 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
 import com.pla.smart_npc.util.PlayerNpcBuildLayoutLoader;
@@ -57,6 +58,7 @@ public class FarmCropGoal extends Goal {
     private static final String FARM_DEPTH = "PlayerNpcFarmDepth";
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private FarmArea farmArea;
     private PlayerNpcHomeUtil.HomeArea homeArea;
     private BlockPos targetPos;
@@ -71,6 +73,7 @@ public class FarmCropGoal extends Goal {
 
     public FarmCropGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -300,9 +303,11 @@ public class FarmCropGoal extends Goal {
         }
 
         this.showActionItem(fence);
-        serverLevel.setBlockAndUpdate(this.targetPos, state);
-        this.playerNpc.triggerMainHandUseAnimation();
-        serverLevel.playSound(null, this.targetPos, SoundEvents.WOOD_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
+        if (!this.placingBlockAi.placeBlock(serverLevel, this.targetPos, state)) {
+            this.returnStack(fence);
+            return false;
+        }
+        this.finishPlacementActionItem();
         return true;
     }
 
@@ -329,9 +334,11 @@ public class FarmCropGoal extends Goal {
         }
 
         this.showActionItem(gate);
-        serverLevel.setBlockAndUpdate(this.targetPos, state);
-        this.playerNpc.triggerMainHandUseAnimation();
-        serverLevel.playSound(null, this.targetPos, SoundEvents.WOOD_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
+        if (!this.placingBlockAi.placeBlock(serverLevel, this.targetPos, state)) {
+            this.returnStack(gate);
+            return false;
+        }
+        this.finishPlacementActionItem();
         return true;
     }
 
@@ -692,6 +699,15 @@ public class FarmCropGoal extends Goal {
             return;
         }
         this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
+        this.previousMainHand = ItemStack.EMPTY;
+        this.showingActionItem = false;
+    }
+
+    private void finishPlacementActionItem() {
+        if (!this.showingActionItem) {
+            return;
+        }
+        this.placingBlockAi.finishHeldPlacement(this.previousMainHand);
         this.previousMainHand = ItemStack.EMPTY;
         this.showingActionItem = false;
     }

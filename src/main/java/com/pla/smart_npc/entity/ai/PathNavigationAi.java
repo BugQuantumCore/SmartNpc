@@ -9,8 +9,10 @@ import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 
 public final class PathNavigationAi {
     private static final double PATH_END_DISTANCE_SQR = 3.0D * 3.0D;
@@ -126,6 +128,40 @@ public final class PathNavigationAi {
         Path path = this.playerNpc.getNavigation().createPath(target, 0);
         return this.isValidPathTo(target, path)
                 || this.findSafeDropStep(serverLevel, this.playerNpc.blockPosition(), target, maxSafeDrop) != null;
+    }
+
+    public Optional<BlockPos> findReachableRandomizedCandidate(
+            ServerLevel serverLevel,
+            List<BlockPos> candidates,
+            int preferredPoolSize,
+            int maxChecks,
+            int maxSafeDrop
+    ) {
+        if (candidates.isEmpty()) {
+            return Optional.empty();
+        }
+
+        List<BlockPos> ordered = new ArrayList<>(candidates);
+        int preferredCount = Math.min(Math.max(1, preferredPoolSize), ordered.size());
+        if (preferredCount > 1) {
+            Collections.rotate(
+                    ordered.subList(0, preferredCount),
+                    this.playerNpc.getRandom().nextInt(preferredCount)
+            );
+        }
+
+        int checks = 0;
+        int checkLimit = Math.max(1, maxChecks);
+        for (BlockPos candidate : ordered) {
+            if (checks++ >= checkLimit) {
+                break;
+            }
+            if (canStandAt(serverLevel, candidate)
+                    && this.canReachOrSafelyDropTo(serverLevel, candidate, maxSafeDrop)) {
+                return Optional.of(candidate.immutable());
+            }
+        }
+        return Optional.empty();
     }
 
     public boolean hasValidPathTo(BlockPos target) {

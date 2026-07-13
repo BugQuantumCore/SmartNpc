@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -50,6 +51,10 @@ public class TerraformBuildSiteGoal extends Goal {
     private static final int SCAFFOLD_FORCE_PLACE_TICKS = 3;
     private static final int MAX_SUPPORT_FILL_FAILURES = 12;
     private static final int SUPPORT_FILL_RETRY_COOLDOWN_TICKS = 20 * 5;
+    private static final int SUPPORT_CLEARANCE_RETRY_TICKS = 8;
+    private static final int SUPPORT_CLEARANCE_JUMP_COOLDOWN_TICKS = 12;
+    private static final int SUPPORT_FILL_ESCAPE_REQUEST_TICKS = 20 * 10;
+    private static final int SUPPORT_FILL_ESCAPE_EXTRA_BLOCKS = 4;
     private static final int TARGET_SEARCH_RETRY_COOLDOWN_TICKS = 10;
     private static final double SCAFFOLD_PLACE_CLEARANCE_Y = 0.65D;
     private static final double SCAFFOLD_FALLBACK_PLACE_CLEARANCE_Y = 0.55D;
@@ -78,6 +83,7 @@ public class TerraformBuildSiteGoal extends Goal {
 
     private final PlayerNpcEntity playerNpc;
     private final PathNavigationAi pathNavigationAi;
+    private final PlacingBlockAi placingBlockAi;
     private final double speed;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private final List<BlockPos> temporaryScaffold = new ArrayList<>();
@@ -90,6 +96,8 @@ public class TerraformBuildSiteGoal extends Goal {
     private int repathTicks;
     private int supportFillFailures;
     private int supportFillRetryCooldownTicks;
+    private int supportClearanceMoveTicks;
+    private int supportClearanceJumpCooldownTicks;
     private int scaffoldJumpDelayTicks;
     private int scaffoldPlaceDelayTicks;
     private int scaffoldPlaceWaitTicks;
@@ -99,11 +107,15 @@ public class TerraformBuildSiteGoal extends Goal {
     public TerraformBuildSiteGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.speed = speed;
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
     public static boolean hasActionablePrepWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (hasActiveVerticalEscape(playerNpc) || playerNpc.isStoneAccessClearing()) {
+            return false;
+        }
         return findNextTarget(serverLevel, playerNpc, true)
                 .filter(target -> canRunTargetNow(serverLevel, playerNpc, target))
                 .isPresent();
@@ -111,6 +123,11 @@ public class TerraformBuildSiteGoal extends Goal {
 
     public static boolean hasPrepWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         return findNextTarget(serverLevel, playerNpc, true).isPresent();
+    }
+
+    private static boolean hasActiveVerticalEscape(PlayerNpcEntity playerNpc) {
+        return playerNpc.getUpwardEscapeTarget() != null
+                || "ai.player_npc.pillaring_up".equals(playerNpc.getCurrentAiState());
     }
 
     public static boolean needsShovelForPrep(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -138,6 +155,8 @@ public class TerraformBuildSiteGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
+                || this.playerNpc.isStoneAccessClearing()
+                || hasActiveVerticalEscape(this.playerNpc)
                 || this.playerNpc.getTarget() != null) {
             return false;
         }
@@ -156,6 +175,11 @@ public class TerraformBuildSiteGoal extends Goal {
                 && !hasTool(this.playerNpc, ShovelItem.class)) {
             return false;
         }
+        if (nextTarget.get().phase() == TerraformPhase.FILL_SUPPORT
+                && this.deferSupportFillForVerticalEscape(serverLevel, nextTarget.get().pos())) {
+            this.targetSearchRetryCooldownTicks = TARGET_SEARCH_RETRY_COOLDOWN_TICKS;
+            return false;
+        }
 
         this.target = nextTarget.get();
         this.targetSearchRetryCooldownTicks = 0;
@@ -166,6 +190,8 @@ public class TerraformBuildSiteGoal extends Goal {
     public boolean canContinueToUse() {
         return (this.target != null || !this.temporaryScaffold.isEmpty())
                 && this.playerNpc.isAlive()
+                && !this.playerNpc.isStoneAccessClearing()
+                && !hasActiveVerticalEscape(this.playerNpc)
                 && this.playerNpc.getTarget() == null;
     }
 
@@ -178,6 +204,8 @@ public class TerraformBuildSiteGoal extends Goal {
         this.scaffoldPlaceDelayTicks = 0;
         this.scaffoldPlaceWaitTicks = 0;
         this.supportFillFailures = 0;
+        this.supportClearanceMoveTicks = 0;
+        this.supportClearanceJumpCooldownTicks = 0;
         this.lastSupportFillFailurePos = null;
         this.temporaryScaffold.clear();
         this.skippedSupportTargets.clear();
@@ -194,6 +222,12 @@ public class TerraformBuildSiteGoal extends Goal {
     public void tick() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             return;
+        }
+        if (this.supportClearanceMoveTicks > 0) {
+            this.supportClearanceMoveTicks--;
+        }
+        if (this.supportClearanceJumpCooldownTicks > 0) {
+            this.supportClearanceJumpCooldownTicks--;
         }
 
         if (this.target == null) {
@@ -222,9 +256,19 @@ public class TerraformBuildSiteGoal extends Goal {
                 return;
             }
         }
+        if (this.target.phase() == TerraformPhase.FILL_SUPPORT
+                && this.deferSupportFillForVerticalEscape(serverLevel, this.target.pos())) {
+            this.target = null;
+            this.workTicks = 0;
+            return;
+        }
 
         BlockPos pos = this.target.pos();
         this.playerNpc.getLookControl().setLookAt(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, 40.0F, 40.0F);
+        if (this.target.phase() == TerraformPhase.FILL_SUPPORT && this.supportClearanceMoveTicks > 0) {
+            this.playerNpc.clearBlockBreakProgress(pos);
+            return;
+        }
         if (this.shouldScaffoldToward(serverLevel, pos)) {
             if (this.beginScaffoldStep(serverLevel, this.playerNpc.blockPosition())) {
                 this.playerNpc.clearBlockBreakProgress(pos);
@@ -272,6 +316,8 @@ public class TerraformBuildSiteGoal extends Goal {
         this.workTicks = 0;
         this.repathTicks = 0;
         this.supportFillFailures = 0;
+        this.supportClearanceMoveTicks = 0;
+        this.supportClearanceJumpCooldownTicks = 0;
         this.scaffoldJumpDelayTicks = 0;
         this.scaffoldPlaceDelayTicks = 0;
         this.scaffoldPlaceWaitTicks = 0;
@@ -346,25 +392,58 @@ public class TerraformBuildSiteGoal extends Goal {
             return;
         }
         if (!this.canPlaceSupportWithoutClipping(serverLevel, pos, fillState)) {
+            if (this.handleSupportFillClipping(serverLevel, pos, fillState)) {
+                return;
+            }
             this.noteSupportFillFailure(serverLevel, pos, "clipping");
             return;
         }
 
-        if (!serverLevel.setBlockAndUpdate(pos, fillState)) {
+        if (!this.placingBlockAi.placeHeldBlock(serverLevel, pos, fillState)) {
             this.noteSupportFillFailure(serverLevel, pos, "place_failed");
             return;
         }
 
-        this.playerNpc.triggerMainHandUseAnimation();
-        PlayerNpcBlockSoundUtil.playPlaceSound(serverLevel, pos, fillState, this.playerNpc);
-        ItemStack mainHand = this.playerNpc.getMainHandItem();
-        mainHand.shrink(1);
-        if (mainHand.isEmpty()) {
-            this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
-        }
         this.supportFillFailures = 0;
         this.lastSupportFillFailurePos = null;
+        this.supportClearanceMoveTicks = 0;
+        this.supportClearanceJumpCooldownTicks = 0;
         this.target = null;
+    }
+
+    private boolean handleSupportFillClipping(ServerLevel serverLevel, BlockPos pos, BlockState fillState) {
+        if (!this.placingBlockAi.hasSelfPlacementCollision(serverLevel, pos, fillState)) {
+            return false;
+        }
+
+        if (this.tryJumpForSupportClearance(serverLevel, pos)) {
+            this.supportClearanceMoveTicks = SUPPORT_CLEARANCE_RETRY_TICKS;
+            this.workTicks = PLACE_DELAY_TICKS;
+            this.playerNpc.setCurrentAiDetail("jumping clear of fill support @ "
+                    + pos.getX() + " " + pos.getY() + " " + pos.getZ());
+            return true;
+        }
+
+        BlockPos standPos = this.findSupportClearanceStand(serverLevel, pos, fillState);
+        if (standPos == null) {
+            return false;
+        }
+
+        if (standPos.getY() > this.playerNpc.blockPosition().getY()) {
+            this.tryJumpForSupportClearance(serverLevel, pos);
+        }
+        this.playerNpc.getNavigation().stop();
+        this.playerNpc.getMoveControl().setWantedPosition(
+                standPos.getX() + 0.5D,
+                standPos.getY(),
+                standPos.getZ() + 0.5D,
+                Math.max(0.85D, this.speed)
+        );
+        this.supportClearanceMoveTicks = SUPPORT_CLEARANCE_RETRY_TICKS;
+        this.workTicks = PLACE_DELAY_TICKS;
+        this.playerNpc.setCurrentAiDetail("moving clear of fill support @ "
+                + pos.getX() + " " + pos.getY() + " " + pos.getZ());
+        return true;
     }
 
     private void noteSupportFillFailure(ServerLevel serverLevel, BlockPos pos, String reason) {
@@ -534,19 +613,13 @@ public class TerraformBuildSiteGoal extends Goal {
         }
 
         this.lookDownAt(this.scaffoldPlacePos);
-        if (!serverLevel.setBlockAndUpdate(this.scaffoldPlacePos, placeState)) {
+        if (!this.placingBlockAi.placeHeldBlock(serverLevel, this.scaffoldPlacePos, placeState)) {
             this.clearScaffoldPlacement();
             return;
         }
 
         this.snapAboveScaffoldIfNeeded(this.scaffoldPlacePos);
-        this.playerNpc.triggerMainHandUseAnimation();
-        PlayerNpcBlockSoundUtil.playPlaceSound(serverLevel, this.scaffoldPlacePos, placeState, this.playerNpc);
         this.temporaryScaffold.add(this.scaffoldPlacePos.immutable());
-        mainHand.shrink(1);
-        if (mainHand.isEmpty()) {
-            this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
-        }
         this.clearScaffoldPlacement();
         this.updateTaskDetail();
     }
@@ -826,12 +899,50 @@ public class TerraformBuildSiteGoal extends Goal {
     }
 
     private static boolean canRunTargetNow(ServerLevel serverLevel, PlayerNpcEntity playerNpc, TerraformTarget target) {
+        if (target.phase() == TerraformPhase.FILL_SUPPORT) {
+            return !shouldDeferSupportFillForVerticalEscape(playerNpc, target.pos());
+        }
         if (target.phase() != TerraformPhase.CLEAR) {
             return true;
         }
 
         BlockState state = serverLevel.getBlockState(target.pos());
         return !state.is(BlockTags.MINEABLE_WITH_SHOVEL) || hasTool(playerNpc, ShovelItem.class);
+    }
+
+    private boolean deferSupportFillForVerticalEscape(ServerLevel serverLevel, BlockPos supportPos) {
+        if (!shouldDeferSupportFillForVerticalEscape(this.playerNpc, supportPos)) {
+            return false;
+        }
+
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
+        if (home.isEmpty()) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        PlayerNpcHomeUtil.HomeArea homeArea = home.get();
+        int escapeY = Math.max(Math.max(homeArea.origin().getY(), supportPos.getY() + 1), feet.getY() + 3);
+        int maxPillarBlocks = Math.max(1, escapeY - feet.getY() + SUPPORT_FILL_ESCAPE_EXTRA_BLOCKS);
+        BlockPos escapeTarget = new BlockPos(feet.getX(), escapeY, feet.getZ());
+        this.playerNpc.requestForcedUpwardEscapeTo(escapeTarget, SUPPORT_FILL_ESCAPE_REQUEST_TICKS, maxPillarBlocks);
+        this.playerNpc.setCurrentAiDetail("pillaring before fill support @ "
+                + supportPos.getX() + " " + supportPos.getY() + " " + supportPos.getZ());
+        return true;
+    }
+
+    private static boolean shouldDeferSupportFillForVerticalEscape(PlayerNpcEntity playerNpc, BlockPos supportPos) {
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        if (home.isEmpty() || supportPos == null) {
+            return false;
+        }
+
+        PlayerNpcHomeUtil.HomeArea homeArea = home.get();
+        BlockPos feet = playerNpc.blockPosition();
+        return feet.getY() < homeArea.origin().getY()
+                && supportPos.getY() >= feet.getY()
+                && (PlayerNpcHomeUtil.isInsideFootprint(homeArea, feet)
+                || PlayerNpcHomeUtil.isInsideFootprint(homeArea, supportPos));
     }
 
     private static Optional<BuildContext> findBuildContext(PlayerNpcEntity playerNpc) {
@@ -1015,18 +1126,60 @@ public class TerraformBuildSiteGoal extends Goal {
     }
 
     private Optional<ItemStack> useFillBlockInMainHand() {
-        if (isFillStack(this.playerNpc.getMainHandItem())) {
-            return Optional.of(this.playerNpc.getMainHandItem());
+        ItemStack mainHand = this.playerNpc.getMainHandItem();
+        Optional<net.minecraft.world.item.Item> preferredInventoryFill = this.findPreferredInventoryFillItem();
+        if (preferredInventoryFill.isPresent()
+                && (!isFillStack(mainHand)
+                || fillPriority(preferredInventoryFill.get()) < fillPriority(mainHand))) {
+            ItemStack fill = this.playerNpc.consumeInventoryItem(preferredInventoryFill.get(), 1)
+                    .orElse(ItemStack.EMPTY);
+            if (!fill.isEmpty()) {
+                this.setTemporaryMainHand(fill);
+                return Optional.of(fill);
+            }
         }
 
-        ItemStack fill = this.playerNpc.consumeInventoryItem(TerraformBuildSiteGoal::isFillStack, 1)
-                .orElse(ItemStack.EMPTY);
-        if (fill.isEmpty()) {
-            return Optional.empty();
+        if (isFillStack(mainHand)) {
+            return Optional.of(mainHand);
         }
 
-        this.setTemporaryMainHand(fill);
-        return Optional.of(fill);
+        Optional<ItemStack> fill = this.consumePreferredFillBlock();
+        fill.ifPresent(this::setTemporaryMainHand);
+        return fill;
+    }
+
+    private Optional<net.minecraft.world.item.Item> findPreferredInventoryFillItem() {
+        for (net.minecraft.world.item.Item item : FILL_ITEMS) {
+            if (this.playerNpc.hasInventoryItem(item)) {
+                return Optional.of(item);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private Optional<ItemStack> consumePreferredFillBlock() {
+        for (net.minecraft.world.item.Item item : FILL_ITEMS) {
+            ItemStack fill = this.playerNpc.consumeInventoryItem(item, 1)
+                    .orElse(ItemStack.EMPTY);
+            if (!fill.isEmpty()) {
+                return Optional.of(fill);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static int fillPriority(ItemStack stack) {
+        for (int i = 0; i < FILL_ITEMS.size(); i++) {
+            if (stack.is(FILL_ITEMS.get(i))) {
+                return i;
+            }
+        }
+        return Integer.MAX_VALUE;
+    }
+
+    private static int fillPriority(net.minecraft.world.item.Item item) {
+        int index = FILL_ITEMS.indexOf(item);
+        return index >= 0 ? index : Integer.MAX_VALUE;
     }
 
     private Optional<ItemStack> useScaffoldBlockInMainHand() {
@@ -1067,6 +1220,10 @@ public class TerraformBuildSiteGoal extends Goal {
     }
 
     private boolean canPlaceSupportWithoutClipping(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        if (!this.placingBlockAi.findBlockingPlacementEntities(serverLevel, pos, state).isEmpty()) {
+            return false;
+        }
+
         List<AABB> boxes = state.getCollisionShape(serverLevel, pos)
                 .toAabbs()
                 .stream()
@@ -1090,6 +1247,87 @@ public class TerraformBuildSiteGoal extends Goal {
         AABB snappedBox = currentBox.move(0.0D, snapUp + 0.01D, 0.0D);
         return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
                 && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox);
+    }
+
+    private boolean tryJumpForSupportClearance(ServerLevel serverLevel, BlockPos supportPos) {
+        if (!this.playerNpc.onGround() || this.supportClearanceJumpCooldownTicks > 0) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (supportPos.getX() != feet.getX()
+                || supportPos.getZ() != feet.getZ()
+                || supportPos.getY() != feet.getY()
+                || !this.hasOpenJumpSpace(serverLevel, feet)) {
+            return false;
+        }
+
+        this.playerNpc.getJumpControl().jump();
+        Vec3 motion = this.playerNpc.getDeltaMovement();
+        this.playerNpc.setDeltaMovement(motion.x, Math.max(motion.y, 0.42D), motion.z);
+        this.playerNpc.hasImpulse = true;
+        this.supportClearanceJumpCooldownTicks = SUPPORT_CLEARANCE_JUMP_COOLDOWN_TICKS;
+        return true;
+    }
+
+    private boolean hasOpenJumpSpace(ServerLevel serverLevel, BlockPos feet) {
+        return serverLevel.getBlockState(feet.above()).getCollisionShape(serverLevel, feet.above()).isEmpty()
+                && serverLevel.getBlockState(feet.above(2)).getCollisionShape(serverLevel, feet.above(2)).isEmpty()
+                && serverLevel.getFluidState(feet.above()).isEmpty()
+                && serverLevel.getFluidState(feet.above(2)).isEmpty();
+    }
+
+    private BlockPos findSupportClearanceStand(ServerLevel serverLevel, BlockPos supportPos, BlockState supportState) {
+        BlockPos current = this.playerNpc.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int radius = 1; radius <= 3; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) {
+                        continue;
+                    }
+                    for (int dy = -1; dy <= 1; dy++) {
+                        BlockPos candidate = supportPos.offset(dx, dy, dz);
+                        if (!candidate.equals(current)
+                                && this.canUseSupportClearanceStand(serverLevel, candidate, supportPos, supportState)) {
+                            candidates.add(candidate.immutable());
+                        }
+                    }
+                }
+            }
+            if (!candidates.isEmpty()) {
+                break;
+            }
+        }
+
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos candidate) -> candidate.distSqr(current))
+                .thenComparingDouble(candidate -> this.horizontalDistanceToWorkSqr(candidate, supportPos)));
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private boolean canUseSupportClearanceStand(ServerLevel serverLevel, BlockPos standPos, BlockPos supportPos, BlockState supportState) {
+        if (!PathNavigationAi.canStandAt(serverLevel, standPos)) {
+            return false;
+        }
+
+        double width = this.playerNpc.getBbWidth();
+        double height = this.playerNpc.getBbHeight();
+        double x = standPos.getX() + 0.5D;
+        double z = standPos.getZ() + 0.5D;
+        AABB standBox = new AABB(
+                x - width / 2.0D,
+                standPos.getY(),
+                z - width / 2.0D,
+                x + width / 2.0D,
+                standPos.getY() + height,
+                z + width / 2.0D
+        ).inflate(0.05D);
+
+        return PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, standBox)
+                && this.placingBlockAi.placementCollisionBoxes(serverLevel, supportPos, supportState)
+                .stream()
+                .noneMatch(box -> box.intersects(standBox));
     }
 
     private boolean hasScaffoldPlacementClearance() {

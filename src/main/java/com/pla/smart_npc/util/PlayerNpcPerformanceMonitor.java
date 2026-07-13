@@ -8,6 +8,8 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.EntityJoinLevelEvent;
+import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
@@ -23,9 +25,16 @@ public final class PlayerNpcPerformanceMonitor {
     private static final int ROLLING_WINDOW_TICKS = 100;
     private static final int MIN_AVERAGE_WARNING_SAMPLES = 20;
     private static final int STARTUP_WARMUP_TICKS = 20 * 10;
+    private static final int PLAYER_JOIN_WARMUP_TICKS = 20 * 8;
+    private static final int PLAYER_NPC_JOIN_WARMUP_TICKS = 20 * 5;
+    private static final int POST_STALL_WARMUP_TICKS = 20 * 8;
     private static final double NANOS_PER_MILLISECOND = 1_000_000.0D;
     private static final double MAX_TPS = 20.0D;
     private static final double PAUSE_OR_LOAD_TICK_MSPT = 1000.0D;
+    private static final double ROLLING_WARNING_CURRENT_TICK_MSPT_FLOOR = 50.0D;
+    private static final double HEALTHY_AVERAGE_SPIKE_SUPPRESSION_MSPT = 50.0D;
+    private static final double SEVERE_SINGLE_TICK_SPIKE_MSPT = 1000.0D;
+    private static final String PASSIVE_HOME_STATE = "ai.player_npc.being_at_home";
 
     private static final double[] rollingMspt = new double[ROLLING_WINDOW_TICKS];
     private static int rollingIndex;
@@ -33,6 +42,7 @@ public final class PlayerNpcPerformanceMonitor {
     private static double rollingTotalMspt;
     private static double latestMspt;
     private static long tickStartNanos = -1L;
+    private static long ignoreSamplesUntilServerTick = Long.MIN_VALUE;
     private static long lastWarningServerTick = Long.MIN_VALUE;
     private static long lastSuppressedWarningServerTick = Long.MIN_VALUE;
 
@@ -69,6 +79,21 @@ public final class PlayerNpcPerformanceMonitor {
         maybeLogWarning(event.getServer(), latestMspt);
     }
 
+    @SubscribeEvent
+    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+        if (event.getEntity().level() instanceof ServerLevel serverLevel) {
+            startWarmup(serverLevel.getServer(), PLAYER_JOIN_WARMUP_TICKS);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onEntityJoinLevel(EntityJoinLevelEvent event) {
+        if (event.getEntity() instanceof PlayerNpcEntity
+                && event.getLevel() instanceof ServerLevel serverLevel) {
+            startWarmup(serverLevel.getServer(), PLAYER_NPC_JOIN_WARMUP_TICKS);
+        }
+    }
+
     public static String createInspectorText() {
         if (!SmartNpcConfig.PERFORMANCE_MONITOR_ENABLED.get()) {
             return "TPS monitor off";
@@ -99,8 +124,25 @@ public final class PlayerNpcPerformanceMonitor {
     }
 
     private static boolean shouldIgnoreSample(MinecraftServer server, double mspt) {
-        return server.getTickCount() < STARTUP_WARMUP_TICKS
-                || mspt >= PAUSE_OR_LOAD_TICK_MSPT;
+        if (server.getTickCount() < STARTUP_WARMUP_TICKS
+                || server.getTickCount() < ignoreSamplesUntilServerTick) {
+            return true;
+        }
+        if (mspt >= PAUSE_OR_LOAD_TICK_MSPT) {
+            startWarmup(server, POST_STALL_WARMUP_TICKS);
+            return true;
+        }
+        return false;
+    }
+
+    private static void startWarmup(MinecraftServer server, int ticks) {
+        if (server == null || ticks <= 0) {
+            return;
+        }
+
+        ignoreSamplesUntilServerTick = Math.max(ignoreSamplesUntilServerTick, server.getTickCount() + ticks);
+        resetSamples();
+        latestMspt = 0.0D;
     }
 
     private static void resetSamples() {
@@ -123,10 +165,14 @@ public final class PlayerNpcPerformanceMonitor {
 
     private static void maybeLogWarning(MinecraftServer server, double currentMspt) {
         double averageMspt = getAverageMspt();
+        double averageWarningThreshold = SmartNpcConfig.PERFORMANCE_WARNING_AVERAGE_MSPT.get();
         boolean slowAverage = rollingCount >= MIN_AVERAGE_WARNING_SAMPLES
-                && averageMspt >= SmartNpcConfig.PERFORMANCE_WARNING_AVERAGE_MSPT.get();
+                && averageMspt >= averageWarningThreshold
+                && currentMspt >= Math.min(averageWarningThreshold, ROLLING_WARNING_CURRENT_TICK_MSPT_FLOOR);
         boolean tickSpike = rollingCount >= MIN_AVERAGE_WARNING_SAMPLES
-                && currentMspt >= SmartNpcConfig.PERFORMANCE_WARNING_SPIKE_MSPT.get();
+                && currentMspt >= SmartNpcConfig.PERFORMANCE_WARNING_SPIKE_MSPT.get()
+                && (averageMspt >= HEALTHY_AVERAGE_SPIKE_SUPPRESSION_MSPT
+                || currentMspt >= SEVERE_SINGLE_TICK_SPIKE_MSPT);
         if (!slowAverage && !tickSpike) {
             return;
         }
@@ -184,6 +230,9 @@ public final class PlayerNpcPerformanceMonitor {
                 if (state.isBlank() || PlayerNpcEntity.AI_IDLE.equals(state)) {
                     continue;
                 }
+                if (!isPerformanceRelevantState(state)) {
+                    continue;
+                }
 
                 activeNpcCount++;
                 stateCounts.merge(state, 1, Integer::sum);
@@ -194,6 +243,10 @@ public final class PlayerNpcPerformanceMonitor {
         }
 
         return new NpcTraceSummary(totalNpcCount, activeNpcCount, stateCounts, traceLines);
+    }
+
+    private static boolean isPerformanceRelevantState(String state) {
+        return !PASSIVE_HOME_STATE.equals(state);
     }
 
     private static String createTraceLine(ServerLevel level, PlayerNpcEntity playerNpc, String state) {

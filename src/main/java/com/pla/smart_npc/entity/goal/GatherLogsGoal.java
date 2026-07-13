@@ -22,6 +22,7 @@ import net.minecraft.world.item.ShovelItem;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.ArrayDeque;
@@ -53,6 +54,8 @@ public class GatherLogsGoal extends Goal {
     private static final int MAX_PILLAR_SAFE_DROP_BLOCKS = 5;
     private static final int STAND_SCAN_BELOW_TARGET = 12;
     private static final int STAND_SCAN_ABOVE_TARGET = 2;
+    private static final int MAX_IGNORED_CLEAR_BLOCKS = 32;
+    private static final int MAX_SAME_LEAF_CLEAR_TICKS = 40;
     private static final double BREAK_DISTANCE_SQR = 4.5D * 4.5D;
     private static final double STAND_REACHED_DISTANCE_SQR = 1.5D * 1.5D;
     private static final double PILLAR_APPROACH_HORIZONTAL_DISTANCE_SQR = 2.5D * 2.5D;
@@ -61,6 +64,7 @@ public class GatherLogsGoal extends Goal {
     private final double speed;
     private final Queue<BlockPos> logQueue = new ArrayDeque<>();
     private final Set<BlockPos> protectedPillarBlocks = new LinkedHashSet<>();
+    private final Set<BlockPos> ignoredClearBlocks = new LinkedHashSet<>();
     private final ToolAi toolAi;
     private final BreakingBlockAi breakingBlockAi;
     private final ClearBlockAi clearBlockAi;
@@ -71,9 +75,11 @@ public class GatherLogsGoal extends Goal {
     private BlockPos standPos;
     private BlockPos dirtTargetPos;
     private BlockPos descentTargetPos;
+    private BlockPos lastClearTargetPos;
     private int gatherTicks;
     private int repathTicks;
     private int descentTicks;
+    private int sameClearTargetTicks;
     private boolean gatheringDirt;
     private boolean searchingDirtForPillar;
     private boolean descendingFromPillar;
@@ -216,8 +222,16 @@ public class GatherLogsGoal extends Goal {
         if (this.distanceToTargetSqr() > BREAK_DISTANCE_SQR) {
             this.breakingBlockAi.stop();
             if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
-                if (!this.moveToStandPos() && !this.selectNextTarget(serverLevel)) {
-                    this.targetPos = null;
+                if (!this.moveToStandPos()) {
+                    if (!this.gatheringDirt
+                            && this.tryMoveToBetterPillarBase(serverLevel, this.playerNpc.blockPosition(), "stand path failed")) {
+                        this.repathTicks = REPATH_INTERVAL_TICKS;
+                        this.updateDetail();
+                        return;
+                    }
+                    if (!this.selectNextTarget(serverLevel)) {
+                        this.targetPos = null;
+                    }
                 }
                 this.repathTicks = REPATH_INTERVAL_TICKS;
             }
@@ -244,9 +258,11 @@ public class GatherLogsGoal extends Goal {
         this.standPos = null;
         this.dirtTargetPos = null;
         this.descentTargetPos = null;
+        this.lastClearTargetPos = null;
         this.gatherTicks = 0;
         this.repathTicks = 0;
         this.descentTicks = 0;
+        this.sameClearTargetTicks = 0;
         this.gatheringDirt = false;
         this.searchingDirtForPillar = false;
         this.descendingFromPillar = false;
@@ -257,13 +273,34 @@ public class GatherLogsGoal extends Goal {
 
     private boolean tickHelperAi(ServerLevel serverLevel) {
         if (this.clearBlockAi.isRunning()) {
+            BlockPos clearTarget = this.clearBlockAi.targetPos();
+            this.trackClearTarget(clearTarget);
+            if (!this.gatheringDirt && this.sameClearTargetTicks > MAX_SAME_LEAF_CLEAR_TICKS) {
+                this.breakingBlockAi.stop();
+                this.clearBlockAi.stop();
+                this.ignoreClearBlock(clearTarget);
+                if (this.forceClearLeaf(serverLevel, clearTarget)) {
+                    this.pillarTraceDetail = "force cleared stuck leaf @ " + posText(clearTarget);
+                } else {
+                    this.pillarTraceDetail = "skipped stuck leaf @ " + posText(clearTarget);
+                }
+                this.prepareLogQueue(serverLevel);
+                this.lastClearTargetPos = null;
+                this.sameClearTargetTicks = 0;
+                return true;
+            }
             ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
             if (result == ClearBlockAi.TickResult.DONE || result == ClearBlockAi.TickResult.FAILED) {
                 this.breakingBlockAi.stop();
+                if (result == ClearBlockAi.TickResult.FAILED && !this.gatheringDirt) {
+                    this.ignoreClearBlock(clearTarget);
+                }
                 if (!this.gatheringDirt) {
                     this.prepareLogQueue(serverLevel);
                 }
                 this.pillarTraceDetail = "";
+                this.lastClearTargetPos = null;
+                this.sameClearTargetTicks = 0;
             }
             return result == ClearBlockAi.TickResult.RUNNING;
         }
@@ -299,6 +336,7 @@ public class GatherLogsGoal extends Goal {
     }
 
     private void prepareLogQueue(ServerLevel serverLevel) {
+        this.pruneIgnoredClearBlocks(serverLevel);
         this.logQueue.clear();
         Optional<Tree> tree = TreeAi.findNearest(serverLevel, this.playerNpc.blockPosition(), TREE_SEARCH_RADIUS);
         tree.ifPresent(value -> this.logQueue.addAll(value.logsNearestFirst(this.playerNpc.blockPosition())));
@@ -359,11 +397,68 @@ public class GatherLogsGoal extends Goal {
         }
 
         List<BlockPos> candidates = ClearBlockAi.gatherObstructionCandidates(this.playerNpc.blockPosition(), this.standPos, this.targetPos);
-        return this.clearBlockAi.startNearest(serverLevel, candidates, GatherLogsGoal::isLogClearBlock, "clearing leaves", LEAF_CLEAR_TICKS);
+        candidates.removeIf(this::isIgnoredClearBlock);
+        return this.clearBlockAi.startNearest(serverLevel, candidates, GatherLogsGoal::isLogClearBlock, "clearing foliage", LEAF_CLEAR_TICKS);
+    }
+
+    private void trackClearTarget(BlockPos clearTarget) {
+        if (clearTarget == null) {
+            this.lastClearTargetPos = null;
+            this.sameClearTargetTicks = 0;
+            return;
+        }
+        if (!clearTarget.equals(this.lastClearTargetPos)) {
+            this.lastClearTargetPos = clearTarget.immutable();
+            this.sameClearTargetTicks = 0;
+        }
+        this.sameClearTargetTicks++;
+    }
+
+    private boolean forceClearLeaf(ServerLevel serverLevel, BlockPos clearTarget) {
+        if (clearTarget == null || !isLogClearBlock(serverLevel.getBlockState(clearTarget))) {
+            return false;
+        }
+        boolean cleared = serverLevel.destroyBlock(clearTarget, false, this.playerNpc);
+        if (!cleared && serverLevel.getBlockEntity(clearTarget) == null) {
+            cleared = serverLevel.setBlockAndUpdate(clearTarget, Blocks.AIR.defaultBlockState());
+        }
+        if (cleared) {
+            this.playerNpc.clearBlockBreakProgress(clearTarget);
+        }
+        return cleared || !isLogClearBlock(serverLevel.getBlockState(clearTarget));
+    }
+
+    private void ignoreClearBlock(BlockPos pos) {
+        if (pos == null) {
+            return;
+        }
+        this.ignoredClearBlocks.add(pos.immutable());
+        while (this.ignoredClearBlocks.size() > MAX_IGNORED_CLEAR_BLOCKS) {
+            Iterator<BlockPos> iterator = this.ignoredClearBlocks.iterator();
+            if (!iterator.hasNext()) {
+                return;
+            }
+            iterator.next();
+            iterator.remove();
+        }
+    }
+
+    private boolean isIgnoredClearBlock(BlockPos pos) {
+        return pos != null && this.ignoredClearBlocks.contains(pos.immutable());
+    }
+
+    private void pruneIgnoredClearBlocks(ServerLevel serverLevel) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        this.ignoredClearBlocks.removeIf(pos ->
+                pos.distSqr(feet) > TREE_SEARCH_RADIUS * TREE_SEARCH_RADIUS
+                        || !isLogClearBlock(serverLevel.getBlockState(pos)));
     }
 
     private static boolean isLogClearBlock(BlockState state) {
-        return state.is(BlockTags.LEAVES);
+        return state.is(BlockTags.LEAVES)
+                || state.is(Blocks.VINE)
+                || state.is(Blocks.CAVE_VINES)
+                || state.is(Blocks.CAVE_VINES_PLANT);
     }
 
     private static boolean isPillarClearBlock(BlockState state) {
@@ -545,8 +640,7 @@ public class GatherLogsGoal extends Goal {
                 + blocker
                 + " "
                 + targetMetricsText(this.standPos, this.targetPos);
-        this.moveToStandPos();
-        return true;
+        return this.moveToStandPos();
     }
 
     private Optional<BlockPos> findBetterPillarBase(ServerLevel serverLevel, BlockPos blockedFeet) {
@@ -908,7 +1002,7 @@ public class GatherLogsGoal extends Goal {
         }
 
         Path path = playerNpc.getNavigation().createPath(pos, 0);
-        return path != null && path.canReach();
+        return isUsablePathToStand(path, pos);
     }
 
     private static double horizontalDistanceToTargetColumnSqr(BlockPos standPos, BlockPos target) {
@@ -958,11 +1052,18 @@ public class GatherLogsGoal extends Goal {
         }
 
         Path path = this.playerNpc.getNavigation().createPath(this.standPos, 0);
-        if (path != null && path.canReach()) {
-            this.playerNpc.getNavigation().moveTo(path, this.speed);
-            return true;
+        if (isUsablePathToStand(path, this.standPos)) {
+            return this.playerNpc.getNavigation().moveTo(path, this.speed);
         }
         return false;
+    }
+
+    private static boolean isUsablePathToStand(Path path, BlockPos standPos) {
+        if (path == null || !path.canReach()) {
+            return false;
+        }
+        Node endNode = path.getEndNode();
+        return endNode != null && endNode.asBlockPos().equals(standPos);
     }
 
     private double distanceToTargetSqr() {

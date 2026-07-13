@@ -394,6 +394,7 @@ public class ManageHomeBaseGoal extends Goal {
             this.finishHomeAction(false);
             return;
         }
+        this.finishPlacementMainHand();
         this.finishHomeAction(true);
     }
 
@@ -432,6 +433,7 @@ public class ManageHomeBaseGoal extends Goal {
             this.returnStack(chest);
             return false;
         }
+        this.finishPlacementMainHand();
         this.playerNpc.setOwnedChestPos(pos);
         return true;
     }
@@ -481,6 +483,7 @@ public class ManageHomeBaseGoal extends Goal {
             return false;
         }
         this.placingBlockAi.playPlaceEffects(serverLevel, foot, footState);
+        this.finishPlacementMainHand();
         return true;
     }
 
@@ -966,6 +969,17 @@ public class ManageHomeBaseGoal extends Goal {
         }
 
         this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
+        this.previousMainHand = ItemStack.EMPTY;
+        this.usingTemporaryTool = false;
+        this.returnTemporaryMainHandOnRestore = false;
+    }
+
+    private void finishPlacementMainHand() {
+        if (!this.usingTemporaryTool) {
+            return;
+        }
+
+        this.placingBlockAi.finishHeldPlacement(this.previousMainHand);
         this.previousMainHand = ItemStack.EMPTY;
         this.usingTemporaryTool = false;
         this.returnTemporaryMainHandOnRestore = false;

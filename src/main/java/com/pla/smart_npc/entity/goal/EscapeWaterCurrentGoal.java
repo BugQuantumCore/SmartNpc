@@ -1,12 +1,11 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.sounds.SoundEvents;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -36,6 +35,7 @@ public class EscapeWaterCurrentGoal extends Goal {
     private static final double FALLBACK_STAND_PLACE_CLEARANCE_Y = 0.68D;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private BlockPos waterPos;
     private BlockPos plugPos;
     private BlockPos standPlacePos;
@@ -50,6 +50,7 @@ public class EscapeWaterCurrentGoal extends Goal {
 
     public EscapeWaterCurrentGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.JUMP, Flag.LOOK));
     }
 
@@ -358,13 +359,12 @@ public class EscapeWaterCurrentGoal extends Goal {
 
         this.showPlacementItem(blockStack);
         this.playerNpc.getLookControl().setLookAt(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, 50.0F, 50.0F);
-        if (!serverLevel.setBlockAndUpdate(pos, state)) {
+        if (!this.placingBlockAi.placeBlock(serverLevel, pos, state)) {
             this.returnStack(blockStack);
             return false;
         }
 
-        this.playerNpc.triggerMainHandUseAnimation();
-        serverLevel.playSound(null, pos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
+        this.finishPlacementMainHand();
         return true;
     }
 
@@ -384,13 +384,12 @@ public class EscapeWaterCurrentGoal extends Goal {
         }
 
         this.showPlacementItem(blockStack);
-        if (!serverLevel.setBlockAndUpdate(pos, state)) {
+        if (!this.placingBlockAi.placeBlock(serverLevel, pos, state)) {
             this.returnStack(blockStack);
             return false;
         }
 
-        this.playerNpc.triggerMainHandUseAnimation();
-        serverLevel.playSound(null, pos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
+        this.finishPlacementMainHand();
         return true;
     }
 
@@ -543,6 +542,15 @@ public class EscapeWaterCurrentGoal extends Goal {
             return;
         }
         this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
+        this.previousMainHand = ItemStack.EMPTY;
+        this.showingPlacementItem = false;
+    }
+
+    private void finishPlacementMainHand() {
+        if (!this.showingPlacementItem) {
+            return;
+        }
+        this.placingBlockAi.finishHeldPlacement(this.previousMainHand);
         this.previousMainHand = ItemStack.EMPTY;
         this.showingPlacementItem = false;
     }

@@ -100,12 +100,46 @@ public final class PlayerNpcHomeUtil {
     }
 
     public static boolean isInside(HomeArea homeArea, BlockPos pos) {
-        return pos.getX() >= homeArea.origin().getX()
-                && pos.getX() < homeArea.origin().getX() + homeArea.width()
-                && pos.getZ() >= homeArea.origin().getZ()
-                && pos.getZ() < homeArea.origin().getZ() + homeArea.depth()
+        return isInsideFootprint(homeArea, pos)
                 && pos.getY() >= homeArea.origin().getY()
                 && pos.getY() <= homeArea.origin().getY() + PROTECTED_HOME_HEIGHT;
+    }
+
+    public static boolean isInsideFootprint(HomeArea homeArea, BlockPos pos) {
+        return homeArea != null
+                && pos != null
+                && pos.getX() >= homeArea.origin().getX()
+                && pos.getX() < homeArea.origin().getX() + homeArea.width()
+                && pos.getZ() >= homeArea.origin().getZ()
+                && pos.getZ() < homeArea.origin().getZ() + homeArea.depth();
+    }
+
+    public static boolean isInsideBuildFootprint(PlayerNpcEntity playerNpc, BlockPos pos) {
+        if (playerNpc == null || pos == null) {
+            return false;
+        }
+
+        Optional<HomeArea> home = getHome(playerNpc);
+        if (home.isEmpty()) {
+            return false;
+        }
+
+        HomeArea homeArea = home.get();
+        if (!isInsideFootprint(homeArea, pos)) {
+            return false;
+        }
+
+        Optional<PlayerNpcBuildLayout> layout = getHomeLayoutId(playerNpc)
+                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
+        if (layout.isEmpty()
+                || layout.get().width() != homeArea.width()
+                || layout.get().depth() != homeArea.depth()) {
+            return true;
+        }
+
+        int relX = pos.getX() - homeArea.origin().getX();
+        int relZ = pos.getZ() - homeArea.origin().getZ();
+        return layout.get().isInFootprint(relX, relZ);
     }
 
     public static BlockPos center(HomeArea homeArea) {

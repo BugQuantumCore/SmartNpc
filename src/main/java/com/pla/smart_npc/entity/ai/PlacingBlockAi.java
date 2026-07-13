@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import net.minecraft.core.BlockPos;
@@ -8,6 +9,8 @@ import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.ChestType;
@@ -59,6 +62,39 @@ public final class PlacingBlockAi {
         return true;
     }
 
+    public boolean placeHeldBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        return this.placeHeldBlock(serverLevel, pos, state, true);
+    }
+
+    public boolean placeHeldBlock(ServerLevel serverLevel, BlockPos pos, BlockState state, boolean playEffects) {
+        if (this.playerNpc.getMainHandItem().isEmpty()) {
+            return false;
+        }
+        if (!this.placeBlock(serverLevel, pos, state, playEffects)) {
+            return false;
+        }
+
+        this.consumeHeldPlacementItem();
+        return true;
+    }
+
+    public void finishHeldPlacement(ItemStack previousMainHand) {
+        this.consumeHeldPlacementItem();
+        this.stashPreviousMainHand(previousMainHand);
+    }
+
+    public void consumeHeldPlacementItem() {
+        ItemStack mainHand = this.playerNpc.getMainHandItem();
+        if (mainHand.isEmpty()) {
+            return;
+        }
+
+        mainHand.shrink(1);
+        if (mainHand.isEmpty()) {
+            this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+        }
+    }
+
     public void playPlaceEffects(ServerLevel serverLevel, BlockPos pos, BlockState state) {
         this.playerNpc.triggerMainHandUseAnimation();
         PlayerNpcBlockSoundUtil.playPlaceSound(serverLevel, pos, state, this.playerNpc);
@@ -100,6 +136,17 @@ public final class PlacingBlockAi {
             delay += random.nextInt(Math.max(0, profile.maxSlowExtraTicks()) + 1);
         }
         return delay;
+    }
+
+    private void stashPreviousMainHand(ItemStack stack) {
+        ItemStack previous = stack == null ? ItemStack.EMPTY : stack.copy();
+        if (previous.isEmpty() || this.playerNpc.promoteMainWeaponItem(previous)) {
+            return;
+        }
+
+        if (!InventoryUtils.addItem(this.playerNpc, previous)) {
+            this.playerNpc.spawnAtLocation(previous);
+        }
     }
 
     private static BlockState stateForPlacement(ServerLevel serverLevel, BlockPos pos, BlockState state) {

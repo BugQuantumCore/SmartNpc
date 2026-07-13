@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -10,10 +11,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.sounds.SoundEvents;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.BlockTags;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.goal.Goal;
@@ -61,6 +59,7 @@ public class ExploreCaveOreGoal extends Goal {
     private static final int UPWARD_ESCAPE_REQUEST_TICKS = 20 * 8;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private final double speed;
     private final Set<BlockPos> clusterOres = new HashSet<>();
     private final Set<BlockPos> minedClusterOres = new HashSet<>();
@@ -81,6 +80,7 @@ public class ExploreCaveOreGoal extends Goal {
 
     public ExploreCaveOreGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.speed = Math.min(speed, 1.0D);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
@@ -969,10 +969,8 @@ public class ExploreCaveOreGoal extends Goal {
             return;
         }
 
-        serverLevel.setBlockAndUpdate(torchPos, Blocks.TORCH.defaultBlockState());
+        this.placingBlockAi.placeBlock(serverLevel, torchPos, Blocks.TORCH.defaultBlockState());
         this.playerNpc.getLookControl().setLookAt(torchPos.getX() + 0.5D, torchPos.getY() + 0.5D, torchPos.getZ() + 0.5D, 40.0F, 40.0F);
-        this.playerNpc.triggerMainHandUseAnimation();
-        serverLevel.playSound(null, torchPos, SoundEvents.WOOD_PLACE, SoundSource.BLOCKS, 0.7F, 1.0F);
     }
 
     private BlockPos findTorchPlacement(ServerLevel serverLevel) {

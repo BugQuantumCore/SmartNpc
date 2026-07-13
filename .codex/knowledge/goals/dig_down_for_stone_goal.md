@@ -15,7 +15,7 @@ Gives building-interest Player NPCs a direct stone progression path after a base
 - NPC must be idle with no combat target and not healing.
 - Requires a pickaxe in hand or inventory.
 - Requires a saved home/base and no actionable `TerraformBuildSiteGoal` prep work.
-- Uses `GatherStoneGoal.isStoneSupplyPhaseActive(...)`, so it runs when the prepared base still needs cobblestone/cobbled deepslate supply or the current build has a stone-family need. It should not be blocked by a one-log dip or by pending stone smelting.
+- Uses `GatherStoneGoal.isStoneSupplyPhaseActive(...)`, so it only runs when log supply is met, a pickaxe is carried, the saved base is prepared, and the prepared base still needs cobblestone/cobbled deepslate supply or the current build has a stone-family need. Pending stone smelting should not create a separate dig-down gate; callers should use the shared stone phase predicate.
 - Skips if the prepared stone phase is already closed.
 - Uses `gatherCooldown` as its retry cooldown.
 

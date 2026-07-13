@@ -164,6 +164,7 @@ public class BuildHouseGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
+                || this.playerNpc.isStoneAccessClearing()
                 || this.playerNpc.getTarget() != null) {
             return false;
         }
@@ -381,6 +382,7 @@ public class BuildHouseGoal extends Goal {
                     this.placedBlockSoundPos == null ? target : this.placedBlockSoundPos,
                     this.placedBlockStateThisTick
             );
+            this.finishPlacementMainHand();
         }
         this.blueprint.remove(block);
         this.clearActiveBuildBlock();
@@ -632,6 +634,7 @@ public class BuildHouseGoal extends Goal {
             this.returnStack(table);
             return false;
         }
+        this.finishPlacementMainHand();
         this.playerNpc.getLookControl().setLookAt(placement.getX() + 0.5D, placement.getY() + 0.5D, placement.getZ() + 0.5D, 40.0F, 40.0F);
         this.updateTaskDetail("placed build crafting table", Blocks.CRAFTING_TABLE.defaultBlockState(), placement);
         return true;
@@ -1030,6 +1033,16 @@ public class BuildHouseGoal extends Goal {
         }
 
         this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
+        this.previousMainHand = ItemStack.EMPTY;
+        this.showingPlacementItem = false;
+    }
+
+    private void finishPlacementMainHand() {
+        if (!this.showingPlacementItem) {
+            return;
+        }
+
+        this.placingBlockAi.finishHeldPlacement(this.previousMainHand);
         this.previousMainHand = ItemStack.EMPTY;
         this.showingPlacementItem = false;
     }

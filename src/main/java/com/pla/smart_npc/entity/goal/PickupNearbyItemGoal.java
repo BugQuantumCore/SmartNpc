@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -15,7 +16,6 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.SimpleContainer;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
@@ -27,11 +27,9 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.PickaxeItem;
 import net.minecraft.world.item.ShovelItem;
-import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Path;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.registries.ForgeRegistries;
@@ -72,6 +70,7 @@ public class PickupNearbyItemGoal extends Goal {
     private static final double PICKUP_PILLAR_FALLBACK_PLACE_CLEARANCE_Y = 0.78D;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private final double speed;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private final Set<BlockPos> skippedObstructions = new HashSet<>();
@@ -95,6 +94,7 @@ public class PickupNearbyItemGoal extends Goal {
 
     public PickupNearbyItemGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.speed = Math.min(speed, 1.0D);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
@@ -780,25 +780,11 @@ public class PickupNearbyItemGoal extends Goal {
         }
 
         lookDownAt(pickupPillarPlacePos);
-        if (!serverLevel.setBlockAndUpdate(pickupPillarPlacePos, placeState)) {
+        if (!this.placingBlockAi.placeHeldBlock(serverLevel, pickupPillarPlacePos, placeState)) {
             clearPickupPillarPlacement();
             return;
         }
         snapAbovePickupPillarIfNeeded(pickupPillarPlacePos);
-        playerNpc.swing(InteractionHand.MAIN_HAND, true);
-        SoundType soundType = placeState.getSoundType(serverLevel, pickupPillarPlacePos, playerNpc);
-        serverLevel.playSound(
-                null,
-                pickupPillarPlacePos,
-                soundType.getPlaceSound(),
-                SoundSource.BLOCKS,
-                (soundType.getVolume() + 1.0F) * 0.5F,
-                soundType.getPitch() * 0.8F
-        );
-        blockStack.shrink(1);
-        if (blockStack.isEmpty()) {
-            playerNpc.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
-        }
 
         failedPathTicks = 0;
         repathTicks = 0;
@@ -862,22 +848,55 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private boolean equipPickupPillarBlock() {
-        if (isPickupPillarBlock(playerNpc.getMainHandItem())) {
+        ItemStack mainHand = playerNpc.getMainHandItem();
+        if (isDirtPillarBlock(mainHand)) {
             return true;
         }
 
-        if (!InventoryUtils.hasItem(playerNpc, this::isPickupPillarBlock)) {
-            PlayerNpcCraftingUtil.tryConvertOneLogToPlanks(playerNpc.getInventory(), 0);
-        }
-
-        ItemStack block = playerNpc.consumeInventoryItem(this::isPickupPillarBlock, 1)
+        ItemStack block = playerNpc.consumeInventoryItem(PickupNearbyItemGoal::isDirtPillarBlock, 1)
                 .orElse(ItemStack.EMPTY);
-        if (block.isEmpty()) {
-            return false;
+        if (!block.isEmpty()) {
+            setTemporaryMainHand(block);
+            return true;
         }
 
-        setTemporaryMainHand(block);
-        return true;
+        if (mainHand.getItem() instanceof BlockItem mainBlockItem
+                && isStonePillarBlock(mainBlockItem.getBlock().defaultBlockState())) {
+            return true;
+        }
+
+        block = playerNpc.consumeInventoryItem(stack -> {
+            if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem blockItem)) {
+                return false;
+            }
+            return isStonePillarBlock(blockItem.getBlock().defaultBlockState());
+        }, 1).orElse(ItemStack.EMPTY);
+        if (!block.isEmpty()) {
+            setTemporaryMainHand(block);
+            return true;
+        }
+
+        if (isUsablePlankPillarBlock(mainHand)) {
+            return true;
+        }
+
+        block = playerNpc.consumeInventoryItem(this::isUsablePlankPillarBlock, 1)
+                .orElse(ItemStack.EMPTY);
+        if (!block.isEmpty()) {
+            setTemporaryMainHand(block);
+            return true;
+        }
+
+        if (!shouldPreserveWoodForPillar() && !InventoryUtils.hasItem(playerNpc, this::isPickupPillarBlock)) {
+            PlayerNpcCraftingUtil.tryConvertOneLogToPlanks(playerNpc.getInventory(), 0);
+            block = playerNpc.consumeInventoryItem(this::isUsablePlankPillarBlock, 1)
+                    .orElse(ItemStack.EMPTY);
+            if (!block.isEmpty()) {
+                setTemporaryMainHand(block);
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isPickupPillarBlock(ItemStack stack) {
@@ -889,8 +908,16 @@ public class PickupNearbyItemGoal extends Goal {
                 && state.getFluidState().isEmpty()
                 && !state.canBeReplaced()
                 && (isDirtPillarBlock(stack)
-                        || stack.is(ItemTags.PLANKS)
+                        || this.isUsablePlankPillarBlock(stack)
                         || isStonePillarBlock(state));
+    }
+
+    private boolean isUsablePlankPillarBlock(ItemStack stack) {
+        return stack.is(ItemTags.PLANKS) && !this.shouldPreserveWoodForPillar();
+    }
+
+    private boolean shouldPreserveWoodForPillar() {
+        return this.playerNpc.shouldPrioritizeLogGathering();
     }
 
     private static boolean isDirtPillarBlock(ItemStack stack) {
@@ -944,7 +971,9 @@ public class PickupNearbyItemGoal extends Goal {
                 count += stack.getCount();
             }
         }
-        return count + PlayerNpcCraftingUtil.countLogs(playerNpc.getInventory()) * 4;
+        return count + (this.shouldPreserveWoodForPillar()
+                ? 0
+                : PlayerNpcCraftingUtil.countLogs(playerNpc.getInventory()) * 4);
     }
 
     private void lookDownAt(BlockPos pos) {

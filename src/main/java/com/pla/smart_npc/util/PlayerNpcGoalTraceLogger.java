@@ -20,6 +20,7 @@ import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
@@ -37,9 +38,13 @@ public final class PlayerNpcGoalTraceLogger {
     private static final String ENTITY_ID_KEY = "PlayerNpcGoalTraceEntityId";
     private static final String LAST_LOG_TICK_KEY = "PlayerNpcGoalTraceLastLogTick";
     private static final String LAST_STATE_KEY = "PlayerNpcGoalTraceLastState";
+    private static final String LAST_DETAIL_KEY = "PlayerNpcGoalTraceLastDetail";
     private static final int TRACE_INTERVAL_TICKS = 20;
+    private static final int UNCHANGED_ACTIVE_TRACE_INTERVAL_TICKS = 20 * 5;
+    private static final int UNCHANGED_PASSIVE_TRACE_INTERVAL_TICKS = 20 * 10;
     private static final int BUILDING_TEXT_CACHE_TICKS = 40;
     private static final double MAX_NON_INSPECTATOR_TRACE_DISTANCE_SQR = 64.0D * 64.0D;
+    private static final String PASSIVE_HOME_STATE = "ai.player_npc.being_at_home";
     private static final Map<PlayerNpcEntity, BuildingTextCache> BUILDING_TEXT_CACHE = new WeakHashMap<>();
 
     private PlayerNpcGoalTraceLogger() {
@@ -65,13 +70,39 @@ public final class PlayerNpcGoalTraceLogger {
                 continue;
             }
 
+            String state = sanitize(tracedNpc.getCurrentAiState());
+            String detail = sanitize(tracedNpc.getCurrentAiDetail());
+            String previousState = sanitize(data.getString(LAST_STATE_KEY));
+            String previousDetail = sanitize(data.getString(LAST_DETAIL_KEY));
+            boolean changed = !previousState.equals(state) || !previousDetail.equals(detail);
             long lastLogTick = data.getLong(LAST_LOG_TICK_KEY);
-            if (lastLogTick > 0L && serverTick - lastLogTick < TRACE_INTERVAL_TICKS) {
+            if (lastLogTick > serverTick) {
+                lastLogTick = 0L;
+                data.putLong(LAST_LOG_TICK_KEY, 0L);
+            }
+            int interval = changed ? TRACE_INTERVAL_TICKS : unchangedTraceInterval(state);
+            if (lastLogTick > 0L && serverTick - lastLogTick < interval) {
                 continue;
             }
 
             data.putLong(LAST_LOG_TICK_KEY, serverTick);
-            logTraceLine(player, tracedNpc, serverTick);
+            logTraceLine(player, tracedNpc, serverTick, state, detail, previousState);
+            data.putString(LAST_STATE_KEY, state);
+            data.putString(LAST_DETAIL_KEY, detail);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            stopTrace(player, "viewer rejoined");
+        }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            stopTrace(player, "viewer disconnected");
         }
     }
 
@@ -81,9 +112,14 @@ public final class PlayerNpcGoalTraceLogger {
         }
 
         CompoundTag data = player.getPersistentData();
-        return data.getBoolean(ACTIVE_KEY)
+        boolean tracing = data.getBoolean(ACTIVE_KEY)
                 && data.hasUUID(ENTITY_UUID_KEY)
                 && data.getUUID(ENTITY_UUID_KEY).equals(playerNpc.getUUID());
+        if (tracing && !canKeepTracing(player, playerNpc)) {
+            stopTrace(player, "trace target unavailable");
+            return false;
+        }
+        return tracing;
     }
 
     public static void setTraceEnabled(ServerPlayer player, PlayerNpcEntity playerNpc, boolean enabled) {
@@ -107,6 +143,7 @@ public final class PlayerNpcGoalTraceLogger {
         data.putInt(ENTITY_ID_KEY, playerNpc.getId());
         data.putLong(LAST_LOG_TICK_KEY, 0L);
         data.putString(LAST_STATE_KEY, sanitize(playerNpc.getCurrentAiState()));
+        data.putString(LAST_DETAIL_KEY, sanitize(playerNpc.getCurrentAiDetail()));
 
         SmartNpc.LOGGER.info(
                 "Smart NPC goal trace enabled: viewer={} npc={}#{} dim={} pos={}",
@@ -156,16 +193,11 @@ public final class PlayerNpcGoalTraceLogger {
         }
     }
 
-    private static void logTraceLine(ServerPlayer viewer, PlayerNpcEntity playerNpc, long serverTick) {
-        CompoundTag data = viewer.getPersistentData();
-        String state = sanitize(playerNpc.getCurrentAiState());
-        String previousState = sanitize(data.getString(LAST_STATE_KEY));
+    private static void logTraceLine(ServerPlayer viewer, PlayerNpcEntity playerNpc, long serverTick, String state, String detail, String previousState) {
         String stateChange = previousState.isBlank() || previousState.equals(state)
                 ? "none"
                 : previousState + "->" + state;
-        data.putString(LAST_STATE_KEY, state);
 
-        String detail = sanitize(playerNpc.getCurrentAiDetail());
         String result = traceResult(playerNpc, state);
         SmartNpc.LOGGER.info(
                 "Smart NPC goal trace: viewer={} tick={} npc={}#{} dim={} pos={} health={}/{} flags={} state={} stateChange={} detail=\"{}\" result={} target={} navigation={} cooldowns={} building={} runningGoals={} runningTargetGoals={}",
@@ -189,6 +221,18 @@ public final class PlayerNpcGoalTraceLogger {
                 runningGoalsText(playerNpc.goalSelector.getRunningGoals().collect(Collectors.toList())),
                 runningGoalsText(playerNpc.targetSelector.getRunningGoals().collect(Collectors.toList()))
         );
+    }
+
+    private static int unchangedTraceInterval(String state) {
+        return isPassiveTraceState(state)
+                ? UNCHANGED_PASSIVE_TRACE_INTERVAL_TICKS
+                : UNCHANGED_ACTIVE_TRACE_INTERVAL_TICKS;
+    }
+
+    private static boolean isPassiveTraceState(String state) {
+        return state.isBlank()
+                || PlayerNpcEntity.AI_IDLE.equals(state)
+                || PASSIVE_HOME_STATE.equals(state);
     }
 
     private static PlayerNpcEntity getTracedNpc(ServerPlayer player) {
@@ -431,6 +475,7 @@ public final class PlayerNpcGoalTraceLogger {
         data.remove(ENTITY_ID_KEY);
         data.remove(LAST_LOG_TICK_KEY);
         data.remove(LAST_STATE_KEY);
+        data.remove(LAST_DETAIL_KEY);
     }
 
     private record BuildingTextCache(

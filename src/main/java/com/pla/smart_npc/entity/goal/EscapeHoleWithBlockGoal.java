@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -8,8 +9,6 @@ import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.sounds.SoundEvents;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
@@ -66,6 +65,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final double ROUTE_NAV_REACHED_SQR = 2.0D * 2.0D;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private EscapeMode mode = EscapeMode.NONE;
     private BlockPos placePos;
     private BlockPos minePos;
@@ -95,6 +95,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     public EscapeHoleWithBlockGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.JUMP, Flag.LOOK));
     }
 
@@ -109,7 +110,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
-                || this.playerNpc.isInWaterOrBubble()) {
+                || this.playerNpc.isInWaterOrBubble()
+                || this.playerNpc.isStoneAccessClearing()) {
             return false;
         }
 
@@ -119,12 +121,20 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.playerNpc.clearUpwardEscapeTarget();
             return false;
         }
+        boolean hasRequestedEscape = requestedTarget != null;
+        boolean forceRequestedClimb = this.playerNpc.isForcedUpwardEscape()
+                && hasRequestedEscape
+                && requestedTarget.getY() > feet.getY() + 1;
         boolean trapped = this.hasOpenBodySpace(serverLevel, feet)
                 && this.isWalkableFloor(serverLevel, feet.below())
                 && this.isActuallyTrapped(serverLevel, feet);
         BlockPos routeTarget = this.getUpwardRouteTarget(serverLevel, feet);
         boolean hasUpwardRouteTarget = routeTarget != null && this.isUsableUpwardRouteTarget(serverLevel, feet, routeTarget);
-        if (!trapped && !hasUpwardRouteTarget && this.hasReachedOpenSky(serverLevel, feet)) {
+        if (forceRequestedClimb && !hasUpwardRouteTarget) {
+            routeTarget = requestedTarget.immutable();
+            hasUpwardRouteTarget = true;
+        }
+        if (!trapped && !hasUpwardRouteTarget && this.hasReachedOpenSky(serverLevel, feet) && !forceRequestedClimb) {
             if (requestedTarget != null) {
                 this.playerNpc.clearUpwardEscapeTarget();
             }
@@ -138,11 +148,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
 
-        if (this.playerNpc.tickCount < this.nextPillarPlanTick) {
+        if (this.playerNpc.tickCount < this.nextPillarPlanTick && !forceRequestedClimb) {
             return false;
         }
 
-        boolean routeNeedsClimb = hasUpwardRouteTarget && this.routeNeedsClimb(serverLevel, feet, routeTarget);
+        boolean routeNeedsClimb = forceRequestedClimb || hasUpwardRouteTarget && this.routeNeedsClimb(serverLevel, feet, routeTarget);
 
         if (!trapped && !routeNeedsClimb) {
             return false;
@@ -159,7 +169,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return true;
         }
 
-        if (routeNeedsClimb && !trapped && this.hasReachedOpenSky(serverLevel, feet)) {
+        if (routeNeedsClimb && !trapped && this.hasReachedOpenSky(serverLevel, feet) && !forceRequestedClimb) {
             return false;
         }
 
@@ -326,7 +336,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             return false;
         }
-        return this.hasReachedRequestedSurfaceExit(serverLevel, this.playerNpc.blockPosition(), requestedTarget);
+        return this.hasReachedRequestedRoute(serverLevel, this.playerNpc.blockPosition(), requestedTarget);
     }
 
     private void tickRouteNavigation(ServerLevel serverLevel) {
@@ -616,14 +626,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         this.lookDownAt(this.placePos);
-        serverLevel.setBlockAndUpdate(this.placePos, blockItem.getBlock().defaultBlockState());
-        this.snapAbovePillarIfNeeded(this.placePos);
-        this.playerNpc.triggerMainHandUseAnimation();
-        serverLevel.playSound(null, this.placePos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
-        blockStack.shrink(1);
-        if (blockStack.isEmpty()) {
-            this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+        if (!this.placingBlockAi.placeHeldBlock(serverLevel, this.placePos, blockItem.getBlock().defaultBlockState())) {
+            this.finished = true;
+            return;
         }
+        this.snapAbovePillarIfNeeded(this.placePos);
         this.pillarsPlaced++;
         this.failedPillarPlaceAttempts = 0;
         this.placePos = null;
@@ -819,7 +826,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         BlockPos feet = this.playerNpc.blockPosition();
         if (this.isRequestedSurfaceRoute(serverLevel, feet, this.climbTargetPos)) {
-            return !this.hasReachedRequestedSurfaceExit(serverLevel, feet, this.climbTargetPos);
+            return !this.hasReachedRequestedRoute(serverLevel, feet, this.climbTargetPos);
         }
 
         if (this.hasReachedOpenSky(serverLevel, feet) && !this.isActuallyTrapped(serverLevel, feet)) {
@@ -947,7 +954,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
                     : null;
         }
 
-        boolean requestedSurfaceRoute = this.isRequestedSurfaceRoute(serverLevel, this.playerNpc.blockPosition(), routeTarget);
+        boolean forcedRequestedRoute = this.isForcedRequestedRoute(routeTarget);
+        boolean requestedSurfaceRoute = !forcedRequestedRoute
+                && this.isRequestedSurfaceRoute(serverLevel, this.playerNpc.blockPosition(), routeTarget);
         int requestedSurfaceY = requestedSurfaceRoute ? this.nearbySurfaceY(serverLevel, base) : base.getY() + 1;
         int scanTop = Math.min(serverLevel.getMaxBuildHeight() - 3, base.getY() + PILLAR_SURFACE_SCAN_UP);
         for (int y = base.getY(); y <= scanTop; y++) {
@@ -959,7 +968,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             boolean reachesRoute = !requestedSurfaceRoute
                     && routeTarget != null
                     && y >= routeTarget.getY() - 1
-                    && this.hasStepExitToward(serverLevel, feetAtY, routeTarget);
+                    && (forcedRequestedRoute || this.hasStepExitToward(serverLevel, feetAtY, routeTarget));
             boolean reachesSurface = serverLevel.canSeeSky(feetAtY.above())
                     && (requestedSurfaceRoute
                     ? y >= requestedSurfaceY
@@ -1206,7 +1215,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private boolean isRouteNavigationComplete(ServerLevel serverLevel, BlockPos feet) {
         if (this.hasReachedOpenSky(serverLevel, feet) && !this.isActuallyTrapped(serverLevel, feet)) {
             if (this.climbTargetPos != null && this.isRequestedSurfaceRoute(serverLevel, feet, this.climbTargetPos)) {
-                return this.hasReachedRequestedSurfaceExit(serverLevel, feet, this.climbTargetPos);
+                return this.hasReachedRequestedRoute(serverLevel, feet, this.climbTargetPos);
             }
             return true;
         }
@@ -1316,17 +1325,19 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
         if (this.climbTargetPos != null && this.isRequestedSurfaceRoute(serverLevel, feet, this.climbTargetPos)) {
-            return this.hasReachedRequestedSurfaceExit(serverLevel, feet, this.climbTargetPos);
+            return this.hasReachedRequestedRoute(serverLevel, feet, this.climbTargetPos);
         }
         return true;
     }
 
-    private boolean hasReachedRequestedSurfaceExit(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
-        Path path = this.playerNpc.getNavigation().createPath(routeTarget, 0);
-        if (path != null && path.canReach()) {
-            return true;
+    private boolean hasReachedRequestedRoute(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
+        if (this.isForcedRequestedRoute(routeTarget)) {
+            return feet.getY() >= routeTarget.getY() - 1;
         }
+        return this.hasReachedRequestedSurfaceExit(serverLevel, feet, routeTarget);
+    }
 
+    private boolean hasReachedRequestedSurfaceExit(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
         int nearbySurfaceY = this.nearbySurfaceY(serverLevel, feet);
         if (feet.getY() < nearbySurfaceY - 1) {
             return false;
@@ -1336,6 +1347,12 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean hasSatisfiedRequestedRoute(ServerLevel serverLevel, BlockPos feet, BlockPos requestedTarget) {
+        if (this.isForcedRequestedRoute(requestedTarget)) {
+            return this.hasReachedRequestedRoute(serverLevel, feet, requestedTarget);
+        }
+        if (requestedTarget.getY() > feet.getY() + 1) {
+            return this.hasReachedRequestedSurfaceExit(serverLevel, feet, requestedTarget);
+        }
         return this.isSameOrNearbyRouteBlock(feet, requestedTarget)
                 || this.hasReachedRequestedSurfaceExit(serverLevel, feet, requestedTarget);
     }
@@ -1344,6 +1361,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
         return routeTarget != null
                 && Math.abs(routeTarget.getY() - feet.getY()) <= 1
                 && routeTarget.distSqr(feet) <= ROUTE_NAV_REACHED_SQR;
+    }
+
+    private boolean isForcedRequestedRoute(BlockPos routeTarget) {
+        BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+        return routeTarget != null
+                && requestedTarget != null
+                && requestedTarget.equals(routeTarget)
+                && this.playerNpc.isForcedUpwardEscape();
     }
 
     private int nearbySurfaceY(ServerLevel serverLevel, BlockPos center) {
@@ -1427,7 +1452,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 && state.getFluidState().isEmpty()
                 && !state.canBeReplaced()
                 && (this.isDirtPillarBlock(stack)
-                        || stack.is(ItemTags.PLANKS)
+                        || this.isUsablePlankPillarBlock(stack)
                         || this.isStonePillarBlock(state));
     }
 
@@ -1471,6 +1496,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || state.is(Blocks.END_STONE)
                 || state.is(Blocks.SANDSTONE)
                 || state.is(Blocks.RED_SANDSTONE);
+    }
+
+    private boolean isUsablePlankPillarBlock(ItemStack stack) {
+        return stack.is(ItemTags.PLANKS) && !this.shouldPreserveWoodForPillar();
+    }
+
+    private boolean shouldPreserveWoodForPillar() {
+        return this.playerNpc.shouldPrioritizeLogGathering();
     }
 
     private boolean canGatherEscapeMaterial(BlockState state) {
@@ -1607,19 +1640,58 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean equipEscapeBlockForPlacement() {
-        if (this.isEscapeBlock(this.playerNpc.getMainHandItem())) {
+        ItemStack mainHand = this.playerNpc.getMainHandItem();
+        if (this.isDirtPillarBlock(mainHand)) {
             return true;
         }
 
-        if (!InventoryUtils.hasItem(this.playerNpc, this::isEscapeBlock)) {
+        ItemStack preferredBlock = InventoryUtils.consumeItem(this.playerNpc, this::isDirtPillarBlock, 1)
+                .orElse(ItemStack.EMPTY);
+        if (!preferredBlock.isEmpty()) {
+            this.equipTemporaryPillarBlock(preferredBlock);
+            return true;
+        }
+
+        if (mainHand.getItem() instanceof BlockItem mainBlockItem
+                && this.isStonePillarBlock(mainBlockItem.getBlock().defaultBlockState())) {
+            return true;
+        }
+
+        preferredBlock = InventoryUtils.consumeItem(this.playerNpc, stack -> {
+            if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem blockItem)) {
+                return false;
+            }
+            return this.isStonePillarBlock(blockItem.getBlock().defaultBlockState());
+        }, 1).orElse(ItemStack.EMPTY);
+        if (!preferredBlock.isEmpty()) {
+            this.equipTemporaryPillarBlock(preferredBlock);
+            return true;
+        }
+
+        if (this.isUsablePlankPillarBlock(mainHand)) {
+            return true;
+        }
+
+        preferredBlock = InventoryUtils.consumeItem(this.playerNpc, this::isUsablePlankPillarBlock, 1)
+                .orElse(ItemStack.EMPTY);
+        if (!preferredBlock.isEmpty()) {
+            this.equipTemporaryPillarBlock(preferredBlock);
+            return true;
+        }
+
+        if (!this.shouldPreserveWoodForPillar() && !InventoryUtils.hasItem(this.playerNpc, this::isEscapeBlock)) {
             PlayerNpcCraftingUtil.tryConvertOneLogToPlanks(this.playerNpc.getInventory(), 0);
+            preferredBlock = InventoryUtils.consumeItem(this.playerNpc, this::isUsablePlankPillarBlock, 1)
+                    .orElse(ItemStack.EMPTY);
+            if (!preferredBlock.isEmpty()) {
+                this.equipTemporaryPillarBlock(preferredBlock);
+                return true;
+            }
         }
+        return false;
+    }
 
-        ItemStack block = InventoryUtils.consumeItem(this.playerNpc, this::isEscapeBlock, 1).orElse(ItemStack.EMPTY);
-        if (block.isEmpty()) {
-            return false;
-        }
-
+    private void equipTemporaryPillarBlock(ItemStack block) {
         ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
         if (!this.usingTemporaryBlock) {
             this.previousPillarMainHand = currentMainHand;
@@ -1630,7 +1702,6 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.playerNpc.spawnAtLocation(currentMainHand);
         }
         this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, block);
-        return true;
     }
 
     private void restorePreviousMainHand() {
@@ -1699,6 +1770,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private int countCraftablePillarPlanks() {
+        if (this.shouldPreserveWoodForPillar()) {
+            return 0;
+        }
         return PlayerNpcCraftingUtil.countLogs(this.playerNpc.getInventory()) * 4;
     }
 

@@ -1,11 +1,11 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Pose;
@@ -29,6 +29,7 @@ public class JukeboxDanceGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 70;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private final double speed;
     private Action action = Action.NONE;
     private BlockPos jukeboxPos;
@@ -37,6 +38,7 @@ public class JukeboxDanceGoal extends Goal {
 
     public JukeboxDanceGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.speed = Math.min(speed, 1.0D);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK, Flag.TARGET));
     }
@@ -171,11 +173,12 @@ public class JukeboxDanceGoal extends Goal {
         BlockPos placement = this.findJukeboxPlacement(serverLevel, home.get());
         ItemStack jukebox = this.playerNpc.consumeInventoryItem(Items.JUKEBOX, 1).orElse(ItemStack.EMPTY);
         if (placement != null && !jukebox.isEmpty()) {
-            serverLevel.setBlockAndUpdate(placement, Blocks.JUKEBOX.defaultBlockState());
-            this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
-            this.playerNpc.getLookControl().setLookAt(placement.getX() + 0.5D, placement.getY() + 0.5D, placement.getZ() + 0.5D, 40.0F, 40.0F);
-            this.playerNpc.setCurrentAiState("ai.player_npc.setting_up_jukebox");
-            serverLevel.playSound(null, placement, SoundEvents.WOOD_PLACE, SoundSource.BLOCKS, 0.8F, 1.0F);
+            if (this.placingBlockAi.placeBlock(serverLevel, placement, Blocks.JUKEBOX.defaultBlockState())) {
+                this.playerNpc.getLookControl().setLookAt(placement.getX() + 0.5D, placement.getY() + 0.5D, placement.getZ() + 0.5D, 40.0F, 40.0F);
+                this.playerNpc.setCurrentAiState("ai.player_npc.setting_up_jukebox");
+            } else if (!InventoryUtils.addItem(this.playerNpc, jukebox)) {
+                this.playerNpc.spawnAtLocation(jukebox);
+            }
         } else if (!jukebox.isEmpty() && !InventoryUtils.addItem(this.playerNpc, jukebox)) {
             this.playerNpc.spawnAtLocation(jukebox);
         }

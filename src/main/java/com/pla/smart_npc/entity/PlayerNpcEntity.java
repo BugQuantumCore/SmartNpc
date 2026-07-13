@@ -124,6 +124,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int MAIN_HAND_USE_ANIMATION_DURATION = 6;
     private static final int PLACE_BLOCK_PARRY_COOLDOWN_TICKS = 60;
     private static final double PLAYER_LIKE_JUMP_Y = 0.42D;
+    private static final int EXPLORATION_RETURN_ESCAPE_MIN_PILLAR_BLOCKS = 8;
+    private static final int EXPLORATION_RETURN_ESCAPE_EXTRA_BLOCKS = 4;
+    private static final int EXPLORATION_RETURN_ESCAPE_MAX_PILLAR_BLOCKS = 24;
     private static final int STARTUP_IDLE_WAKE_TICKS = 20 * 4;
     private static final int TASKLESS_IDLE_WAKE_TICKS = 20;
     public static final String AI_IDLE = "ai.player_npc.idle";
@@ -185,6 +188,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int craftGearCooldown = 0;
     private int farmCooldown = 0;
     private int gatherCooldown = 0;
+    private int stoneAccessClearCooldown = 0;
     private int biomeExploreCooldown = 0;
     private int huntSheepCooldown = 0;
     private int ironGolemTrollCooldown = 0;
@@ -223,6 +227,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private BlockPos upwardEscapeTarget;
     private int upwardEscapeRequestTicks = 0;
     private int upwardEscapeMaxPillarBlocks = 0;
+    private boolean forcedUpwardEscape = false;
     private double placeBlockToParryChance;
     private int placeBlockParryCooldown = 0;
     private int stunEscapeCooldown = 0;
@@ -318,6 +323,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public int getGatherCooldown() {
         return gatherCooldown;
+    }
+
+    public boolean isStoneAccessClearing() {
+        return this.stoneAccessClearCooldown > 0;
     }
 
     public int getBiomeExploreCooldown() {
@@ -428,7 +437,19 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.upwardEscapeTarget = target.immutable();
         this.upwardEscapeRequestTicks = Math.max(this.upwardEscapeRequestTicks, normalizeCooldown(ticks));
         this.upwardEscapeMaxPillarBlocks = Math.max(0, maxPillarBlocks);
+        this.forcedUpwardEscape = false;
         this.holeEscapeCooldown = 0;
+    }
+
+    public void requestForcedUpwardEscapeTo(@Nullable BlockPos target, int ticks, int maxPillarBlocks) {
+        this.requestUpwardEscapeTo(target, ticks, maxPillarBlocks);
+        if (target != null && ticks > 0) {
+            this.forcedUpwardEscape = true;
+        }
+    }
+
+    public boolean isForcedUpwardEscape() {
+        return this.getUpwardEscapeTarget() != null && this.forcedUpwardEscape;
     }
 
     public int getUpwardEscapeMaxPillarBlocks() {
@@ -439,6 +460,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.upwardEscapeTarget = null;
         this.upwardEscapeRequestTicks = 0;
         this.upwardEscapeMaxPillarBlocks = 0;
+        this.forcedUpwardEscape = false;
     }
 
     @Nullable
@@ -558,6 +580,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.gatherCooldown = normalizeCooldown(ticks);
     }
 
+    public void markStoneAccessClearing(int ticks) {
+        this.stoneAccessClearCooldown = Math.max(this.stoneAccessClearCooldown, normalizeCooldown(ticks));
+    }
+
     public void setBiomeExploreCooldown(int ticks) {
         this.biomeExploreCooldown = normalizeCooldown(ticks);
     }
@@ -593,8 +619,32 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         this.explorationReturnHomeRequestTicks = normalizeCooldown(ticks);
         this.returnHomeCooldown = 0;
+        this.requestExplorationReturnEscape(ticks);
         this.setCurrentAiDetail(reason == null || reason.isBlank() ? "exploration failed; returning home" : reason);
         return true;
+    }
+
+    private void requestExplorationReturnEscape(int ticks) {
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this);
+        if (home.isEmpty()) {
+            return;
+        }
+
+        PlayerNpcHomeUtil.HomeArea homeArea = home.get();
+        BlockPos homeCenter = homeArea.origin().offset(homeArea.width() / 2, 1, homeArea.depth() / 2);
+        int climbBlocks = homeCenter.getY() - this.blockPosition().getY();
+        if (climbBlocks <= 1) {
+            return;
+        }
+
+        int maxPillarBlocks = Math.max(
+                EXPLORATION_RETURN_ESCAPE_MIN_PILLAR_BLOCKS,
+                Math.min(
+                        EXPLORATION_RETURN_ESCAPE_MAX_PILLAR_BLOCKS,
+                        climbBlocks + EXPLORATION_RETURN_ESCAPE_EXTRA_BLOCKS
+                )
+        );
+        this.requestUpwardEscapeTo(homeCenter, Math.max(normalizeCooldown(ticks), 20 * 8), maxPillarBlocks);
     }
 
     public boolean hasExplorationReturnHomeRequest() {
@@ -1333,7 +1383,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 "exploring for stone",
                 level -> GatherStoneGoal.isStoneSupplyPhaseActive(this, level)
                         && this.getGatherCooldown() <= 0
-                        && !this.shouldStayHomeForWeather(level),
+                        && !this.shouldStayHomeForWeather(level)
+                        && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> GatherStoneGoal.hasNearbyStoneTarget(this, level),
                 false
         ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
@@ -1913,7 +1964,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         this.inventory.setChanged();
         this.swing(InteractionHand.MAIN_HAND, true);
-        this.level().playSound(null, this.blockPosition(), SoundEvents.ITEM_PICKUP, SoundSource.HOSTILE, 0.2F, 1.0F);
+        this.playInventoryPickupSound();
 
         if (remaining.isEmpty()) {
             itemEntity.setDeltaMovement(
@@ -1927,6 +1978,20 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             itemEntity.setItem(remaining);
         }
         return true;
+    }
+
+    public void playInventoryPickupSound() {
+        if (this.level().isClientSide) {
+            return;
+        }
+        this.level().playSound(
+                null,
+                this.blockPosition(),
+                SoundEvents.ITEM_PICKUP,
+                SoundSource.HOSTILE,
+                0.2F,
+                1.0F
+        );
     }
 
     @Override
@@ -1971,6 +2036,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.craftGearCooldown = tickCooldown(this.craftGearCooldown);
         this.farmCooldown = tickCooldown(this.farmCooldown);
         this.gatherCooldown = tickCooldown(this.gatherCooldown);
+        this.stoneAccessClearCooldown = tickCooldown(this.stoneAccessClearCooldown);
         this.biomeExploreCooldown = tickCooldown(this.biomeExploreCooldown);
         this.huntSheepCooldown = tickCooldown(this.huntSheepCooldown);
         this.ironGolemTrollCooldown = tickCooldown(this.ironGolemTrollCooldown);
@@ -2008,6 +2074,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             }
             this.upwardEscapeTarget = null;
             this.upwardEscapeMaxPillarBlocks = 0;
+            this.forcedUpwardEscape = false;
         }
     }
 

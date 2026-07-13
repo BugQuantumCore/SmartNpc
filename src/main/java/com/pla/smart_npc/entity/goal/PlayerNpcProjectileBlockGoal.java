@@ -1,14 +1,12 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.sounds.SoundEvents;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.Mth;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.projectile.Projectile;
@@ -35,6 +33,7 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
     private static final int PLACE_INTERVAL_TICKS = 2;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private final Queue<BlockPos> placementQueue = new ArrayDeque<>();
     private Projectile projectile;
     private int placeDelayTicks;
@@ -42,6 +41,7 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
 
     public PlayerNpcProjectileBlockGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -260,10 +260,7 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
             return false;
         }
 
-        serverLevel.setBlockAndUpdate(pos, blockState);
-        this.playerNpc.triggerMainHandUseAnimation();
-        serverLevel.playSound(null, pos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 0.9F, 1.0F);
-        return true;
+        return this.placingBlockAi.placeBlock(serverLevel, pos, blockState);
     }
 
     private boolean canPlaceAt(ServerLevel serverLevel, BlockPos pos) {

@@ -10,6 +10,7 @@ final class CanUseThrottle {
 
     private final int intervalTicks;
     private int nextCheckTick;
+    private boolean initialized;
 
     CanUseThrottle() {
         this(DEFAULT_INTERVAL_TICKS);
@@ -20,15 +21,22 @@ final class CanUseThrottle {
     }
 
     boolean canCheck(PlayerNpcEntity playerNpc) {
+        if (!this.initialized) {
+            this.initialized = true;
+            this.nextCheckTick = playerNpc.tickCount + playerNpc.getRandom().nextInt(this.intervalTicks);
+        }
         if (playerNpc.tickCount < this.nextCheckTick) {
             return false;
         }
 
-        this.nextCheckTick = playerNpc.tickCount + this.intervalTicks;
+        this.nextCheckTick = playerNpc.tickCount
+                + this.intervalTicks
+                + playerNpc.getRandom().nextInt(Math.max(1, this.intervalTicks / 2 + 1));
         return true;
     }
 
     void reset() {
         this.nextCheckTick = 0;
+        this.initialized = false;
     }
 }

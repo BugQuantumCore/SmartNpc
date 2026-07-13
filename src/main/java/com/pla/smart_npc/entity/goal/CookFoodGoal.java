@@ -309,6 +309,7 @@ public class CookFoodGoal extends Goal {
             this.finished = true;
             return;
         }
+        this.finishPlacementMainHand();
         if (this.temporaryFurnace) {
             this.saveTemporaryFurnace(this.furnacePos);
         }
@@ -777,6 +778,17 @@ public class CookFoodGoal extends Goal {
         this.usingTemporaryTool = false;
         this.returnTemporaryMainHandOnRestore = false;
         this.cookTicks = 0;
+    }
+
+    private void finishPlacementMainHand() {
+        if (!this.usingTemporaryTool) {
+            return;
+        }
+
+        this.placingBlockAi.finishHeldPlacement(this.previousMainHand);
+        this.previousMainHand = ItemStack.EMPTY;
+        this.usingTemporaryTool = false;
+        this.returnTemporaryMainHandOnRestore = false;
     }
 
     private void updateDetail(ServerLevel serverLevel) {

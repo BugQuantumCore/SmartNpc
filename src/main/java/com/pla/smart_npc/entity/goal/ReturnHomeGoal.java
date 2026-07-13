@@ -30,6 +30,8 @@ public class ReturnHomeGoal extends Goal {
     private static final double POST_STONE_RETURN_DISTANCE_SQR = 96.0D * 96.0D;
     private static final int MAX_RETURN_TICKS = 20 * 20;
     private static final int HOME_WORK_AREA_MARGIN = 4;
+    private static final int HOME_SURFACE_ESCAPE_TICKS = 20 * 10;
+    private static final int HOME_SURFACE_ESCAPE_EXTRA_BLOCKS = 6;
 
     private final PlayerNpcEntity playerNpc;
     private final ReturnPositionAi returnPositionAi;
@@ -42,6 +44,7 @@ public class ReturnHomeGoal extends Goal {
     private boolean shelterReturn;
     private boolean completedStoneTripReturn;
     private boolean explorationRecoveryReturn;
+    private boolean homeSurfaceRecoveryReturn;
 
     public ReturnHomeGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -58,6 +61,9 @@ public class ReturnHomeGoal extends Goal {
             return true;
         }
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
+        if (needsHomeSurfaceRecovery(playerNpc, homeArea)) {
+            return true;
+        }
         if (isInsideHomeWorkArea(playerNpc, homeArea)) {
             return false;
         }
@@ -103,6 +109,15 @@ public class ReturnHomeGoal extends Goal {
         this.buildReturn = BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
         this.completedStoneTripReturn = shouldReturnAfterCompletedStoneTrip(this.playerNpc, serverLevel, homeArea);
         this.explorationRecoveryReturn = this.playerNpc.hasExplorationReturnHomeRequest();
+        this.homeSurfaceRecoveryReturn = needsHomeSurfaceRecovery(this.playerNpc, homeArea);
+        if (this.homeSurfaceRecoveryReturn) {
+            this.utilityReturn = false;
+            this.buildReturn = false;
+            this.shelterReturn = false;
+            this.completedStoneTripReturn = false;
+            this.explorationRecoveryReturn = false;
+            return true;
+        }
         if (this.explorationRecoveryReturn) {
             this.utilityReturn = false;
             this.buildReturn = false;
@@ -119,6 +134,7 @@ public class ReturnHomeGoal extends Goal {
             this.buildReturn = false;
             this.completedStoneTripReturn = false;
             this.explorationRecoveryReturn = false;
+            this.homeSurfaceRecoveryReturn = false;
             return true;
         }
 
@@ -127,6 +143,7 @@ public class ReturnHomeGoal extends Goal {
             this.buildReturn = false;
             this.shelterReturn = false;
             this.explorationRecoveryReturn = false;
+            this.homeSurfaceRecoveryReturn = false;
             return true;
         }
 
@@ -138,6 +155,7 @@ public class ReturnHomeGoal extends Goal {
             this.buildReturn = false;
             this.completedStoneTripReturn = false;
             this.explorationRecoveryReturn = false;
+            this.homeSurfaceRecoveryReturn = false;
             return false;
         }
 
@@ -147,6 +165,7 @@ public class ReturnHomeGoal extends Goal {
             this.shelterReturn = false;
             this.completedStoneTripReturn = false;
             this.explorationRecoveryReturn = false;
+            this.homeSurfaceRecoveryReturn = false;
             return false;
         }
 
@@ -165,6 +184,7 @@ public class ReturnHomeGoal extends Goal {
             this.shelterReturn = false;
             this.completedStoneTripReturn = false;
             this.explorationRecoveryReturn = false;
+            this.homeSurfaceRecoveryReturn = false;
             return false;
         }
 
@@ -174,6 +194,7 @@ public class ReturnHomeGoal extends Goal {
             this.shelterReturn = false;
             this.completedStoneTripReturn = false;
             this.explorationRecoveryReturn = false;
+            this.homeSurfaceRecoveryReturn = false;
             return false;
         }
 
@@ -182,6 +203,7 @@ public class ReturnHomeGoal extends Goal {
         this.shelterReturn = false;
         this.completedStoneTripReturn = false;
         this.explorationRecoveryReturn = false;
+        this.homeSurfaceRecoveryReturn = false;
         boolean randomReturn = this.playerNpc.getRandom().nextFloat() < 0.35F;
         return inventoryHalfFull || randomReturn;
     }
@@ -196,14 +218,19 @@ public class ReturnHomeGoal extends Goal {
         }
         if (!this.shelterReturn
                 && !this.completedStoneTripReturn
+                && !this.explorationRecoveryReturn
+                && !this.homeSurfaceRecoveryReturn
                 && this.needsBuildMaterialReserves()
                 && !this.inventoryMostlyFull()) {
             return false;
         }
-        if ((this.buildReturn || this.completedStoneTripReturn) && this.isInsideHomeWorkArea(this.homeArea)) {
+        if ((this.buildReturn || this.completedStoneTripReturn) && this.hasReachedHomeWorkAreaSurface(this.homeArea)) {
             return false;
         }
         if (this.explorationRecoveryReturn && this.hasReachedExplorationRecoveryHome(this.homeArea)) {
+            return false;
+        }
+        if (this.homeSurfaceRecoveryReturn && this.hasReachedHomeWorkAreaSurface(this.homeArea)) {
             return false;
         }
 
@@ -225,10 +252,10 @@ public class ReturnHomeGoal extends Goal {
     @Override
     public void start() {
         this.returnTicks = MAX_RETURN_TICKS;
-        if (this.playerNpc.getUpwardEscapeTarget() != null) {
-            this.playerNpc.clearUpwardEscapeTarget();
-        }
         this.playerNpc.setCurrentAiState("ai.player_npc.returning_home");
+        if (this.homeSurfaceRecoveryReturn && this.homeCenter != null) {
+            this.requestHomeSurfaceEscape();
+        }
         if (this.homeCenter != null) {
             this.returnPositionAi.start(this.homeCenter);
         }
@@ -258,18 +285,28 @@ public class ReturnHomeGoal extends Goal {
         boolean arrivedAtHome = this.homeCenter != null
                 && (this.buildReturn
                 || this.completedStoneTripReturn
-                || this.explorationRecoveryReturn
-                ? this.isInsideHomeWorkArea(this.homeArea)
-                : this.playerNpc.distanceToSqr(this.homeCenter.getX() + 0.5D, this.homeCenter.getY(), this.homeCenter.getZ() + 0.5D) <= STOP_DISTANCE_SQR);
+                || this.homeSurfaceRecoveryReturn
+                ? this.hasReachedHomeWorkAreaSurface(this.homeArea)
+                : this.hasReachedHomeCenter());
         if (!this.playerNpc.level().isClientSide) {
-            int cooldown = this.utilityReturn
+            int cooldown = !arrivedAtHome
+                    ? 0
+                    : this.utilityReturn
                     || this.buildReturn
                     || this.shelterReturn
                     || this.completedStoneTripReturn
                     || this.explorationRecoveryReturn
+                    || this.homeSurfaceRecoveryReturn
                     ? 20 * 12 + this.playerNpc.getRandom().nextInt(20 * 12)
                     : 20 * 60 + this.playerNpc.getRandom().nextInt(20 * 60);
             this.playerNpc.setReturnHomeCooldown(cooldown);
+            if (!arrivedAtHome && this.homeCenter != null && this.playerNpc.blockPosition().getY() < this.homeCenter.getY() - 1) {
+                if (this.homeSurfaceRecoveryReturn) {
+                    this.requestHomeSurfaceEscape();
+                } else {
+                    this.playerNpc.requestUpwardEscapeTo(this.homeCenter, 20 * 8, 10);
+                }
+            }
             if (this.explorationRecoveryReturn && arrivedAtHome) {
                 this.playerNpc.clearExplorationReturnHomeRequest();
                 this.playerNpc.setGatherCooldown(20 * 2);
@@ -291,6 +328,7 @@ public class ReturnHomeGoal extends Goal {
         this.shelterReturn = false;
         this.completedStoneTripReturn = false;
         this.explorationRecoveryReturn = false;
+        this.homeSurfaceRecoveryReturn = false;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
     }
@@ -309,20 +347,56 @@ public class ReturnHomeGoal extends Goal {
                 && pos.getX() < homeArea.origin().getX() + homeArea.width() + HOME_WORK_AREA_MARGIN
                 && pos.getZ() >= homeArea.origin().getZ() - HOME_WORK_AREA_MARGIN
                 && pos.getZ() < homeArea.origin().getZ() + homeArea.depth() + HOME_WORK_AREA_MARGIN
-                && pos.getY() >= homeArea.origin().getY() - 3
+                && pos.getY() >= homeArea.origin().getY()
                 && pos.getY() <= homeArea.origin().getY() + 8;
     }
 
-    private boolean hasReachedExplorationRecoveryHome(PlayerNpcHomeUtil.HomeArea homeArea) {
-        if (homeArea == null || !this.isInsideHomeWorkArea(homeArea)) {
+    private static boolean needsHomeSurfaceRecovery(PlayerNpcEntity playerNpc, PlayerNpcHomeUtil.HomeArea homeArea) {
+        if (homeArea == null) {
             return false;
         }
 
-        return this.playerNpc.blockPosition().getY() >= homeArea.origin().getY();
+        BlockPos pos = playerNpc.blockPosition();
+        return isInsideHomeWorkFootprint(pos, homeArea)
+                && pos.getY() < homeArea.origin().getY();
+    }
+
+    private static boolean isInsideHomeWorkFootprint(BlockPos pos, PlayerNpcHomeUtil.HomeArea homeArea) {
+        return pos.getX() >= homeArea.origin().getX() - HOME_WORK_AREA_MARGIN
+                && pos.getX() < homeArea.origin().getX() + homeArea.width() + HOME_WORK_AREA_MARGIN
+                && pos.getZ() >= homeArea.origin().getZ() - HOME_WORK_AREA_MARGIN
+                && pos.getZ() < homeArea.origin().getZ() + homeArea.depth() + HOME_WORK_AREA_MARGIN;
+    }
+
+    private boolean hasReachedExplorationRecoveryHome(PlayerNpcHomeUtil.HomeArea homeArea) {
+        return this.hasReachedHomeWorkAreaSurface(homeArea) && this.hasReachedHomeCenter();
+    }
+
+    private boolean hasReachedHomeWorkAreaSurface(PlayerNpcHomeUtil.HomeArea homeArea) {
+        return homeArea != null
+                && this.isInsideHomeWorkArea(homeArea)
+                && !needsHomeSurfaceRecovery(this.playerNpc, homeArea);
+    }
+
+    private boolean hasReachedHomeCenter() {
+        return this.homeCenter != null
+                && this.playerNpc.distanceToSqr(
+                this.homeCenter.getX() + 0.5D,
+                this.homeCenter.getY(),
+                this.homeCenter.getZ() + 0.5D
+        ) <= STOP_DISTANCE_SQR;
     }
 
     private boolean isProtectedHomeBlock(BlockPos pos) {
-        return this.homeArea != null && PlayerNpcHomeUtil.isInside(this.homeArea, pos);
+        return this.homeArea != null
+                && !this.homeSurfaceRecoveryReturn
+                && PlayerNpcHomeUtil.isInside(this.homeArea, pos);
+    }
+
+    private void requestHomeSurfaceEscape() {
+        BlockPos feet = this.playerNpc.blockPosition();
+        int maxPillarBlocks = Math.max(1, this.homeCenter.getY() - feet.getY() + HOME_SURFACE_ESCAPE_EXTRA_BLOCKS);
+        this.playerNpc.requestForcedUpwardEscapeTo(this.homeCenter, HOME_SURFACE_ESCAPE_TICKS, maxPillarBlocks);
     }
 
     private void updateDetail() {
@@ -341,6 +415,9 @@ public class ReturnHomeGoal extends Goal {
         }
         if (this.explorationRecoveryReturn) {
             return "returning after failed exploration";
+        }
+        if (this.homeSurfaceRecoveryReturn) {
+            return "returning to surface";
         }
         if (this.utilityReturn) {
             return "returning to home utility";

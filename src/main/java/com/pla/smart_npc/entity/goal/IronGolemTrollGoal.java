@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -25,11 +26,13 @@ public class IronGolemTrollGoal extends Goal {
     private static final double SEARCH_RADIUS = 10.0D;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private IronGolem golem;
     private BlockPos pillarBase;
 
     public IronGolemTrollGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK, Flag.TARGET));
     }
 
@@ -76,8 +79,10 @@ public class IronGolemTrollGoal extends Goal {
 
         for (int i = 0; i < 3; i++) {
             ItemStack stack = blocks.get(i);
-            if (stack.getItem() instanceof BlockItem blockItem) {
-                serverLevel.setBlockAndUpdate(this.pillarBase.above(i), blockItem.getBlock().defaultBlockState());
+            if (stack.getItem() instanceof BlockItem blockItem
+                    && !this.placingBlockAi.placeBlock(serverLevel, this.pillarBase.above(i), blockItem.getBlock().defaultBlockState(), false)) {
+                blocks.subList(i, blocks.size()).forEach(this::returnStack);
+                return;
             }
         }
 

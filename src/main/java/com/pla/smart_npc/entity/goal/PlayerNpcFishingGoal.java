@@ -139,10 +139,16 @@ public class PlayerNpcFishingGoal extends Goal {
                 .create(LootContextParamSets.FISHING);
         LootTable lootTable = serverLevel.getServer().getLootData().getLootTable(BuiltInLootTables.FISHING);
         List<ItemStack> loot = lootTable.getRandomItems(lootParams);
+        boolean insertedLoot = false;
         for (ItemStack stack : loot) {
-            if (!InventoryUtils.addItem(this.playerNpc, stack)) {
+            if (InventoryUtils.addItem(this.playerNpc, stack)) {
+                insertedLoot = true;
+            } else {
                 this.playerNpc.spawnAtLocation(stack);
             }
+        }
+        if (insertedLoot) {
+            this.playerNpc.playInventoryPickupSound();
         }
     }
 

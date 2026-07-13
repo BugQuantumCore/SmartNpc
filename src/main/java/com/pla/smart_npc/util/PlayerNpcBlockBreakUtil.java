@@ -25,13 +25,19 @@ public final class PlayerNpcBlockBreakUtil {
             return false;
         }
 
+        boolean insertedDrop = false;
         for (ItemStack drop : drops) {
             if (drop.isEmpty()) {
                 continue;
             }
-            if (!InventoryUtils.addItem(playerNpc, drop)) {
+            if (InventoryUtils.addItem(playerNpc, drop)) {
+                insertedDrop = true;
+            } else {
                 Block.popResource(serverLevel, pos, drop);
             }
+        }
+        if (insertedDrop) {
+            playerNpc.playInventoryPickupSound();
         }
         return true;
     }

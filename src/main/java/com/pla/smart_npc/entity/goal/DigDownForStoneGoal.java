@@ -42,8 +42,6 @@ public class DigDownForStoneGoal extends Goal {
     private static final int MAX_DIG_SITE_SAFE_DROP_BLOCKS = 3;
     private static final int CLEAR_OBSTRUCTION_TICKS = 24;
     private static final double CLEAR_OBSTRUCTION_DISTANCE_SQR = 5.0D * 5.0D;
-    private static final int PROTECTED_BASE_SUPPORT_DEPTH = 3;
-
     private final PlayerNpcEntity playerNpc;
     private final double speed;
     private final ToolAi toolAi;
@@ -463,18 +461,7 @@ public class DigDownForStoneGoal extends Goal {
     }
 
     private boolean isProtectedHomeBlock(BlockPos pos) {
-        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
-        return home.isPresent()
-                && (PlayerNpcHomeUtil.isInside(home.get(), pos) || isInsideHomeSupport(home.get(), pos));
-    }
-
-    private static boolean isInsideHomeSupport(PlayerNpcHomeUtil.HomeArea homeArea, BlockPos pos) {
-        return pos.getX() >= homeArea.origin().getX()
-                && pos.getX() < homeArea.origin().getX() + homeArea.width()
-                && pos.getZ() >= homeArea.origin().getZ()
-                && pos.getZ() < homeArea.origin().getZ() + homeArea.depth()
-                && pos.getY() >= homeArea.origin().getY() - PROTECTED_BASE_SUPPORT_DEPTH
-                && pos.getY() < homeArea.origin().getY();
+        return PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos);
     }
 
     private boolean hasPreparedBaseForStone(ServerLevel serverLevel) {

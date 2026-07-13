@@ -28,6 +28,12 @@ If the NPC finishes its stone supply while below the saved home/base area, `Retu
 
 Movement is delegated to `ReturnPositionAi`, which wraps `PathNavigationAi`, `ClearBlockAi`, `BreakingBlockAi`, `ToolAi`, a bounded dirt `PillarUpAi` step, and upward escape requests. It can safely step down, clear local body/head/path blockers outside the protected home box, direct-pillar a short upward return path, and request broader pillar escape if the NPC is stuck underground while returning.
 
+Under the saved home footprint is treated as outside the house for return-home purposes. If the NPC is below the home origin Y while inside the home/build X/Z footprint, `ReturnHomeGoal` enters `homeSurfaceRecoveryReturn`, keeps running even when material reserves are missing, and requests a forced upward escape toward the home center. While this recovery is active, `ReturnHomeGoal.isProtectedHomeBlock(...)` intentionally stops protecting home blocks so the NPC can break the floor/base above its head and pillar up. Terraform/build are expected to repair the damage afterward.
+
+This under-home exception is not used by stone gathering. `GatherStoneGoal` should still skip stone targets and clear-block candidates in the protected home/build/below-home footprint. If stone gathering finds the NPC inside the footprint, it must stop stone breaking/clearing and route outside the footprint before stone path clearing; if no outside egress route exists, it drops the stone target instead of clearing from inside. Return-home recovery is allowed to break upward through the base only because its job is to rescue the NPC from below the house.
+
+For vertical return paths, `ReturnPositionAi` should try direct pillaring before generic route clearing once `needsVerticalEscape(...)` is true. If the pillar blocker is clearable and not protected for the current return mode, it can clear that blocker with `ClearBlockAi`. Terraform must not run while an upward escape target exists or while the NPC is in `ai.player_npc.pillaring_up`, so fill-support does not replace the just-cleared escape block before the NPC climbs.
+
 When the final home-center path is `path=none`, `ReturnPositionAi` should call `PathNavigationAi.moveToWithLocalFallback(...)`. That helper scans nearby standable cells and path-checks a bounded number of local waypoints, preferring cells that are closer to home, under open sky, or upward enough to leave a pit/corner. This prevents return-home from standing still when the home is reachable only after first walking to a nearby exit.
 
 Trace strings include:
@@ -36,9 +42,11 @@ Trace strings include:
 - `returning to home shelter`
 - `returning to build site`
 - `returning from dig site`
+- `returning to surface`
 - `returning to home utility`
 - `local route @ x y z`
 - `clearing return path @ x y z`
+- `clearing return pillar space @ x y z`
 - `searching route; attempts=N; directPath=...; localCandidates=N; localChecks=N; localRoute=none; clear=...; pillar=...`
 
 Movement speed is `1.0D`.

@@ -4,6 +4,7 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -79,6 +80,12 @@ public final class ToolAi {
             return true;
         }
 
+        ItemStack offhandTool = this.playerNpc.getOffhandItem();
+        if (!offhandTool.isEmpty() && toolClass.isInstance(offhandTool.getItem())) {
+            this.swapMainHandWithOffhand(offhandTool);
+            return true;
+        }
+
         ItemStack mainWeaponTool = this.playerNpc.takeMainWeaponItem(stack -> toolClass.isInstance(stack.getItem()));
         if (!mainWeaponTool.isEmpty()) {
             this.swapMainHandWithReserved(mainWeaponTool, MainHandSource.MAIN_WEAPON);
@@ -150,6 +157,19 @@ public final class ToolAi {
         this.currentMainHandSource = MainHandSource.INVENTORY;
     }
 
+    private void swapMainHandWithOffhand(ItemStack stack) {
+        ItemStack current = this.playerNpc.getMainHandItem().copy();
+        if (!this.swappedMainHand) {
+            this.previousMainHand = current.copy();
+            this.swappedMainHand = true;
+        } else {
+            this.stashCurrentMainHand(current);
+        }
+        this.playerNpc.setMainHandItemForAi(stack.copy());
+        this.playerNpc.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+        this.currentMainHandSource = MainHandSource.OFFHAND;
+    }
+
     private void swapMainHandWithReserved(ItemStack stack, MainHandSource source) {
         ItemStack current = this.playerNpc.getMainHandItem().copy();
         if (!this.swappedMainHand) {
@@ -170,6 +190,8 @@ public final class ToolAi {
 
         if (this.currentMainHandSource == MainHandSource.OFF_WEAPON) {
             this.playerNpc.setOffWeaponItem(stack);
+        } else if (this.currentMainHandSource == MainHandSource.OFFHAND) {
+            this.playerNpc.setItemSlot(EquipmentSlot.OFFHAND, stack);
         } else if (!InventoryUtils.addItem(this.playerNpc.getInventory(), stack)) {
             this.playerNpc.spawnAtLocation(stack);
         }
@@ -179,6 +201,7 @@ public final class ToolAi {
     private enum MainHandSource {
         NONE,
         INVENTORY,
+        OFFHAND,
         MAIN_WEAPON,
         OFF_WEAPON
     }

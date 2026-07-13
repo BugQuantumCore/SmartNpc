@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.InventoryUtils;
@@ -102,6 +103,7 @@ public class GatherMaterialsGoal extends Goal {
     private static final double PATH_OBSTRUCTION_BREAK_DISTANCE_SQR = BREAK_DISTANCE_SQR;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private final double speed;
     private final Set<BlockPos> treeLogs = new HashSet<>();
     private final Set<BlockPos> minedTreeLogs = new HashSet<>();
@@ -136,6 +138,7 @@ public class GatherMaterialsGoal extends Goal {
 
     public GatherMaterialsGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.speed = speed;
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
@@ -1614,18 +1617,12 @@ public class GatherMaterialsGoal extends Goal {
         }
 
         this.lookDownAt(this.logPillarPlacePos);
-        if (!serverLevel.setBlockAndUpdate(this.logPillarPlacePos, dirtState)) {
+        if (!this.placingBlockAi.placeHeldBlock(serverLevel, this.logPillarPlacePos, dirtState)) {
             this.failLogPillarPlacement(serverLevel);
             return;
         }
         this.snapAboveLogPillarIfNeeded(this.logPillarPlacePos);
-        this.playerNpc.triggerMainHandUseAnimation();
-        PlayerNpcBlockSoundUtil.playPlaceSound(serverLevel, this.logPillarPlacePos, dirtState, this.playerNpc);
         BlockPos placedPos = this.logPillarPlacePos.immutable();
-        dirtStack.shrink(1);
-        if (dirtStack.isEmpty()) {
-            this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
-        }
         this.logPillarPlacePos = null;
         this.logPillarJumpDelayTicks = 0;
         this.logPillarPlaceDelayTicks = 0;
