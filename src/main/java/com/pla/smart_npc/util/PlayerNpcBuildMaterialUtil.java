@@ -315,9 +315,20 @@ public final class PlayerNpcBuildMaterialUtil {
                 && sharedPropertiesMatch(targetState, existingState);
     }
 
+    public static boolean isBlueprintPlaceholder(BlockState state) {
+        if (state == null) {
+            return false;
+        }
+
+        ResourceLocation key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        return key != null
+                && "structurize".equals(key.getNamespace())
+                && "blocksolidsubstitution".equals(key.getPath());
+    }
+
     public static boolean hasMaterialFor(ServerLevel serverLevel, PlayerNpcEntity playerNpc, PlayerNpcBuildLayout.RelativeBlock block, BlockPos origin) {
         BlockState targetState = block.state();
-        if (targetState.isAir()) {
+        if (targetState.isAir() || isBlueprintPlaceholder(targetState)) {
             return true;
         }
         if (block.isSecondHalfOfSingleItemBlock()) {
@@ -331,7 +342,10 @@ public final class PlayerNpcBuildMaterialUtil {
     }
 
     public static boolean needsCraftingForPlacement(ServerLevel serverLevel, PlayerNpcEntity playerNpc, PlayerNpcBuildLayout.RelativeBlock block) {
-        if (block.state().isAir() || block.isSecondHalfOfSingleItemBlock() || isPottedPlant(block.state())) {
+        if (block.state().isAir()
+                || isBlueprintPlaceholder(block.state())
+                || block.isSecondHalfOfSingleItemBlock()
+                || isPottedPlant(block.state())) {
             return false;
         }
 
@@ -340,7 +354,10 @@ public final class PlayerNpcBuildMaterialUtil {
     }
 
     public static boolean craftMaterialFor(ServerLevel serverLevel, PlayerNpcEntity playerNpc, PlayerNpcBuildLayout.RelativeBlock block) {
-        if (block.state().isAir() || block.requiredItem().isEmpty() || findDirectItem(playerNpc, block.state()).isPresent()) {
+        if (block.state().isAir()
+                || isBlueprintPlaceholder(block.state())
+                || block.requiredItem().isEmpty()
+                || findDirectItem(playerNpc, block.state()).isPresent()) {
             return false;
         }
 
@@ -362,7 +379,7 @@ public final class PlayerNpcBuildMaterialUtil {
 
     public static Optional<PlacementMaterial> resolvePlacement(ServerLevel serverLevel, PlayerNpcEntity playerNpc, PlayerNpcBuildLayout.RelativeBlock block, BlockPos origin) {
         BlockState targetState = block.state();
-        if (targetState.isAir()) {
+        if (targetState.isAir() || isBlueprintPlaceholder(targetState)) {
             return Optional.of(new PlacementMaterial(targetState, ItemStack.EMPTY));
         }
         if (isPottedPlant(targetState)) {
@@ -391,7 +408,9 @@ public final class PlayerNpcBuildMaterialUtil {
     }
 
     public static ItemStack previewItem(ServerLevel serverLevel, PlayerNpcEntity playerNpc, PlayerNpcBuildLayout.RelativeBlock block) {
-        if (block.state().isAir() || block.isSecondHalfOfSingleItemBlock()) {
+        if (block.state().isAir()
+                || isBlueprintPlaceholder(block.state())
+                || block.isSecondHalfOfSingleItemBlock()) {
             return ItemStack.EMPTY;
         }
         if (isPottedPlant(block.state())) {
@@ -442,6 +461,7 @@ public final class PlayerNpcBuildMaterialUtil {
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
             if (block.optional()
                     || block.state().isAir()
+                    || isBlueprintPlaceholder(block.state())
                     || isSecondHalfOfSingleItemBlock(block.state())
                     || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())
                     || hasMaterialFor(serverLevel, playerNpc, block, origin)) {
@@ -731,6 +751,7 @@ public final class PlayerNpcBuildMaterialUtil {
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
             if (block.optional()
                     || block.state().isAir()
+                    || isBlueprintPlaceholder(block.state())
                     || block.isSecondHalfOfSingleItemBlock()
                     || !isTorchTarget(block.state())
                     || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())
@@ -773,7 +794,7 @@ public final class PlayerNpcBuildMaterialUtil {
     }
 
     public static boolean isCurrentBuildInputForTarget(ItemStack stack, BlockState targetState) {
-        if (stack.isEmpty() || targetState.isAir()) {
+        if (stack.isEmpty() || targetState.isAir() || isBlueprintPlaceholder(targetState)) {
             return false;
         }
 
@@ -1218,7 +1239,9 @@ public final class PlayerNpcBuildMaterialUtil {
 
         BlockPos origin = home.get().origin();
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
-            if (block.optional() || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
+            if (block.optional()
+                    || isBlueprintPlaceholder(block.state())
+                    || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
                 continue;
             }
 
@@ -1245,7 +1268,9 @@ public final class PlayerNpcBuildMaterialUtil {
 
         BlockPos origin = home.get().origin();
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
-            if (block.optional() || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
+            if (block.optional()
+                    || isBlueprintPlaceholder(block.state())
+                    || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
                 continue;
             }
 

@@ -81,6 +81,8 @@ public class DigDownForStoneGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.playerNpc.getGatherCooldown() > 0) {
             return false;
         }
@@ -111,6 +113,8 @@ public class DigDownForStoneGoal extends Goal {
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
                 && this.playerNpc.getTarget() == null
+                && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
                 && GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
                 && !this.shouldStayHomeForWeather(serverLevel)
@@ -408,7 +412,7 @@ public class DigDownForStoneGoal extends Goal {
     }
 
     private boolean isClearablePathState(BlockState state) {
-        return ClearBlockAi.isPhysicalObstructionState(state);
+        return state != null && !state.isAir();
     }
 
     private boolean moveTo(ServerLevel serverLevel, BlockPos pos) {

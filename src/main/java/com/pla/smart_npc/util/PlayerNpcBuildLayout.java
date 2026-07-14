@@ -60,7 +60,9 @@ public class PlayerNpcBuildLayout {
     public int requiredBlocks() {
         int count = 0;
         for (RelativeBlock block : this.blocks) {
-            if (!block.optional() && !block.state().isAir()) {
+            if (!block.optional()
+                    && !block.state().isAir()
+                    && !PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
                 count++;
             }
         }
@@ -108,7 +110,10 @@ public class PlayerNpcBuildLayout {
         }
 
         public ItemStack requiredItem() {
-            if (this.state.isAir() || this.state.is(Blocks.AIR) || this.isSecondHalfOfSingleItemBlock()) {
+            if (this.state.isAir()
+                    || this.state.is(Blocks.AIR)
+                    || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(this.state)
+                    || this.isSecondHalfOfSingleItemBlock()) {
                 return ItemStack.EMPTY;
             }
 

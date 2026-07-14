@@ -8,6 +8,7 @@ import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.entity.ai.StoneAi;
 import com.pla.smart_npc.entity.ai.StoneAi.StoneCluster;
 import com.pla.smart_npc.entity.ai.ToolAi;
+import com.pla.smart_npc.entity.ai.WaterEscapeAi;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -26,8 +27,10 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 public class GatherStoneGoal extends Goal {
     private static final int SEARCH_RADIUS = 24;
@@ -58,6 +61,8 @@ public class GatherStoneGoal extends Goal {
     private static final int HOME_EGRESS_VERTICAL_UP = 3;
     private static final int HOME_EGRESS_RANDOM_POOL = 6;
     private static final int HOME_EGRESS_PATH_CHECKS = 16;
+    private static final int HOME_STONE_TARGET_BUFFER = 4;
+    private static final int HOME_STONE_TARGET_MAX_Y_OFFSET = 1;
     private static final double HOME_EGRESS_REACHED_DISTANCE_SQR = 1.1D * 1.1D;
 
     private final PlayerNpcEntity playerNpc;
@@ -68,6 +73,7 @@ public class GatherStoneGoal extends Goal {
     private final BreakingBlockAi breakingBlockAi;
     private final ClearBlockAi clearBlockAi;
     private final PathNavigationAi pathNavigationAi;
+    private final WaterEscapeAi waterEscapeAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private final Deque<BlockPos> stoneQueue = new ArrayDeque<>();
     private int gatherTicks;
@@ -80,6 +86,7 @@ public class GatherStoneGoal extends Goal {
     private BlockPos stoneEgressPos;
     private BlockPos temporarilyBlockedTarget;
     private long temporarilyBlockedTargetUntilTick;
+    private final Set<BlockPos> skippedAccessClearBlocks = new HashSet<>();
 
     public GatherStoneGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -88,6 +95,7 @@ public class GatherStoneGoal extends Goal {
         this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
         this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
+        this.waterEscapeAi = new WaterEscapeAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -118,6 +126,8 @@ public class GatherStoneGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.playerNpc.getGatherCooldown() > 0) {
             return false;
         }
@@ -140,6 +150,8 @@ public class GatherStoneGoal extends Goal {
                 && this.gatherTicks < MAX_GATHER_TICKS
                 && this.playerNpc.isAlive()
                 && this.playerNpc.getTarget() == null
+                && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && hasPickaxe(this.playerNpc)
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
                 && this.canContinueStoneWork(serverLevel);
@@ -171,6 +183,10 @@ public class GatherStoneGoal extends Goal {
         }
 
         this.gatherTicks++;
+        if (this.tickWaterEscape(serverLevel)) {
+            return;
+        }
+
         if (this.handleHomeEgressBeforeStone(serverLevel)) {
             return;
         }
@@ -279,6 +295,7 @@ public class GatherStoneGoal extends Goal {
         this.toolAi.restoreMainHand();
         this.clearBlockAi.stop();
         this.breakingBlockAi.stop();
+        this.waterEscapeAi.stop();
         if (!this.playerNpc.level().isClientSide) {
             this.playerNpc.setGatherCooldown(20);
         }
@@ -290,11 +307,25 @@ public class GatherStoneGoal extends Goal {
         this.repathTicks = 0;
         this.standRouteAttempts = 0;
         this.failedAccessAttempts = 0;
+        this.skippedAccessClearBlocks.clear();
         this.phaseRecheckTicks = 0;
         this.phaseStillActive = true;
         this.clearedAccessForTarget = false;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
+    }
+
+    private boolean tickWaterEscape(ServerLevel serverLevel) {
+        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(serverLevel, Math.max(1.0D, this.speed));
+        if (result != WaterEscapeAi.TickResult.RUNNING && result != WaterEscapeAi.TickResult.DONE) {
+            return false;
+        }
+
+        this.playerNpc.setCurrentAiState("ai.player_npc.gathering_stone");
+        if (result == WaterEscapeAi.TickResult.RUNNING && !this.waterEscapeAi.detail().isBlank()) {
+            this.playerNpc.setCurrentAiDetail(this.waterEscapeAi.detail());
+        }
+        return true;
     }
 
     private boolean selectTarget(ServerLevel serverLevel) {
@@ -339,6 +370,7 @@ public class GatherStoneGoal extends Goal {
                 this.standPos = this.playerNpc.blockPosition().immutable();
                 this.standRouteAttempts = 0;
                 this.failedAccessAttempts = 0;
+                this.skippedAccessClearBlocks.clear();
                 this.clearedAccessForTarget = false;
                 this.clearBlockAi.stop();
                 this.breakingBlockAi.stop();
@@ -354,6 +386,7 @@ public class GatherStoneGoal extends Goal {
             this.standPos = stand.get();
             this.standRouteAttempts = 0;
             this.failedAccessAttempts = 0;
+            this.skippedAccessClearBlocks.clear();
             this.clearedAccessForTarget = false;
             this.clearBlockAi.stop();
             this.breakingBlockAi.stop();
@@ -365,6 +398,7 @@ public class GatherStoneGoal extends Goal {
         this.standPos = null;
         this.stoneEgressPos = null;
         this.failedAccessAttempts = 0;
+        this.skippedAccessClearBlocks.clear();
         this.clearedAccessForTarget = false;
         this.clearBlockAi.stop();
         this.breakingBlockAi.stop();
@@ -498,10 +532,7 @@ public class GatherStoneGoal extends Goal {
             return serverLevel.getFluidState(pos).isEmpty();
         }
 
-        return ClearBlockAi.isPhysicalObstructionState(state)
-                && state.getDestroySpeed(serverLevel, pos) >= 0.0F
-                && state.getFluidState().isEmpty()
-                && serverLevel.getBlockEntity(pos) == null;
+        return ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, state);
     }
 
     private static boolean isActionableStoneTarget(
@@ -545,7 +576,8 @@ public class GatherStoneGoal extends Goal {
         return home.isPresent()
                 && (PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos)
                 || PlayerNpcHomeUtil.isInside(home.get(), pos)
-                || isBelowHomeFootprint(home.get(), pos));
+                || isBelowHomeFootprint(home.get(), pos)
+                || isInsideHomeStoneBuffer(home.get(), pos));
     }
 
     private static boolean isCurrentFeetColumnTarget(PlayerNpcEntity playerNpc, BlockPos pos) {
@@ -569,6 +601,11 @@ public class GatherStoneGoal extends Goal {
     private static boolean isBelowHomeFootprint(PlayerNpcHomeUtil.HomeArea homeArea, BlockPos pos) {
         return PlayerNpcHomeUtil.isInsideFootprint(homeArea, pos)
                 && pos.getY() < homeArea.origin().getY();
+    }
+
+    private static boolean isInsideHomeStoneBuffer(PlayerNpcHomeUtil.HomeArea homeArea, BlockPos pos) {
+        return outsideFootprintDistance(homeArea, pos.getX(), pos.getZ()) <= HOME_STONE_TARGET_BUFFER
+                && pos.getY() <= homeArea.origin().getY() + HOME_STONE_TARGET_MAX_Y_OFFSET;
     }
 
     private static int outsideFootprintDistance(PlayerNpcHomeUtil.HomeArea homeArea, int x, int z) {
@@ -810,6 +847,7 @@ public class GatherStoneGoal extends Goal {
             return false;
         }
 
+        BlockPos clearTarget = this.clearBlockAi.targetPos();
         this.markStoneAccessClearing();
         ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
         if (result == ClearBlockAi.TickResult.RUNNING) {
@@ -819,6 +857,9 @@ public class GatherStoneGoal extends Goal {
         if (result == ClearBlockAi.TickResult.DONE) {
             this.failedAccessAttempts = 0;
         } else if (result == ClearBlockAi.TickResult.FAILED) {
+            if (clearTarget != null) {
+                this.skippedAccessClearBlocks.add(clearTarget.immutable());
+            }
             this.failedAccessAttempts++;
         }
         this.repathTicks = 0;
@@ -839,6 +880,7 @@ public class GatherStoneGoal extends Goal {
         addDescendingAccessCandidates(candidates, this.playerNpc.blockPosition(), this.standPos, this.targetPos);
         addForcedNearbyAccessCandidates(candidates, this.playerNpc.blockPosition(), this.standPos, this.targetPos);
         candidates.removeIf(pos -> pos.equals(this.targetPos)
+                || this.skippedAccessClearBlocks.contains(pos)
                 || isInsideProtectedStoneTarget(this.playerNpc, pos));
         boolean started = this.clearBlockAi.startNearest(
                 serverLevel,
@@ -1000,7 +1042,7 @@ public class GatherStoneGoal extends Goal {
     }
 
     private static boolean isClearablePathStateStatic(BlockState state) {
-        return ClearBlockAi.isPhysicalObstructionState(state);
+        return state != null && !state.isAir();
     }
 
     private static BlockPos nearestSideTarget(BlockPos feet, BlockPos target) {

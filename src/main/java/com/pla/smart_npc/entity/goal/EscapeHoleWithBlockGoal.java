@@ -240,10 +240,18 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return true;
         }
 
+        if (this.mode == EscapeMode.PILLAR && this.placePos != null) {
+            return true;
+        }
+
         if (this.mode == EscapeMode.PILLAR
                 && this.climbTargetPos != null
                 && this.shouldStopOpenSkyRouteClimb(serverLevel, this.playerNpc.blockPosition())) {
             return false;
+        }
+
+        if (this.mode == EscapeMode.PILLAR && this.hasUnfinishedRequestedRoute(serverLevel)) {
+            return true;
         }
 
         return this.mode == EscapeMode.PILLAR
@@ -568,6 +576,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         if (this.placePos == null) {
             if (!this.shouldContinuePillaring(serverLevel)) {
+                if (this.tryContinueRequestedRoutePillar(serverLevel)) {
+                    return;
+                }
                 this.finished = true;
                 return;
             }
@@ -593,9 +604,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 this.startPillarClearance(serverLevel, obstruction);
                 return;
             }
+            if (!this.playerNpc.onGround()) {
+                this.placeWaitTicks = 0;
+                this.lookDownAt(this.placePos);
+                return;
+            }
             this.placeWaitTicks = 0;
             this.failedPillarPlaceAttempts++;
-            if (this.failedPillarPlaceAttempts >= 3 || !this.playerNpc.onGround()) {
+            if (this.failedPillarPlaceAttempts >= 3) {
                 this.finished = true;
                 return;
             }
@@ -637,6 +653,59 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.placeDelayTicks = 0;
         this.placeWaitTicks = 0;
         this.updatePillarDetail();
+    }
+
+    private boolean tryContinueRequestedRoutePillar(ServerLevel serverLevel) {
+        BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+        if (requestedTarget == null) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.hasSatisfiedRequestedRoute(serverLevel, feet, requestedTarget)) {
+            this.playerNpc.clearUpwardEscapeTarget();
+            return false;
+        }
+
+        if (!this.playerNpc.onGround()) {
+            return true;
+        }
+
+        PillarPlan pillarPlan = this.findPillarPlan(serverLevel, feet, requestedTarget);
+        if (pillarPlan == null) {
+            return false;
+        }
+        if (this.exceedsRequestedRouteMax(pillarPlan)) {
+            this.playerNpc.clearUpwardEscapeTarget();
+            return false;
+        }
+
+        this.climbTargetPos = requestedTarget.immutable();
+        this.pillarBasePos = pillarPlan.basePos();
+        this.pillarExitY = pillarPlan.exitY();
+        this.requiredEscapeBlocks = Math.max(1, pillarPlan.blocksNeeded());
+
+        int escapeBlocks = this.countEscapeBlocks();
+        if (escapeBlocks < this.requiredEscapeBlocks) {
+            EscapeMaterialTarget target = this.findEscapeMaterialTarget(serverLevel);
+            if (target != null) {
+                this.mode = EscapeMode.GATHER_BLOCKS;
+                this.minePos = target.targetPos();
+                this.mineStandPos = target.standPos();
+                this.pillarsPlaced = 0;
+                this.maxPillarBlocks = 0;
+                this.moveToMineTarget();
+                return true;
+            }
+        }
+        if (escapeBlocks <= 0) {
+            return false;
+        }
+
+        this.maxPillarBlocks = Math.min(escapeBlocks, Math.max(1, Math.min(this.requiredEscapeBlocks, pillarPlan.blocksNeeded())));
+        this.pillarsPlaced = 0;
+        this.beginPillarStep(serverLevel);
+        return true;
     }
 
     private void beginPillarStep(ServerLevel serverLevel) {
@@ -835,6 +904,12 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         return feet.getY() < this.climbTargetPos.getY() - 1
                 && !this.hasStepExitToward(serverLevel, feet, this.climbTargetPos);
+    }
+
+    private boolean hasUnfinishedRequestedRoute(ServerLevel serverLevel) {
+        BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+        return requestedTarget != null
+                && !this.hasSatisfiedRequestedRoute(serverLevel, this.playerNpc.blockPosition(), requestedTarget);
     }
 
     private boolean moveToMineTarget() {
@@ -1220,6 +1295,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return true;
         }
 
+        if (this.climbTargetPos != null && this.isRequestedSurfaceRoute(serverLevel, feet, this.climbTargetPos)) {
+            return this.hasReachedRequestedRoute(serverLevel, feet, this.climbTargetPos);
+        }
+
         return this.climbTargetPos != null
                 && (feet.getY() >= this.climbTargetPos.getY() - 1
                 || this.hasStepExitToward(serverLevel, feet, this.climbTargetPos));
@@ -1332,9 +1411,21 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     private boolean hasReachedRequestedRoute(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
         if (this.isForcedRequestedRoute(routeTarget)) {
-            return feet.getY() >= routeTarget.getY() - 1;
+            return this.hasReachedForcedRequestedRoute(serverLevel, feet, routeTarget);
         }
         return this.hasReachedRequestedSurfaceExit(serverLevel, feet, routeTarget);
+    }
+
+    private boolean hasReachedForcedRequestedRoute(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
+        if (feet.getY() < routeTarget.getY() - 1
+                || !this.playerNpc.onGround()
+                || !this.canStandAt(serverLevel, feet)) {
+            return false;
+        }
+
+        return this.isSameOrNearbyRouteBlock(feet, routeTarget)
+                || this.hasStepExitToward(serverLevel, feet, routeTarget)
+                || this.hasReachedOpenSky(serverLevel, feet) && !this.isActuallyTrapped(serverLevel, feet);
     }
 
     private boolean hasReachedRequestedSurfaceExit(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {

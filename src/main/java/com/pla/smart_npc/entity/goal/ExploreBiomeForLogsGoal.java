@@ -67,6 +67,7 @@ public class ExploreBiomeForLogsGoal extends Goal {
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || (!logShortage && this.playerNpc.getBiomeExploreCooldown() > 0)
                 || this.inventoryCannotAcceptLogs()
                 || !this.needsSearchSupply()) {
@@ -96,6 +97,7 @@ public class ExploreBiomeForLogsGoal extends Goal {
                 && !this.playerNpc.isHealing()
                 && this.playerNpc.getTarget() == null
                 && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && !this.foundLog
                 && !this.inventoryCannotAcceptLogs()
                 && !this.playerNpc.getNavigation().isDone()

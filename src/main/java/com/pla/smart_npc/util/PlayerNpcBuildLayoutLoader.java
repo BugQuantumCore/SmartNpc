@@ -73,7 +73,9 @@ public class PlayerNpcBuildLayoutLoader extends SimpleJsonResourceReloadListener
     public static int countMissingRequired(net.minecraft.server.level.ServerLevel serverLevel, PlayerNpcBuildLayout layout, net.minecraft.core.BlockPos origin) {
         int missing = 0;
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.blocks()) {
-            if (!block.optional() && !PlayerNpcBuildMaterialUtil.matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
+            if (!block.optional()
+                    && !PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
+                    && !PlayerNpcBuildMaterialUtil.matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
                 missing++;
             }
         }

@@ -319,7 +319,7 @@ public final class ReturnPositionAi {
     }
 
     private boolean isClearable(BlockState state) {
-        return ClearBlockAi.isPhysicalObstructionState(state);
+        return state != null && !state.isAir();
     }
 
     private boolean needsVerticalEscape(ServerLevel serverLevel, BlockPos target) {

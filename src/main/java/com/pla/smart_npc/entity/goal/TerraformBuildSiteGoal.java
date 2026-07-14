@@ -127,6 +127,7 @@ public class TerraformBuildSiteGoal extends Goal {
 
     private static boolean hasActiveVerticalEscape(PlayerNpcEntity playerNpc) {
         return playerNpc.getUpwardEscapeTarget() != null
+                || playerNpc.getHoleEscapeCooldown() > 0
                 || "ai.player_npc.pillaring_up".equals(playerNpc.getCurrentAiState());
     }
 
@@ -363,7 +364,11 @@ public class TerraformBuildSiteGoal extends Goal {
             return;
         }
 
+        boolean temporaryCraftingTable = CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos);
         if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, pos, state, this.playerNpc)) {
+            if (temporaryCraftingTable) {
+                CraftBasicGearGoal.clearTemporaryCraftingTable(this.playerNpc);
+            }
             this.playerNpc.hurtMainHandItem(1);
         }
         this.playerNpc.clearBlockBreakProgress(pos);
@@ -1051,7 +1056,7 @@ public class TerraformBuildSiteGoal extends Goal {
         return !state.isAir()
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && state.getFluidState().isEmpty()
-                && !CraftBasicGearGoal.isTemporaryCraftingTable(playerNpc, serverLevel, pos)
+                && !isProtectedTemporaryCraftingTable(playerNpc, serverLevel, pos)
                 && serverLevel.getBlockEntity(pos) == null
                 && (state.canBeReplaced()
                 || state.getCollisionShape(serverLevel, pos).isEmpty()
@@ -1059,6 +1064,11 @@ public class TerraformBuildSiteGoal extends Goal {
                 || state.is(BlockTags.MINEABLE_WITH_AXE)
                 || state.is(BlockTags.MINEABLE_WITH_PICKAXE)
                 || state.is(BlockTags.LEAVES));
+    }
+
+    private static boolean isProtectedTemporaryCraftingTable(PlayerNpcEntity playerNpc, ServerLevel serverLevel, BlockPos pos) {
+        return CraftBasicGearGoal.isTemporaryCraftingTable(playerNpc, serverLevel, pos)
+                && !PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos);
     }
 
     private static boolean isGoodFloorBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {

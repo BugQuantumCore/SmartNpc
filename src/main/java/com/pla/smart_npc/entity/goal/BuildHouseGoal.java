@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.WaterEscapeAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
 import com.pla.smart_npc.util.PlayerNpcBuildLayoutLoader;
@@ -60,7 +61,10 @@ public class BuildHouseGoal extends Goal {
     private static final int MAX_PLACEMENT_CLEARANCE_RETRIES = 3;
     private static final int MAX_SAME_PLACEMENT_TICKS = 20 * 8;
     private static final int MAX_PLACEMENT_ATTEMPTS = 4;
+    private static final int MAX_UNREACHABLE_BUILD_TARGET_TICKS = 20 * 4;
     private static final int BUILD_MOTION_INTERVAL_TICKS = 12;
+    private static final int BUILD_WORK_AREA_MARGIN = 4;
+    private static final int BUILD_WORK_AREA_HEIGHT = 8;
     private static final double BUILD_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double BUILD_HORIZONTAL_DISTANCE_SQR = 4.0D * 4.0D;
     private static final String ACTIVE_BUILD_BATCH_KEY = "SmartNpcActiveBuildBatch";
@@ -73,6 +77,7 @@ public class BuildHouseGoal extends Goal {
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
+    private final WaterEscapeAi waterEscapeAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private final List<PlayerNpcBuildLayout.RelativeBlock> blueprint = new ArrayList<>();
     private PlayerNpcHomeUtil.HomeArea homeArea;
@@ -101,11 +106,14 @@ public class BuildHouseGoal extends Goal {
     private int samePlacementTicks;
     private int placementAttempts;
     private int nextBuildMotionTick;
+    private BlockPos unreachableBuildTargetPos;
+    private int unreachableBuildTargetTicks;
     private String missingMaterial = "";
 
     public BuildHouseGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
+        this.waterEscapeAi = new WaterEscapeAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -165,6 +173,8 @@ public class BuildHouseGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.isStoneAccessClearing()
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.playerNpc.getTarget() != null) {
             return false;
         }
@@ -189,6 +199,9 @@ public class BuildHouseGoal extends Goal {
         this.selectedLayout = selection.layout();
         this.origin = selection.origin();
         this.homeArea = new PlayerNpcHomeUtil.HomeArea(this.origin, this.selectedLayout.width(), this.selectedLayout.depth());
+        if (existingHome && !this.isInsideBuildWorkArea(this.homeArea)) {
+            return false;
+        }
         PlayerNpcHomeUtil.setHome(this.playerNpc, this.homeArea, this.selectedLayout.id());
         if (TerraformBuildSiteGoal.hasPrepWork(this.playerNpc, serverLevel)) {
             return false;
@@ -224,6 +237,7 @@ public class BuildHouseGoal extends Goal {
         PlayerNpcBuildLayout buildLayout = layout.get();
         if (buildLayout.width() != home.width()
                 || buildLayout.depth() != home.depth()
+                || !this.isInsideBuildWorkArea(home)
                 || !this.hasUnfinishedPlacement(serverLevel, buildLayout, home.origin())
                 || !this.hasMaterialForAnyPlacement(serverLevel, buildLayout, home.origin())
                 || TerraformBuildSiteGoal.hasPrepWork(this.playerNpc, serverLevel)) {
@@ -246,7 +260,10 @@ public class BuildHouseGoal extends Goal {
     public boolean canContinueToUse() {
         return this.origin != null
                 && !this.blueprint.isEmpty()
+                && this.isInsideBuildWorkArea(this.homeArea)
                 && this.playerNpc.isAlive()
+                && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && this.playerNpc.getTarget() == null;
     }
 
@@ -288,6 +305,7 @@ public class BuildHouseGoal extends Goal {
         this.samePlacementTicks = 0;
         this.placementAttempts = 0;
         this.nextBuildMotionTick = 0;
+        this.clearUnreachableBuildTarget();
         this.placingBlockAi.resetDelay();
         this.missingMaterial = "";
         setBuildBatchActive(this.playerNpc, true);
@@ -308,6 +326,10 @@ public class BuildHouseGoal extends Goal {
         }
 
         BlockPos target = block.toWorld(this.origin);
+        if (this.tickWaterEscape(serverLevel, block)) {
+            return;
+        }
+
         if (this.trackPlacementTarget(target) && this.samePlacementTicks >= MAX_SAME_PLACEMENT_TICKS) {
             this.recoverStalledPlacement(serverLevel, target, block);
             return;
@@ -341,10 +363,10 @@ public class BuildHouseGoal extends Goal {
         }
 
         if (!this.canPlaceFromCurrentPosition(target)) {
-            this.playerNpc.getNavigation().moveTo(target.getX() + 0.5D, target.getY(), target.getZ() + 0.5D, 1.0D);
-            this.updateTaskDetail("walking to", block);
+            this.moveTowardBuildTarget(target, block, "walking to");
             return;
         }
+        this.clearUnreachableBuildTarget();
 
         this.playerNpc.getNavigation().stop();
         if (this.placingBlockAi.tickDelay(PlacingBlockAi.PLAYER_LIKE_BUILD_DELAY)) {
@@ -440,9 +462,26 @@ public class BuildHouseGoal extends Goal {
         this.samePlacementTicks = 0;
         this.placementAttempts = 0;
         this.nextBuildMotionTick = 0;
+        this.clearUnreachableBuildTarget();
         this.placingBlockAi.resetDelay();
+        this.waterEscapeAi.stop();
         this.missingMaterial = "";
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+    }
+
+    private boolean tickWaterEscape(ServerLevel serverLevel, PlayerNpcBuildLayout.RelativeBlock block) {
+        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(serverLevel, 1.1D);
+        if (result != WaterEscapeAi.TickResult.RUNNING && result != WaterEscapeAi.TickResult.DONE) {
+            return false;
+        }
+
+        this.playerNpc.setCurrentAiState("ai.player_npc.building_house");
+        if (result == WaterEscapeAi.TickResult.RUNNING && !this.waterEscapeAi.detail().isBlank()) {
+            this.updateTaskDetail(this.waterEscapeAi.detail(), block);
+        } else {
+            this.updateTaskDetail("resuming", block);
+        }
+        return true;
     }
 
     private BuildSelection findBuildSelection(ServerLevel serverLevel) {
@@ -529,6 +568,9 @@ public class BuildHouseGoal extends Goal {
                     || !serverLevel.getWorldBorder().isWithinBounds(checkPos)) {
                 return false;
             }
+            if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
+                continue;
+            }
             if (allowExistingHouseBlocks && this.isBuiltMatch(serverLevel, checkPos, block.state())) {
                 continue;
             }
@@ -546,7 +588,9 @@ public class BuildHouseGoal extends Goal {
 
     private boolean hasUnfinishedPlacement(ServerLevel serverLevel, PlayerNpcBuildLayout layout, BlockPos origin) {
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.blocks()) {
-            if (!block.optional() && !this.isBuiltMatch(serverLevel, block.toWorld(origin), block.state())) {
+            if (!block.optional()
+                    && !PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
+                    && !this.isBuiltMatch(serverLevel, block.toWorld(origin), block.state())) {
                 return true;
             }
         }
@@ -555,6 +599,9 @@ public class BuildHouseGoal extends Goal {
 
     private boolean hasMaterialForAnyPlacement(ServerLevel serverLevel, PlayerNpcBuildLayout layout, BlockPos origin) {
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.blocks()) {
+            if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
+                continue;
+            }
             if (this.isBuiltMatch(serverLevel, block.toWorld(origin), block.state())) {
                 continue;
             }
@@ -653,10 +700,10 @@ public class BuildHouseGoal extends Goal {
         this.restorePreviousMainHand();
         this.playerNpc.getLookControl().setLookAt(tablePos.getX() + 0.5D, tablePos.getY() + 0.5D, tablePos.getZ() + 0.5D, 40.0F, 40.0F);
         if (this.playerNpc.distanceToSqr(tablePos.getX() + 0.5D, tablePos.getY(), tablePos.getZ() + 0.5D) > BUILD_DISTANCE_SQR) {
-            this.playerNpc.getNavigation().moveTo(tablePos.getX() + 0.5D, tablePos.getY(), tablePos.getZ() + 0.5D, 1.0D);
-            this.updateTaskDetail("walking to craft", block);
+            this.moveTowardBuildTarget(tablePos, block, "walking to craft");
             return true;
         }
+        this.clearUnreachableBuildTarget();
 
         this.playerNpc.getNavigation().stop();
         if (this.placeDelay++ < 8) {
@@ -696,7 +743,8 @@ public class BuildHouseGoal extends Goal {
         for (BlockPos pos : BlockPos.betweenClosed(
                 this.origin.offset(-2, 0, -2),
                 this.origin.offset(this.selectedLayout.width() + 1, 3, this.selectedLayout.depth() + 1))) {
-            if (serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE)) {
+            if (serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE)
+                    && !this.isInsideSelectedBuildFootprint(pos)) {
                 return pos.immutable();
             }
         }
@@ -757,6 +805,10 @@ public class BuildHouseGoal extends Goal {
         PlayerNpcBuildLayout.RelativeBlock firstMissingBlock = null;
         for (int i = 0; i < this.blueprint.size(); ) {
             PlayerNpcBuildLayout.RelativeBlock block = this.blueprint.get(i);
+            if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
+                this.blueprint.remove(i);
+                continue;
+            }
             if (this.isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
                 this.blueprint.remove(i);
                 if (countsTowardBuildProgress(block)) {
@@ -795,6 +847,10 @@ public class BuildHouseGoal extends Goal {
 
         while (!this.blueprint.isEmpty()) {
             PlayerNpcBuildLayout.RelativeBlock block = this.blueprint.get(0);
+            if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
+                this.blueprint.remove(0);
+                continue;
+            }
             if (this.isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
                 this.blueprint.remove(0);
                 if (countsTowardBuildProgress(block)) {
@@ -831,6 +887,7 @@ public class BuildHouseGoal extends Goal {
         this.activeBuildBlock = null;
         this.cachedCraftingBlock = null;
         this.cachedCraftingNeeded = false;
+        this.clearUnreachableBuildTarget();
         this.placingBlockAi.resetDelay();
     }
 
@@ -843,6 +900,9 @@ public class BuildHouseGoal extends Goal {
         BlockPos pos = block.toWorld(this.origin);
         BlockState targetState = block.state();
 
+        if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(targetState)) {
+            return true;
+        }
         if (this.isBuiltMatch(serverLevel, pos, targetState)) {
             return true;
         }
@@ -1051,7 +1111,7 @@ public class BuildHouseGoal extends Goal {
         return !state.isAir()
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && state.getFluidState().isEmpty()
-                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
+                && !this.isProtectedTemporaryCraftingTable(serverLevel, pos)
                 && serverLevel.getBlockEntity(pos) == null
                 && (state.canBeReplaced()
                 || state.getCollisionShape(serverLevel, pos).isEmpty()
@@ -1059,6 +1119,11 @@ public class BuildHouseGoal extends Goal {
                 || state.is(BlockTags.MINEABLE_WITH_AXE)
                 || state.is(BlockTags.MINEABLE_WITH_PICKAXE)
                 || state.is(BlockTags.LEAVES));
+    }
+
+    private boolean isProtectedTemporaryCraftingTable(ServerLevel serverLevel, BlockPos pos) {
+        return CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
+                && !this.isInsideSelectedBuildFootprint(pos);
     }
 
     private boolean tryRelocateBlockingUtility(ServerLevel serverLevel, BlockPos pos, BlockState state) {
@@ -1176,6 +1241,64 @@ public class BuildHouseGoal extends Goal {
         double dx = this.playerNpc.getX() - (target.getX() + 0.5D);
         double dz = this.playerNpc.getZ() - (target.getZ() + 0.5D);
         return dx * dx + dz * dz <= BUILD_HORIZONTAL_DISTANCE_SQR;
+    }
+
+    private void moveTowardBuildTarget(BlockPos target, PlayerNpcBuildLayout.RelativeBlock block, String stage) {
+        boolean moving = this.playerNpc.getNavigation().moveTo(
+                target.getX() + 0.5D,
+                target.getY(),
+                target.getZ() + 0.5D,
+                1.0D
+        );
+        if (moving
+                && !this.playerNpc.getNavigation().isDone()
+                && !this.playerNpc.getNavigation().isStuck()) {
+            this.clearUnreachableBuildTarget();
+            this.updateTaskDetail(stage, block);
+            return;
+        }
+
+        this.trackUnreachableBuildTarget(target);
+        if (this.unreachableBuildTargetTicks >= MAX_UNREACHABLE_BUILD_TARGET_TICKS) {
+            this.deferBlockedPlacement(block);
+            this.updateTaskDetail("deferred unreachable", block);
+            return;
+        }
+
+        this.updateTaskDetail(stage, block);
+    }
+
+    private void trackUnreachableBuildTarget(BlockPos target) {
+        if (target == null) {
+            this.clearUnreachableBuildTarget();
+            return;
+        }
+        if (!target.equals(this.unreachableBuildTargetPos)) {
+            this.unreachableBuildTargetPos = target.immutable();
+            this.unreachableBuildTargetTicks = 0;
+            return;
+        }
+
+        this.unreachableBuildTargetTicks++;
+    }
+
+    private void clearUnreachableBuildTarget() {
+        this.unreachableBuildTargetPos = null;
+        this.unreachableBuildTargetTicks = 0;
+    }
+
+    private boolean isInsideBuildWorkArea(PlayerNpcHomeUtil.HomeArea homeArea) {
+        if (homeArea == null) {
+            return false;
+        }
+
+        BlockPos pos = this.playerNpc.blockPosition();
+        return pos.getX() >= homeArea.origin().getX() - BUILD_WORK_AREA_MARGIN
+                && pos.getX() < homeArea.origin().getX() + homeArea.width() + BUILD_WORK_AREA_MARGIN
+                && pos.getZ() >= homeArea.origin().getZ() - BUILD_WORK_AREA_MARGIN
+                && pos.getZ() < homeArea.origin().getZ() + homeArea.depth() + BUILD_WORK_AREA_MARGIN
+                && pos.getY() >= homeArea.origin().getY()
+                && pos.getY() <= homeArea.origin().getY() + BUILD_WORK_AREA_HEIGHT;
     }
 
     private void deferBlockedPlacement(PlayerNpcBuildLayout.RelativeBlock block) {
@@ -1525,7 +1648,10 @@ public class BuildHouseGoal extends Goal {
     }
 
     private static boolean countsTowardBuildProgress(PlayerNpcBuildLayout.RelativeBlock block) {
-        return block != null && !block.optional() && !block.state().isAir();
+        return block != null
+                && !block.optional()
+                && !block.state().isAir()
+                && !PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state());
     }
 
     private static int buildPlacementPriority(PlayerNpcBuildLayout.RelativeBlock block) {
@@ -1548,6 +1674,7 @@ public class BuildHouseGoal extends Goal {
             if (block == torchBlock
                     || block.optional()
                     || block.state().isAir()
+                    || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
                     || block.isSecondHalfOfSingleItemBlock()
                     || !isTorchPrerequisitePlacement(block.state())
                     || this.isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {

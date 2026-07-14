@@ -22,6 +22,7 @@ public final class PathNavigationAi {
     private static final double LOCAL_ROUTE_MAX_BACKTRACK_SQR = 8.0D * 8.0D;
 
     private final PlayerNpcEntity playerNpc;
+    private final WaterEscapeAi waterEscapeAi;
     private BlockPos lastLocalRouteTarget;
     private String lastMoveFailureDetail = "";
     private int lastLocalCandidateCount;
@@ -29,9 +30,14 @@ public final class PathNavigationAi {
 
     public PathNavigationAi(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.waterEscapeAi = new WaterEscapeAi(playerNpc);
     }
 
     public boolean moveTo(ServerLevel serverLevel, BlockPos target, double speed, int maxSafeDrop) {
+        if (this.escapeWaterIfNeeded(serverLevel, speed)) {
+            return true;
+        }
+
         if (this.isAlreadyAtTarget(target)) {
             this.lastMoveFailureDetail = "";
             this.playerNpc.getNavigation().stop();
@@ -61,6 +67,10 @@ public final class PathNavigationAi {
     }
 
     public boolean moveToExact(ServerLevel serverLevel, BlockPos target, double speed, int maxSafeDrop) {
+        if (this.escapeWaterIfNeeded(serverLevel, speed)) {
+            return true;
+        }
+
         if (this.isAlreadyAtTarget(target)) {
             this.lastMoveFailureDetail = "";
             this.playerNpc.getNavigation().stop();
@@ -122,6 +132,18 @@ public final class PathNavigationAi {
 
     public String lastMoveFailureDetail() {
         return this.lastMoveFailureDetail;
+    }
+
+    private boolean escapeWaterIfNeeded(ServerLevel serverLevel, double speed) {
+        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(serverLevel, Math.max(1.0D, speed));
+        if (result == WaterEscapeAi.TickResult.RUNNING || result == WaterEscapeAi.TickResult.DONE) {
+            this.lastMoveFailureDetail = "";
+            if (result == WaterEscapeAi.TickResult.RUNNING && !this.waterEscapeAi.detail().isBlank()) {
+                this.playerNpc.setCurrentAiDetail(this.waterEscapeAi.detail());
+            }
+            return true;
+        }
+        return false;
     }
 
     public boolean canReachOrSafelyDropTo(ServerLevel serverLevel, BlockPos target, int maxSafeDrop) {

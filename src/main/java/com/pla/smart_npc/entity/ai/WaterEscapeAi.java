@@ -1,15 +1,12 @@
-package com.pla.smart_npc.entity.goal;
+package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
-import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.ItemTags;
-import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.BedItem;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
@@ -22,11 +19,16 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.EnumSet;
 import java.util.List;
 
-public class EscapeWaterCurrentGoal extends Goal {
-    private static final int COOLDOWN_TICKS = 20;
+public final class WaterEscapeAi {
+    public enum TickResult {
+        NOT_NEEDED,
+        RUNNING,
+        DONE,
+        FAILED
+    }
+
     private static final int MAX_ESCAPE_TICKS = 20 * 3;
     private static final double MIN_FLOW_STRENGTH_SQR = 0.0004D;
     private static final int PLACE_DELAY_TICKS = 2;
@@ -40,49 +42,98 @@ public class EscapeWaterCurrentGoal extends Goal {
     private BlockPos plugPos;
     private BlockPos standPlacePos;
     private BlockPos dryExitPos;
-    private ItemStack previousMainHand = ItemStack.EMPTY;
-    private boolean showingPlacementItem;
     private boolean placingStandBlock;
     private boolean movingToDryExit;
-    private boolean finished;
     private int escapeTicks;
-    private int cooldownTicks;
     private int placeDelayTicks;
     private int placeWaitTicks;
+    private String detail = "";
 
-    public EscapeWaterCurrentGoal(PlayerNpcEntity playerNpc) {
+    public WaterEscapeAi(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
-        this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
-    @Override
-    public boolean canUse() {
-        if (this.cooldownTicks > 0) {
-            this.cooldownTicks--;
+    public boolean canStart(ServerLevel serverLevel) {
+        if (!this.isInWater(serverLevel)) {
             return false;
         }
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
-                || !this.playerNpc.isAlive()
-                || this.playerNpc.isNoAi()
-                || this.playerNpc.isPassenger()
-                || this.playerNpc.isHealing()
-                || this.playerNpc.getTarget() != null
-                || "ai.player_npc.fishing".equals(this.playerNpc.getCurrentAiState())) {
-            return false;
-        }
-        if (!this.isPassiveWaterEscapeState()) {
-            return false;
+        BlockPos feet = this.playerNpc.blockPosition();
+        return this.findDryStepOut(serverLevel, feet) != null
+                || this.findWaterStandTarget(serverLevel) != null
+                || this.findWaterCurrentTarget(serverLevel) != null;
+    }
+
+    public boolean isRunning() {
+        return this.waterPos != null || this.dryExitPos != null || this.standPlacePos != null || this.plugPos != null;
+    }
+
+    public String detail() {
+        return this.detail;
+    }
+
+    public TickResult tick(ServerLevel serverLevel, double speed) {
+        if (!this.isInWater(serverLevel)) {
+            boolean wasRunning = this.isRunning();
+            this.stop();
+            return wasRunning ? TickResult.DONE : TickResult.NOT_NEEDED;
         }
 
-        BlockPos dryExit = this.findDryStepOut(serverLevel, this.playerNpc.blockPosition());
+        if (!this.isRunning() && !this.start(serverLevel)) {
+            this.jumpUpFromWater(serverLevel);
+            this.detail = "water escape: jumping";
+            return TickResult.FAILED;
+        }
+
+        if (this.escapeTicks++ >= MAX_ESCAPE_TICKS) {
+            this.stop();
+            return TickResult.FAILED;
+        }
+
+        if (this.movingToDryExit) {
+            return this.tickDryExit(serverLevel, speed);
+        }
+        if (this.placingStandBlock) {
+            return this.tickStandPlacement(serverLevel);
+        }
+
+        this.jumpAgainstCurrent(serverLevel);
+        this.updateDetail();
+        if (this.plugPos != null && this.escapeTicks % 4 == 0 && this.tryPlugWater(serverLevel, this.plugPos)) {
+            this.stop();
+            return TickResult.DONE;
+        }
+        return TickResult.RUNNING;
+    }
+
+    public void stop() {
+        this.waterPos = null;
+        this.plugPos = null;
+        this.standPlacePos = null;
+        this.dryExitPos = null;
+        this.placingStandBlock = false;
+        this.movingToDryExit = false;
+        this.escapeTicks = 0;
+        this.placeDelayTicks = 0;
+        this.placeWaitTicks = 0;
+        this.detail = "";
+    }
+
+    private boolean start(ServerLevel serverLevel) {
+        this.escapeTicks = 0;
+        this.placeDelayTicks = PLACE_DELAY_TICKS;
+        this.placeWaitTicks = 0;
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos dryExit = this.findDryStepOut(serverLevel, feet);
         if (dryExit != null) {
-            this.waterPos = this.playerNpc.blockPosition().immutable();
+            this.waterPos = feet.immutable();
             this.dryExitPos = dryExit;
             this.plugPos = null;
             this.standPlacePos = null;
             this.placingStandBlock = false;
             this.movingToDryExit = true;
+            this.updateDetail();
             return true;
         }
 
@@ -94,134 +145,118 @@ public class EscapeWaterCurrentGoal extends Goal {
             this.plugPos = null;
             this.placingStandBlock = true;
             this.movingToDryExit = false;
+            this.updateDetail();
             return true;
         }
 
-        if (!this.isActiveTravelState()) {
+        WaterCurrentTarget currentTarget = this.findWaterCurrentTarget(serverLevel);
+        if (currentTarget == null) {
             return false;
         }
 
-        WaterCurrentTarget target = this.findWaterCurrentTarget(serverLevel);
-        if (target == null) {
-            return false;
-        }
-
-        this.waterPos = target.waterPos();
-        this.plugPos = target.plugPos();
+        this.waterPos = currentTarget.waterPos();
+        this.plugPos = currentTarget.plugPos();
         this.standPlacePos = null;
         this.dryExitPos = null;
         this.placingStandBlock = false;
         this.movingToDryExit = false;
+        this.updateDetail();
         return true;
     }
 
-    @Override
-    public boolean canContinueToUse() {
-        if (this.escapeTicks >= MAX_ESCAPE_TICKS
-                || this.finished
-                || !this.playerNpc.isAlive()
-                || this.playerNpc.isNoAi()
-                || this.playerNpc.getTarget() != null
-                || !(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
-            return false;
+    private TickResult tickDryExit(ServerLevel serverLevel, double speed) {
+        if (this.dryExitPos == null) {
+            this.stop();
+            return TickResult.FAILED;
         }
 
-        if (this.movingToDryExit) {
-            if (!this.isInWater(serverLevel)) {
-                return false;
-            }
-            if (this.dryExitPos != null && this.canStandDryAt(serverLevel, this.dryExitPos)) {
-                return true;
-            }
+        if (!this.isInWater(serverLevel)) {
+            this.stop();
+            return TickResult.DONE;
+        }
+
+        if (!this.canStandDryAt(serverLevel, this.dryExitPos)) {
             this.dryExitPos = this.findDryStepOut(serverLevel, this.playerNpc.blockPosition());
-            return this.dryExitPos != null;
+            if (this.dryExitPos == null) {
+                this.stop();
+                return TickResult.FAILED;
+            }
         }
 
-        if (this.placingStandBlock) {
-            return this.standPlacePos != null
-                    && this.canPlaceStandBlockAt(serverLevel, this.standPlacePos)
-                    && this.hasWaterPlugBlock();
-        }
-
-        WaterCurrentTarget target = this.findWaterCurrentTarget(serverLevel);
-        if (target == null) {
-            return false;
-        }
-
-        this.waterPos = target.waterPos();
-        this.plugPos = target.plugPos();
-        return true;
-    }
-
-    @Override
-    public void start() {
-        this.escapeTicks = 0;
-        this.previousMainHand = ItemStack.EMPTY;
-        this.showingPlacementItem = false;
-        this.finished = false;
-        this.movingToDryExit = this.dryExitPos != null;
-        this.placeDelayTicks = PLACE_DELAY_TICKS;
-        this.placeWaitTicks = 0;
-        this.playerNpc.setCurrentAiState("ai.player_npc.escaping_water_current");
+        this.waterPos = this.playerNpc.blockPosition().immutable();
+        this.playerNpc.getNavigation().stop();
+        this.jumpUpFromWater(serverLevel);
+        this.playerNpc.getLookControl().setLookAt(
+                this.dryExitPos.getX() + 0.5D,
+                this.dryExitPos.getY() + 0.5D,
+                this.dryExitPos.getZ() + 0.5D,
+                50.0F,
+                50.0F
+        );
+        this.playerNpc.getMoveControl().setWantedPosition(
+                this.dryExitPos.getX() + 0.5D,
+                this.dryExitPos.getY(),
+                this.dryExitPos.getZ() + 0.5D,
+                speed
+        );
         this.updateDetail();
+        return TickResult.RUNNING;
     }
 
-    @Override
-    public void tick() {
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || this.waterPos == null) {
-            return;
+    private TickResult tickStandPlacement(ServerLevel serverLevel) {
+        if (this.standPlacePos == null) {
+            this.stop();
+            return TickResult.FAILED;
         }
 
-        this.escapeTicks++;
-        if (this.movingToDryExit) {
-            this.tickDryExit(serverLevel);
-            return;
-        }
-
-        if (this.placingStandBlock) {
-            this.tickStandPlacement(serverLevel);
-            return;
-        }
-
-        this.jumpAgainstCurrent(serverLevel);
+        this.playerNpc.getNavigation().stop();
+        this.jumpUpFromWater(serverLevel);
+        this.playerNpc.getLookControl().setLookAt(
+                this.standPlacePos.getX() + 0.5D,
+                this.standPlacePos.getY() + 0.5D,
+                this.standPlacePos.getZ() + 0.5D,
+                50.0F,
+                50.0F
+        );
         this.updateDetail();
-        if (this.plugPos != null && this.escapeTicks % 4 == 0 && this.tryPlugWater(serverLevel, this.plugPos)) {
-            this.finished = true;
-            this.cooldownTicks = COOLDOWN_TICKS;
+
+        if (!this.canPlaceStandBlockAt(serverLevel, this.standPlacePos)) {
+            WaterStandTarget target = this.findWaterStandTarget(serverLevel);
+            if (target == null) {
+                this.stop();
+                return TickResult.DONE;
+            }
+            this.waterPos = target.waterPos();
+            this.standPlacePos = target.placePos();
+            this.placeDelayTicks = PLACE_DELAY_TICKS;
+            this.placeWaitTicks = 0;
+            return TickResult.RUNNING;
         }
-    }
 
-    @Override
-    public void stop() {
-        this.restorePreviousMainHand();
-        this.waterPos = null;
-        this.plugPos = null;
-        this.standPlacePos = null;
-        this.dryExitPos = null;
-        this.escapeTicks = 0;
-        this.placeDelayTicks = 0;
-        this.placeWaitTicks = 0;
-        this.placingStandBlock = false;
-        this.movingToDryExit = false;
-        this.finished = false;
-        this.cooldownTicks = COOLDOWN_TICKS;
-        this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
-        this.playerNpc.setCurrentAiDetail("");
-    }
+        if (this.placeDelayTicks > 0) {
+            this.placeDelayTicks--;
+            return TickResult.RUNNING;
+        }
 
-    private boolean isActiveTravelState() {
-        String state = this.playerNpc.getCurrentAiState();
-        return !PlayerNpcEntity.AI_IDLE.equals(state)
-                && !"ai.player_npc.looking_for_work".equals(state)
-                && !"ai.player_npc.staying_busy".equals(state)
-                && !"ai.player_npc.fishing".equals(state);
-    }
+        this.placeWaitTicks++;
+        if (!this.hasStandPlacementClearance(this.standPlacePos)) {
+            if (this.placeWaitTicks > MAX_PLACE_WAIT_TICKS) {
+                this.stop();
+                return TickResult.FAILED;
+            }
+            return TickResult.RUNNING;
+        }
 
-    private boolean isPassiveWaterEscapeState() {
-        String state = this.playerNpc.getCurrentAiState();
-        return PlayerNpcEntity.AI_IDLE.equals(state)
-                || "ai.player_npc.looking_for_work".equals(state)
-                || "ai.player_npc.staying_busy".equals(state);
+        if (this.tryPlaceStandBlock(serverLevel, this.standPlacePos)) {
+            this.stop();
+            return TickResult.DONE;
+        }
+
+        if (this.placeWaitTicks > MAX_PLACE_WAIT_TICKS) {
+            this.stop();
+            return TickResult.FAILED;
+        }
+        return TickResult.RUNNING;
     }
 
     private WaterCurrentTarget findWaterCurrentTarget(ServerLevel serverLevel) {
@@ -291,44 +326,6 @@ public class EscapeWaterCurrentGoal extends Goal {
         return null;
     }
 
-    private void tickDryExit(ServerLevel serverLevel) {
-        if (this.dryExitPos == null) {
-            this.finished = true;
-            return;
-        }
-
-        if (!this.isInWater(serverLevel)) {
-            this.finished = true;
-            this.cooldownTicks = COOLDOWN_TICKS;
-            return;
-        }
-
-        if (!this.canStandDryAt(serverLevel, this.dryExitPos)) {
-            this.dryExitPos = this.findDryStepOut(serverLevel, this.playerNpc.blockPosition());
-            if (this.dryExitPos == null) {
-                this.finished = true;
-                return;
-            }
-        }
-
-        this.waterPos = this.playerNpc.blockPosition().immutable();
-        this.jumpUpFromWater(serverLevel);
-        this.playerNpc.getLookControl().setLookAt(
-                this.dryExitPos.getX() + 0.5D,
-                this.dryExitPos.getY() + 0.5D,
-                this.dryExitPos.getZ() + 0.5D,
-                50.0F,
-                50.0F
-        );
-        this.playerNpc.getMoveControl().setWantedPosition(
-                this.dryExitPos.getX() + 0.5D,
-                this.dryExitPos.getY(),
-                this.dryExitPos.getZ() + 0.5D,
-                1.1D
-        );
-        this.updateDetail();
-    }
-
     private BlockPos findPlugPos(ServerLevel serverLevel, BlockPos waterCandidate) {
         List<BlockPos> candidates = new ArrayList<>();
         candidates.add(waterCandidate);
@@ -352,70 +349,20 @@ public class EscapeWaterCurrentGoal extends Goal {
         FluidState fluidState = serverLevel.getFluidState(this.waterPos);
         Vec3 flow = fluidState.getFlow(serverLevel, this.waterPos);
         Vec3 motion = this.playerNpc.getDeltaMovement();
+        this.playerNpc.getNavigation().stop();
         this.playerNpc.getJumpControl().jump();
         this.playerNpc.setDeltaMovement(
                 motion.x - flow.x * 0.18D,
                 Math.max(motion.y, 0.12D),
                 motion.z - flow.z * 0.18D
         );
-    }
-
-    private void tickStandPlacement(ServerLevel serverLevel) {
-        if (this.standPlacePos == null) {
-            this.finished = true;
-            return;
-        }
-
-        this.jumpUpFromWater(serverLevel);
-        this.playerNpc.getLookControl().setLookAt(
-                this.standPlacePos.getX() + 0.5D,
-                this.standPlacePos.getY() + 0.5D,
-                this.standPlacePos.getZ() + 0.5D,
-                50.0F,
-                50.0F
-        );
-        this.updateDetail();
-
-        if (!this.canPlaceStandBlockAt(serverLevel, this.standPlacePos)) {
-            WaterStandTarget target = this.findWaterStandTarget(serverLevel);
-            if (target == null) {
-                this.finished = true;
-                return;
-            }
-            this.waterPos = target.waterPos();
-            this.standPlacePos = target.placePos();
-            this.placeDelayTicks = PLACE_DELAY_TICKS;
-            this.placeWaitTicks = 0;
-            return;
-        }
-
-        if (this.placeDelayTicks > 0) {
-            this.placeDelayTicks--;
-            return;
-        }
-
-        this.placeWaitTicks++;
-        if (!this.hasStandPlacementClearance(this.standPlacePos)) {
-            if (this.placeWaitTicks > MAX_PLACE_WAIT_TICKS) {
-                this.finished = true;
-            }
-            return;
-        }
-
-        if (this.tryPlaceStandBlock(serverLevel, this.standPlacePos)) {
-            this.finished = true;
-            this.cooldownTicks = COOLDOWN_TICKS;
-            return;
-        }
-
-        if (this.placeWaitTicks > MAX_PLACE_WAIT_TICKS) {
-            this.finished = true;
-        }
+        this.playerNpc.hasImpulse = true;
     }
 
     private void jumpUpFromWater(ServerLevel serverLevel) {
-        FluidState fluidState = this.waterPos == null ? serverLevel.getFluidState(this.playerNpc.blockPosition()) : serverLevel.getFluidState(this.waterPos);
-        Vec3 flow = fluidState.is(FluidTags.WATER) ? fluidState.getFlow(serverLevel, this.waterPos == null ? this.playerNpc.blockPosition() : this.waterPos) : Vec3.ZERO;
+        BlockPos pos = this.waterPos == null ? this.playerNpc.blockPosition() : this.waterPos;
+        FluidState fluidState = serverLevel.getFluidState(pos);
+        Vec3 flow = fluidState.is(FluidTags.WATER) ? fluidState.getFlow(serverLevel, pos) : Vec3.ZERO;
         Vec3 motion = this.playerNpc.getDeltaMovement();
         this.playerNpc.getJumpControl().jump();
         this.playerNpc.setDeltaMovement(
@@ -436,19 +383,15 @@ public class EscapeWaterCurrentGoal extends Goal {
         BlockState state = blockItem.getBlock().defaultBlockState();
         if (!this.canPlugWaterAt(serverLevel, pos)
                 || !state.canSurvive(serverLevel, pos)
-                || !this.canPlaceWithoutClipping(serverLevel, pos, state)) {
+                || !this.placingBlockAi.canPlaceWithoutClipping(serverLevel, pos, state)) {
             this.returnStack(blockStack);
             return false;
         }
 
-        this.showPlacementItem(blockStack);
-        this.playerNpc.getLookControl().setLookAt(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, 50.0F, 50.0F);
         if (!this.placingBlockAi.placeBlock(serverLevel, pos, state)) {
             this.returnStack(blockStack);
             return false;
         }
-
-        this.finishPlacementMainHand();
         return true;
     }
 
@@ -462,18 +405,15 @@ public class EscapeWaterCurrentGoal extends Goal {
         BlockState state = blockItem.getBlock().defaultBlockState();
         if (!this.canPlaceStandBlockAt(serverLevel, pos)
                 || !state.canSurvive(serverLevel, pos)
-                || !this.canPlaceWithoutClipping(serverLevel, pos, state)) {
+                || !this.placingBlockAi.canPlaceWithoutClipping(serverLevel, pos, state)) {
             this.returnStack(blockStack);
             return false;
         }
 
-        this.showPlacementItem(blockStack);
         if (!this.placingBlockAi.placeBlock(serverLevel, pos, state)) {
             this.returnStack(blockStack);
             return false;
         }
-
-        this.finishPlacementMainHand();
         return true;
     }
 
@@ -499,13 +439,6 @@ public class EscapeWaterCurrentGoal extends Goal {
                 && serverLevel.getEntities(this.playerNpc, new AABB(pos)).isEmpty();
     }
 
-    private boolean canPlaceWithoutClipping(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        return state.getCollisionShape(serverLevel, pos)
-                .toAabbs()
-                .stream()
-                .noneMatch(box -> box.move(pos).intersects(this.playerNpc.getBoundingBox().inflate(0.05D)));
-    }
-
     private boolean isWaterPlugBlock(ItemStack stack) {
         if (stack.isEmpty()
                 || !(stack.getItem() instanceof BlockItem blockItem)
@@ -527,22 +460,10 @@ public class EscapeWaterCurrentGoal extends Goal {
     }
 
     private boolean hasWaterPlugBlock() {
-        return this.isWaterPlugBlock(this.playerNpc.getMainHandItem())
-                || InventoryUtils.hasItem(this.playerNpc, this::isWaterPlugBlock);
+        return InventoryUtils.hasItem(this.playerNpc, this::isWaterPlugBlock);
     }
 
     private ItemStack takeWaterPlugBlock() {
-        ItemStack mainHand = this.playerNpc.getMainHandItem();
-        if (this.isWaterPlugBlock(mainHand)) {
-            ItemStack taken = mainHand.copy();
-            taken.setCount(1);
-            mainHand.shrink(1);
-            if (mainHand.isEmpty()) {
-                this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
-            }
-            return taken;
-        }
-
         return InventoryUtils.consumeItem(this.playerNpc, this::isWaterPlugBlock, 1).orElse(ItemStack.EMPTY);
     }
 
@@ -610,6 +531,40 @@ public class EscapeWaterCurrentGoal extends Goal {
                 && this.playerNpc.getDeltaMovement().y <= 0.08D;
     }
 
+    private void returnStack(ItemStack stack) {
+        if (!stack.isEmpty() && !InventoryUtils.addItem(this.playerNpc, stack)) {
+            this.playerNpc.spawnAtLocation(stack);
+        }
+    }
+
+    private void updateDetail() {
+        if (this.waterPos == null) {
+            this.detail = "";
+            return;
+        }
+
+        if (this.placingStandBlock) {
+            String place = this.standPlacePos == null
+                    ? "finding footing"
+                    : "placing footing @ " + posText(this.standPlacePos);
+            this.detail = "water escape: trapped water @ " + posText(this.waterPos) + " " + place;
+            return;
+        }
+
+        if (this.movingToDryExit) {
+            String exit = this.dryExitPos == null
+                    ? "finding dry exit"
+                    : "dry exit @ " + posText(this.dryExitPos);
+            this.detail = "water escape: leaving water @ " + posText(this.waterPos) + " " + exit;
+            return;
+        }
+
+        String plug = this.plugPos == null
+                ? "jumping"
+                : "plugging @ " + posText(this.plugPos);
+        this.detail = "water escape: flow @ " + posText(this.waterPos) + " " + plug;
+    }
+
     private static boolean isFlowingWater(ServerLevel serverLevel, BlockPos pos, FluidState fluidState) {
         return fluidState.is(FluidTags.WATER)
                 && !fluidState.isSource()
@@ -621,84 +576,6 @@ public class EscapeWaterCurrentGoal extends Goal {
         return flow.x * flow.x + flow.z * flow.z;
     }
 
-    private void showPlacementItem(ItemStack stack) {
-        if (stack.isEmpty()) {
-            return;
-        }
-        if (!this.showingPlacementItem) {
-            this.previousMainHand = this.playerNpc.getMainHandItem().copy();
-            this.showingPlacementItem = true;
-        }
-        ItemStack held = stack.copy();
-        held.setCount(1);
-        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, held);
-    }
-
-    private void restorePreviousMainHand() {
-        if (!this.showingPlacementItem) {
-            return;
-        }
-        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
-        this.previousMainHand = ItemStack.EMPTY;
-        this.showingPlacementItem = false;
-    }
-
-    private void finishPlacementMainHand() {
-        if (!this.showingPlacementItem) {
-            return;
-        }
-        this.placingBlockAi.finishHeldPlacement(this.previousMainHand);
-        this.previousMainHand = ItemStack.EMPTY;
-        this.showingPlacementItem = false;
-    }
-
-    private void returnStack(ItemStack stack) {
-        if (!stack.isEmpty() && !InventoryUtils.addItem(this.playerNpc, stack)) {
-            this.playerNpc.spawnAtLocation(stack);
-        }
-    }
-
-    private void updateDetail() {
-        if (this.waterPos == null) {
-            this.playerNpc.setCurrentAiDetail("");
-            return;
-        }
-
-        if (this.placingStandBlock) {
-            String place = this.standPlacePos == null
-                    ? "finding footing"
-                    : "placing footing @ " + this.standPlacePos.getX() + " " + this.standPlacePos.getY() + " " + this.standPlacePos.getZ();
-            this.playerNpc.setCurrentAiDetail("trapped water @ "
-                    + this.waterPos.getX() + " "
-                    + this.waterPos.getY() + " "
-                    + this.waterPos.getZ() + "\n" + place);
-            return;
-        }
-
-        if (this.movingToDryExit) {
-            String exit = this.dryExitPos == null
-                    ? "finding dry exit"
-                    : "dry exit @ " + this.dryExitPos.getX() + " " + this.dryExitPos.getY() + " " + this.dryExitPos.getZ();
-            this.playerNpc.setCurrentAiDetail("leaving water @ "
-                    + this.waterPos.getX() + " "
-                    + this.waterPos.getY() + " "
-                    + this.waterPos.getZ() + "\n" + exit);
-            return;
-        }
-
-        String plug = this.plugPos == null
-                ? "jumping"
-                : "plugging @ " + this.plugPos.getX() + " " + this.plugPos.getY() + " " + this.plugPos.getZ();
-        this.playerNpc.setCurrentAiDetail("flow @ "
-                + this.waterPos.getX() + " "
-                + this.waterPos.getY() + " "
-                + this.waterPos.getZ() + "\n" + plug);
-    }
-
-    private record WaterCurrentTarget(BlockPos waterPos, BlockPos plugPos) {}
-
-    private record WaterStandTarget(BlockPos waterPos, BlockPos placePos) {}
-
     private static double directionScore(BlockPos from, BlockPos to, Vec3 look) {
         double dx = to.getX() - from.getX();
         double dz = to.getZ() - from.getZ();
@@ -707,5 +584,15 @@ public class EscapeWaterCurrentGoal extends Goal {
             return 0.0D;
         }
         return dx / length * look.x + dz / length * look.z;
+    }
+
+    private static String posText(BlockPos pos) {
+        return pos.getX() + " " + pos.getY() + " " + pos.getZ();
+    }
+
+    private record WaterCurrentTarget(BlockPos waterPos, BlockPos plugPos) {
+    }
+
+    private record WaterStandTarget(BlockPos waterPos, BlockPos placePos) {
     }
 }

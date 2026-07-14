@@ -151,6 +151,8 @@ public class GatherMaterialsGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.playerNpc.getGatherCooldown() > 0
                 || this.inventoryIsMostlyFull()) {
             return false;
@@ -229,6 +231,8 @@ public class GatherMaterialsGoal extends Goal {
         return this.targetPos != null
                 && this.playerNpc.isAlive()
                 && this.playerNpc.getTarget() == null
+                && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && !this.inventoryIsMostlyFull()
                 && this.gatherTicks < this.getMaxGatherTicks();
     }
@@ -1959,7 +1963,9 @@ public class GatherMaterialsGoal extends Goal {
 
         BlockPos origin = home.get().origin();
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
-            if (block.optional() || PlayerNpcBuildMaterialUtil.matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
+            if (block.optional()
+                    || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
+                    || PlayerNpcBuildMaterialUtil.matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
                 continue;
             }
             if (PlayerNpcBuildMaterialUtil.hasMaterialFor(serverLevel, this.playerNpc, block, origin)) {

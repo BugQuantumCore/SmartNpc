@@ -113,6 +113,8 @@ public class CraftBasicGearGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || "ai.player_npc.gathering_materials".equals(this.playerNpc.getCurrentAiState())
                 || "ai.player_npc.digging_down_for_stone".equals(this.playerNpc.getCurrentAiState())) {
             return false;
@@ -163,6 +165,8 @@ public class CraftBasicGearGoal extends Goal {
                 && !this.playerNpc.isNoAi()
                 && !this.playerNpc.isPassenger()
                 && !this.playerNpc.isHealing()
+                && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && this.playerNpc.getTarget() == null;
     }
 
@@ -746,6 +750,7 @@ public class CraftBasicGearGoal extends Goal {
 
         for (BlockPos candidate : candidates) {
             if (PlayerNpcHomeUtil.isReplaceableForNpcBuild(serverLevel, candidate)
+                    && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)
                     && serverLevel.getBlockState(candidate.below()).isSolidRender(serverLevel, candidate.below())) {
                 return candidate.immutable();
             }

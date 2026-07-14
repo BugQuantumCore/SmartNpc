@@ -92,6 +92,8 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.playerNpc.getGatherCooldown() > 0) {
             return false;
         }
@@ -130,6 +132,8 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 && this.gatherTicks < MAX_GATHER_TICKS
                 && this.playerNpc.isAlive()
                 && this.playerNpc.getTarget() == null
+                && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
                 && !shouldStayHomeForWeather(serverLevel)
                 && needsMissingBuildMaterial(this.playerNpc, serverLevel)

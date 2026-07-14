@@ -6,6 +6,7 @@ import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
 import com.pla.smart_npc.util.PlayerNpcBuildLayoutLoader;
+import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -613,7 +614,7 @@ public class FarmCropGoal extends Goal {
         }
 
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
-            if (block.optional()) {
+            if (block.optional() || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
                 continue;
             }
             BlockPos pos = block.toWorld(homeArea.origin());

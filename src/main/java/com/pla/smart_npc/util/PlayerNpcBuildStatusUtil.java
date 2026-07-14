@@ -214,6 +214,7 @@ public final class PlayerNpcBuildStatusUtil {
     private static boolean isActiveRequirement(ServerLevel serverLevel, BlockPos origin, PlayerNpcBuildLayout.RelativeBlock block) {
         return !block.optional()
                 && !block.state().isAir()
+                && !PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
                 && !block.isSecondHalfOfSingleItemBlock()
                 && !PlayerNpcBuildMaterialUtil.matches(serverLevel.getBlockState(block.toWorld(origin)), block.state());
     }
@@ -228,6 +229,7 @@ public final class PlayerNpcBuildStatusUtil {
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.blocks()) {
             if (block.optional()
                     || block.state().isAir()
+                    || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
                     || block.isSecondHalfOfSingleItemBlock()) {
                 continue;
             }

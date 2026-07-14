@@ -19,6 +19,7 @@ import com.pla.smart_npc.entity.goal.CraftBasicGearGoal;
 import com.pla.smart_npc.entity.goal.CraftCropFoodGoal;
 import com.pla.smart_npc.entity.goal.CraftIronGearGoal;
 import com.pla.smart_npc.entity.goal.CraftShieldGoal;
+import com.pla.smart_npc.entity.goal.DescendHighColumnGoal;
 import com.pla.smart_npc.entity.goal.DigDownForStoneGoal;
 import com.pla.smart_npc.entity.goal.EatHealingFoodGoal;
 import com.pla.smart_npc.entity.goal.EscapeHoleWithBlockGoal;
@@ -633,10 +634,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
         BlockPos homeCenter = homeArea.origin().offset(homeArea.width() / 2, 1, homeArea.depth() / 2);
         int climbBlocks = homeCenter.getY() - this.blockPosition().getY();
-        if (climbBlocks <= 1) {
-            return;
-        }
-
         int maxPillarBlocks = Math.max(
                 EXPLORATION_RETURN_ESCAPE_MIN_PILLAR_BLOCKS,
                 Math.min(
@@ -712,7 +709,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.craftGearCooldown = 0;
         this.manageHomeCooldown = 0;
         this.returnHomeCooldown = 0;
-        this.explorationReturnHomeRequestTicks = 0;
         this.craftCooldown = 0;
         this.farmCooldown = 0;
         this.gatherCooldown = 0;
@@ -1330,8 +1326,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     protected void registerGoals() {
         this.goalSelector.addGoal(0, new FloatGoal(this));
+        this.goalSelector.addGoal(0, new EscapeWaterCurrentGoal(this));
         this.registerVanillaCombatReplacementGoals();
         this.goalSelector.addGoal(1, new EscapeHoleWithBlockGoal(this));
+        this.goalSelector.addGoal(1, new DescendHighColumnGoal(this));
         this.goalSelector.addGoal(1, new CallForHelpGoal(this));
         this.goalSelector.addGoal(2, this.gated(new SleepAtHomeGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(2, this.gated(new ScaredHideGoal(this), PlayerNpcInterest.CAUTIOUS));
@@ -1629,6 +1627,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || "ai.player_npc.gathering_stone".equals(state)
                 || "ai.player_npc.exploring_cave".equals(state)
                 || "ai.player_npc.escaping_hole".equals(state)
+                || "ai.player_npc.descending_column".equals(state)
                 || "ai.player_npc.pillaring_up".equals(state)
                 || "ai.player_npc.escaping_water_current".equals(state)
                 || "ai.player_npc.breaking_target_obstruction".equals(state)

@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
+import java.util.function.Predicate;
 
 public final class TreeAi {
     private static final int MAX_LOGS = 96;
@@ -23,6 +24,10 @@ public final class TreeAi {
     }
 
     public static Optional<Tree> findNearest(ServerLevel serverLevel, BlockPos center, int radius) {
+        return findNearest(serverLevel, center, radius, pos -> true);
+    }
+
+    public static Optional<Tree> findNearest(ServerLevel serverLevel, BlockPos center, int radius, Predicate<BlockPos> allowedLogPos) {
         Set<BlockPos> visited = new HashSet<>();
         Tree bestTree = null;
         Tree bestLooseLog = null;
@@ -33,11 +38,11 @@ public final class TreeAi {
                 center.offset(-radius, -6, -radius),
                 center.offset(radius, 18, radius))) {
             BlockPos pos = mutable.immutable();
-            if (visited.contains(pos) || !isLog(serverLevel, pos)) {
+            if (visited.contains(pos) || !isLog(serverLevel, pos, allowedLogPos)) {
                 continue;
             }
 
-            Tree candidate = scan(serverLevel, pos, visited);
+            Tree candidate = scan(serverLevel, pos, visited, allowedLogPos);
             double distance = candidate.stump().distSqr(center);
             if (candidate.isTree() && distance < bestTreeDistance) {
                 bestTree = candidate;
@@ -51,7 +56,7 @@ public final class TreeAi {
         return Optional.ofNullable(bestTree != null ? bestTree : bestLooseLog);
     }
 
-    private static Tree scan(ServerLevel serverLevel, BlockPos start, Set<BlockPos> globalVisited) {
+    private static Tree scan(ServerLevel serverLevel, BlockPos start, Set<BlockPos> globalVisited, Predicate<BlockPos> allowedLogPos) {
         Queue<BlockPos> open = new ArrayDeque<>();
         Set<BlockPos> localVisited = new HashSet<>();
         List<BlockPos> logs = new ArrayList<>();
@@ -59,7 +64,7 @@ public final class TreeAi {
 
         while (!open.isEmpty() && logs.size() < MAX_LOGS) {
             BlockPos pos = open.poll();
-            if (!localVisited.add(pos) || !isLog(serverLevel, pos)) {
+            if (!localVisited.add(pos) || !isLog(serverLevel, pos, allowedLogPos)) {
                 continue;
             }
 
@@ -67,7 +72,7 @@ public final class TreeAi {
             globalVisited.add(pos);
             for (BlockPos adjacent : BlockPos.betweenClosed(pos.offset(-1, -1, -1), pos.offset(1, 1, 1))) {
                 BlockPos next = adjacent.immutable();
-                if (!localVisited.contains(next) && isLog(serverLevel, next)) {
+                if (!localVisited.contains(next) && isLog(serverLevel, next, allowedLogPos)) {
                     open.add(next);
                 }
             }
@@ -102,8 +107,12 @@ public final class TreeAi {
     }
 
     private static boolean isLog(ServerLevel serverLevel, BlockPos pos) {
+        return isLog(serverLevel, pos, blockPos -> true);
+    }
+
+    private static boolean isLog(ServerLevel serverLevel, BlockPos pos, Predicate<BlockPos> allowedLogPos) {
         BlockState state = serverLevel.getBlockState(pos);
-        return state.is(BlockTags.LOGS);
+        return state.is(BlockTags.LOGS) && allowedLogPos.test(pos);
     }
 
     public static final class Tree {

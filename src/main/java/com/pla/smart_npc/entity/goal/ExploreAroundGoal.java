@@ -34,7 +34,7 @@ public class ExploreAroundGoal extends Goal {
     private static final int EXPLORE_CAN_USE_INTERVAL_TICKS = 20;
     private static final int CONTINUE_PREDICATE_INTERVAL_TICKS = 20;
     private static final int ESCAPE_REQUEST_COOLDOWN_TICKS = 20 * 5;
-    private static final int RETURN_HOME_REQUEST_TICKS = 20 * 30;
+    private static final int RETURN_HOME_REQUEST_TICKS = 20 * 120;
     private static final int RETURN_HOME_RETRY_COOLDOWN_TICKS = 20 * 15;
     private static final int MAX_LOCAL_ESCAPE_PATH_CHECKS = 6;
     private static final int LOCAL_SURFACE_ESCAPE_RADIUS = 6;
@@ -96,7 +96,8 @@ public class ExploreAroundGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.getUpwardEscapeTarget() != null) {
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0) {
             return false;
         }
         if (this.shouldStopForHomeNow(serverLevel)) {
@@ -128,6 +129,7 @@ public class ExploreAroundGoal extends Goal {
         if (!this.playerNpc.isAlive()
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || !(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             return false;
         }
@@ -315,7 +317,8 @@ public class ExploreAroundGoal extends Goal {
     }
 
     private boolean tryRequestShortUpwardEscape(ServerLevel serverLevel, BlockPos routeHint) {
-        if (this.playerNpc.getUpwardEscapeTarget() != null) {
+        if (this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0) {
             return true;
         }
         if (this.playerNpc.tickCount < this.nextEscapeRequestTick) {

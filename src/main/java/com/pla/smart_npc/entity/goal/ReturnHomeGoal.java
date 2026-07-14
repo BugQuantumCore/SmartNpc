@@ -87,19 +87,25 @@ public class ReturnHomeGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.playerNpc.getTarget() != null) {
             return false;
         }
-        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
-            return false;
-        }
-
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
         if (home.isEmpty()) {
             return false;
         }
 
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
+        boolean forcedExplorationReturn = this.playerNpc.hasExplorationReturnHomeRequest();
+        boolean forcedHomeSurfaceRecovery = needsHomeSurfaceRecovery(this.playerNpc, homeArea);
+        if (!forcedExplorationReturn
+                && !forcedHomeSurfaceRecovery
+                && !this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
+
         this.homeArea = homeArea;
         this.homeCenter = homeArea.origin().offset(homeArea.width() / 2, 1, homeArea.depth() / 2);
         double distanceSqr = this.playerNpc.distanceToSqr(this.homeCenter.getX() + 0.5D, this.homeCenter.getY(), this.homeCenter.getZ() + 0.5D);
@@ -108,8 +114,8 @@ public class ReturnHomeGoal extends Goal {
         this.shelterReturn = this.shouldShelterAtHome(serverLevel);
         this.buildReturn = BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
         this.completedStoneTripReturn = shouldReturnAfterCompletedStoneTrip(this.playerNpc, serverLevel, homeArea);
-        this.explorationRecoveryReturn = this.playerNpc.hasExplorationReturnHomeRequest();
-        this.homeSurfaceRecoveryReturn = needsHomeSurfaceRecovery(this.playerNpc, homeArea);
+        this.explorationRecoveryReturn = forcedExplorationReturn;
+        this.homeSurfaceRecoveryReturn = forcedHomeSurfaceRecovery;
         if (this.homeSurfaceRecoveryReturn) {
             this.utilityReturn = false;
             this.buildReturn = false;
@@ -147,6 +153,16 @@ public class ReturnHomeGoal extends Goal {
             return true;
         }
 
+        if (this.buildReturn
+                && !this.isInsideHomeWorkArea(homeArea)) {
+            this.utilityReturn = false;
+            this.shelterReturn = false;
+            this.completedStoneTripReturn = false;
+            this.explorationRecoveryReturn = false;
+            this.homeSurfaceRecoveryReturn = false;
+            return true;
+        }
+
         if (!this.shelterReturn
                 && !this.completedStoneTripReturn
                 && this.needsBuildMaterialReserves()
@@ -170,10 +186,6 @@ public class ReturnHomeGoal extends Goal {
         }
 
         this.utilityReturn = this.hasHomeUtilityWork(serverLevel, homeArea);
-        if (this.buildReturn
-                && !this.isInsideHomeWorkArea(homeArea)) {
-            return true;
-        }
         if (!this.buildReturn && this.utilityReturn && distanceSqr > STOP_DISTANCE_SQR) {
             return true;
         }
@@ -217,6 +229,7 @@ public class ReturnHomeGoal extends Goal {
             return false;
         }
         if (!this.shelterReturn
+                && !this.buildReturn
                 && !this.completedStoneTripReturn
                 && !this.explorationRecoveryReturn
                 && !this.homeSurfaceRecoveryReturn
@@ -241,6 +254,8 @@ public class ReturnHomeGoal extends Goal {
                 && !this.playerNpc.isNoAi()
                 && !this.playerNpc.isPassenger()
                 && !this.playerNpc.isHealing()
+                && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && this.playerNpc.distanceToSqr(this.homeCenter.getX() + 0.5D, this.homeCenter.getY(), this.homeCenter.getZ() + 0.5D) > STOP_DISTANCE_SQR;
     }
 
@@ -304,7 +319,7 @@ public class ReturnHomeGoal extends Goal {
                 if (this.homeSurfaceRecoveryReturn) {
                     this.requestHomeSurfaceEscape();
                 } else {
-                    this.playerNpc.requestUpwardEscapeTo(this.homeCenter, 20 * 8, 10);
+                    this.playerNpc.requestForcedUpwardEscapeTo(this.homeCenter, 20 * 8, 10);
                 }
             }
             if (this.explorationRecoveryReturn && arrivedAtHome) {
@@ -375,7 +390,23 @@ public class ReturnHomeGoal extends Goal {
     private boolean hasReachedHomeWorkAreaSurface(PlayerNpcHomeUtil.HomeArea homeArea) {
         return homeArea != null
                 && this.isInsideHomeWorkArea(homeArea)
-                && !needsHomeSurfaceRecovery(this.playerNpc, homeArea);
+                && !needsHomeSurfaceRecovery(this.playerNpc, homeArea)
+                && this.hasSafeHomeSurfaceStand();
+    }
+
+    private boolean hasSafeHomeSurfaceStand() {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || !this.playerNpc.onGround()) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos head = feet.above();
+        BlockPos floor = feet.below();
+        return serverLevel.getBlockState(feet).canBeReplaced()
+                && serverLevel.getBlockState(feet).getFluidState().isEmpty()
+                && serverLevel.getBlockState(head).canBeReplaced()
+                && serverLevel.getBlockState(head).getFluidState().isEmpty()
+                && serverLevel.getBlockState(floor).isSolidRender(serverLevel, floor);
     }
 
     private boolean hasReachedHomeCenter() {

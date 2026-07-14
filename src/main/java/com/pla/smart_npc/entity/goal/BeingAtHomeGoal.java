@@ -82,7 +82,8 @@ public class BeingAtHomeGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.getUpwardEscapeTarget() != null) {
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0) {
             return false;
         }
 
@@ -146,6 +147,7 @@ public class BeingAtHomeGoal extends Goal {
                 && !this.playerNpc.isHealing()
                 && this.playerNpc.getTarget() == null
                 && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && (this.sheltering
                 || !this.playerNpc.shouldPrioritizeLogGathering()
                 && !this.playerNpc.shouldPrioritizeCobblestoneGathering())
@@ -244,7 +246,9 @@ public class BeingAtHomeGoal extends Goal {
         }
 
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
-            if (block.optional() || block.state().isAir()) {
+            if (block.optional()
+                    || block.state().isAir()
+                    || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
                 continue;
             }
             BlockPos worldPos = block.toWorld(homeArea.origin());

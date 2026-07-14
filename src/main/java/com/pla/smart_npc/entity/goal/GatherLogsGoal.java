@@ -9,6 +9,7 @@ import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.entity.ai.TreeAi;
 import com.pla.smart_npc.entity.ai.TreeAi.Tree;
+import com.pla.smart_npc.entity.ai.WaterEscapeAi;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -70,6 +71,7 @@ public class GatherLogsGoal extends Goal {
     private final ClearBlockAi clearBlockAi;
     private final PathNavigationAi pathNavigationAi;
     private final PillarUpAi pillarUpAi;
+    private final WaterEscapeAi waterEscapeAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private BlockPos targetPos;
     private BlockPos standPos;
@@ -93,18 +95,25 @@ public class GatherLogsGoal extends Goal {
         this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
         this.pillarUpAi = new PillarUpAi(playerNpc, this.toolAi, Items.DIRT, Blocks.DIRT.defaultBlockState());
+        this.waterEscapeAi = new WaterEscapeAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
     public static boolean hasNearbyLogTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        Optional<Tree> tree = TreeAi.findNearest(serverLevel, playerNpc.blockPosition(), TREE_SEARCH_RADIUS);
+        Optional<Tree> tree = TreeAi.findNearest(
+                serverLevel,
+                playerNpc.blockPosition(),
+                TREE_SEARCH_RADIUS,
+                pos -> !isProtectedHomeLogTarget(playerNpc, pos)
+        );
         if (tree.isEmpty()) {
             return false;
         }
 
         int pathChecks = 0;
         for (BlockPos candidate : tree.get().logsNearestFirst(playerNpc.blockPosition())) {
-            if (!serverLevel.getBlockState(candidate).is(BlockTags.LOGS)) {
+            if (!serverLevel.getBlockState(candidate).is(BlockTags.LOGS)
+                    || isProtectedHomeLogTarget(playerNpc, candidate)) {
                 continue;
             }
             if (canMineFromCurrentPosition(playerNpc, candidate)) {
@@ -131,6 +140,8 @@ public class GatherLogsGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
+                || this.playerNpc.getUpwardEscapeTarget() != null
+                || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.playerNpc.getGatherCooldown() > 0) {
             return false;
         }
@@ -153,10 +164,12 @@ public class GatherLogsGoal extends Goal {
     @Override
     public boolean canContinueToUse() {
         return (this.descendingFromPillar || this.targetPos != null)
-                && (this.descendingFromPillar || this.gatherTicks < MAX_GATHER_TICKS)
+                && (this.descendingFromPillar || this.gatherTicks < MAX_GATHER_TICKS || this.isStandingOnProtectedPillar())
                 && (!this.descendingFromPillar || this.descentTicks < MAX_DESCENT_TICKS)
                 && this.playerNpc.isAlive()
                 && this.playerNpc.getTarget() == null
+                && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && (this.descendingFromPillar
                 || this.playerNpc.level() instanceof ServerLevel serverLevel
                 && !this.shouldStayHomeForWeather(serverLevel)
@@ -181,6 +194,10 @@ public class GatherLogsGoal extends Goal {
         }
 
         this.gatherTicks++;
+        if (this.tickWaterEscape(serverLevel)) {
+            return;
+        }
+
         if (this.tickHelperAi(serverLevel)) {
             this.updateDetail();
             return;
@@ -188,6 +205,21 @@ public class GatherLogsGoal extends Goal {
 
         if (this.descendingFromPillar) {
             this.tickDescendFromPillar(serverLevel);
+            this.updateDetail();
+            return;
+        }
+
+        if (this.gatherTicks >= MAX_GATHER_TICKS && this.isStandingOnProtectedPillar()) {
+            this.breakingBlockAi.stop();
+            this.clearBlockAi.stop();
+            this.pillarUpAi.clear();
+            if (this.tryStartPillarDescent(serverLevel)) {
+                this.updateDetail();
+                return;
+            }
+            this.pillarTraceDetail = "pillar descent failed after gather timeout @ "
+                    + posText(this.playerNpc.blockPosition());
+            this.targetPos = null;
             this.updateDetail();
             return;
         }
@@ -250,6 +282,7 @@ public class GatherLogsGoal extends Goal {
         this.clearBlockAi.stop();
         this.breakingBlockAi.stop();
         this.pillarUpAi.clear();
+        this.waterEscapeAi.stop();
         if (!this.playerNpc.level().isClientSide) {
             this.playerNpc.setGatherCooldown(20);
         }
@@ -269,6 +302,19 @@ public class GatherLogsGoal extends Goal {
         this.pillarTraceDetail = "";
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
+    }
+
+    private boolean tickWaterEscape(ServerLevel serverLevel) {
+        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(serverLevel, Math.max(1.0D, this.speed));
+        if (result != WaterEscapeAi.TickResult.RUNNING && result != WaterEscapeAi.TickResult.DONE) {
+            return false;
+        }
+
+        this.playerNpc.setCurrentAiState("ai.player_npc.gathering_logs");
+        if (result == WaterEscapeAi.TickResult.RUNNING && !this.waterEscapeAi.detail().isBlank()) {
+            this.playerNpc.setCurrentAiDetail(this.waterEscapeAi.detail());
+        }
+        return true;
     }
 
     private boolean tickHelperAi(ServerLevel serverLevel) {
@@ -338,7 +384,12 @@ public class GatherLogsGoal extends Goal {
     private void prepareLogQueue(ServerLevel serverLevel) {
         this.pruneIgnoredClearBlocks(serverLevel);
         this.logQueue.clear();
-        Optional<Tree> tree = TreeAi.findNearest(serverLevel, this.playerNpc.blockPosition(), TREE_SEARCH_RADIUS);
+        Optional<Tree> tree = TreeAi.findNearest(
+                serverLevel,
+                this.playerNpc.blockPosition(),
+                TREE_SEARCH_RADIUS,
+                pos -> !this.isProtectedHomeLogTarget(pos)
+        );
         tree.ifPresent(value -> this.logQueue.addAll(value.logsNearestFirst(this.playerNpc.blockPosition())));
     }
 
@@ -595,7 +646,7 @@ public class GatherLogsGoal extends Goal {
         }
 
         BlockState blockerState = serverLevel.getBlockState(blockerPos);
-        if (blockerState.is(BlockTags.LOGS)) {
+        if (blockerState.is(BlockTags.LOGS) && !this.isProtectedHomeLogTarget(blockerPos)) {
             this.targetPos = blockerPos.immutable();
             this.standPos = this.playerNpc.blockPosition().immutable();
             this.breakingBlockAi.stop();
@@ -1029,11 +1080,27 @@ public class GatherLogsGoal extends Goal {
             return this.isValidDirtTarget(serverLevel, pos)
                     && (state.is(Blocks.DIRT) || state.is(Blocks.GRASS_BLOCK));
         }
-        return state.is(BlockTags.LOGS);
+        return this.isValidLog(serverLevel, pos) && state.is(BlockTags.LOGS);
     }
 
     private boolean isValidLog(ServerLevel serverLevel, BlockPos pos) {
-        return serverLevel.getBlockState(pos).is(BlockTags.LOGS);
+        return pos != null
+                && !this.isProtectedHomeLogTarget(pos)
+                && serverLevel.getBlockState(pos).is(BlockTags.LOGS);
+    }
+
+    private boolean isProtectedHomeLogTarget(BlockPos pos) {
+        return isProtectedHomeLogTarget(this.playerNpc, pos);
+    }
+
+    private static boolean isProtectedHomeLogTarget(PlayerNpcEntity playerNpc, BlockPos pos) {
+        if (playerNpc == null || pos == null) {
+            return false;
+        }
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        return home.isPresent()
+                && (PlayerNpcHomeUtil.isInside(home.get(), pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos));
     }
 
     private static boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {

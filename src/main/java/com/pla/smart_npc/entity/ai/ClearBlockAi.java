@@ -4,7 +4,10 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.level.EmptyBlockGetter;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
@@ -35,6 +38,7 @@ public final class ClearBlockAi {
     private static final int MAX_BREAK_STAND_PATH_CHECKS = 12;
     private static final int APPROACH_REPATH_INTERVAL_TICKS = 10;
     private static final int MAX_APPROACH_TICKS = 20 * 8;
+    private static final int MAX_CLEAR_TARGET_TICKS = 20 * 15;
 
     private final PlayerNpcEntity playerNpc;
     private final BreakingBlockAi breakingBlockAi;
@@ -44,8 +48,10 @@ public final class ClearBlockAi {
     private String detail = "clearing block";
     private int requiredTicks;
     private double clearDistanceSqr = DEFAULT_CLEAR_DISTANCE_SQR;
+    private boolean allowSoftCover;
     private int approachRepathTicks;
     private int approachTicks;
+    private int clearTargetTicks;
 
     public ClearBlockAi(PlayerNpcEntity playerNpc, BreakingBlockAi breakingBlockAi) {
         this.playerNpc = playerNpc;
@@ -78,7 +84,19 @@ public final class ClearBlockAi {
             int requiredTicks,
             double clearDistanceSqr
     ) {
-        if (!isClearable(serverLevel, targetPos, targetPredicate)
+        return this.start(serverLevel, targetPos, targetPredicate, detail, requiredTicks, clearDistanceSqr, false);
+    }
+
+    private boolean start(
+            ServerLevel serverLevel,
+            BlockPos targetPos,
+            Predicate<BlockState> targetPredicate,
+            String detail,
+            int requiredTicks,
+            double clearDistanceSqr,
+            boolean allowSoftCover
+    ) {
+        if (!isClearable(serverLevel, targetPos, targetPredicate, allowSoftCover)
                 || this.playerNpc.distanceToSqr(centerX(targetPos), centerY(targetPos), centerZ(targetPos)) > clearDistanceSqr) {
             return false;
         }
@@ -89,6 +107,8 @@ public final class ClearBlockAi {
         this.detail = detail;
         this.requiredTicks = Math.max(1, requiredTicks);
         this.clearDistanceSqr = clearDistanceSqr;
+        this.allowSoftCover = allowSoftCover;
+        this.clearTargetTicks = 0;
         this.playerNpc.getNavigation().stop();
         this.updateDetail();
         return true;
@@ -141,7 +161,7 @@ public final class ClearBlockAi {
         if (allowSoftColumnCover && !targetPredicate.test(state) && isSoftCoverState(state)) {
             effectivePredicate = blockState -> targetPredicate.test(blockState) || isSoftCoverState(blockState);
         }
-        return this.start(serverLevel, target.get(), effectivePredicate, detail, requiredTicks, clearDistanceSqr);
+        return this.start(serverLevel, target.get(), effectivePredicate, detail, requiredTicks, clearDistanceSqr, allowSoftColumnCover);
     }
 
     public TickResult tick(ServerLevel serverLevel) {
@@ -149,9 +169,14 @@ public final class ClearBlockAi {
             return TickResult.IDLE;
         }
 
-        if (this.targetPredicate == null || !isClearable(serverLevel, this.targetPos, this.targetPredicate)) {
+        if (this.targetPredicate == null || !isClearable(serverLevel, this.targetPos, this.targetPredicate, this.allowSoftCover)) {
             this.stop();
             return TickResult.DONE;
+        }
+
+        if (++this.clearTargetTicks > MAX_CLEAR_TARGET_TICKS) {
+            this.stop();
+            return TickResult.FAILED;
         }
 
         if (this.playerNpc.distanceToSqr(centerX(this.targetPos), centerY(this.targetPos), centerZ(this.targetPos)) > this.clearDistanceSqr) {
@@ -159,7 +184,7 @@ public final class ClearBlockAi {
             return TickResult.FAILED;
         }
 
-        if (!isWithinBreakReach(this.playerNpc, this.targetPos)) {
+        if (!canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos)) {
             this.breakingBlockAi.stop();
             if (!this.moveNearTarget(serverLevel)) {
                 this.stop();
@@ -199,8 +224,10 @@ public final class ClearBlockAi {
         this.targetPredicate = null;
         this.requiredTicks = 0;
         this.clearDistanceSqr = DEFAULT_CLEAR_DISTANCE_SQR;
+        this.allowSoftCover = false;
         this.approachRepathTicks = 0;
         this.approachTicks = 0;
+        this.clearTargetTicks = 0;
     }
 
     public String detail() {
@@ -284,7 +311,7 @@ public final class ClearBlockAi {
             BlockPos immutable = candidate.immutable();
             if (!seen.add(immutable)
                     || immutable.distSqr(origin) > maxDistanceSqr
-                    || !isClearable(serverLevel, immutable, targetPredicate)) {
+                    || !isClearable(serverLevel, immutable, targetPredicate, allowSoftColumnCover)) {
                 continue;
             }
             clearable.add(immutable);
@@ -297,7 +324,8 @@ public final class ClearBlockAi {
             if (cover.isPresent()) {
                 return cover;
             }
-            if (isWithinBreakReach(playerNpc, candidate)) {
+            if (isWithinBreakReach(playerNpc, candidate)
+                    && hasClearBreakRay(serverLevel, playerNpc, candidate)) {
                 return Optional.of(candidate);
             }
             if (pathChecks++ >= MAX_BREAK_STAND_PATH_CHECKS) {
@@ -326,9 +354,12 @@ public final class ClearBlockAi {
         int topY = Math.min(origin.getY(), serverLevel.getMaxBuildHeight() - 1);
         for (int y = topY; y > targetPos.getY(); y--) {
             BlockPos cover = new BlockPos(targetPos.getX(), y, targetPos.getZ());
+            BlockState state = serverLevel.getBlockState(cover);
+            boolean targetMatch = targetPredicate.test(state);
+            boolean softCover = allowSoftColumnCover && isSoftCoverState(state);
             if (playerNpc.distanceToSqr(centerX(cover), centerY(cover), centerZ(cover)) > maxDistanceSqr
-                    || !isClearable(serverLevel, cover, targetPredicate)
-                    && (!allowSoftColumnCover || !isSoftCoverState(serverLevel, cover, serverLevel.getBlockState(cover)))) {
+                    || !targetMatch && !softCover
+                    || !isBreakablePathObstruction(serverLevel, cover, state, softCover)) {
                 continue;
             }
             return Optional.of(cover.immutable());
@@ -336,35 +367,44 @@ public final class ClearBlockAi {
         return Optional.empty();
     }
 
-    public static boolean isPhysicalObstructionState(BlockState state) {
-        return state != null
-                && !state.isAir()
-                && !state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty();
+    public static boolean isBreakablePathObstruction(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        return isBreakablePathObstruction(serverLevel, pos, state, false);
+    }
+
+    public static boolean isBreakablePathObstruction(ServerLevel serverLevel, BlockPos pos, BlockState state, boolean allowSoftCover) {
+        if (serverLevel == null
+                || pos == null
+                || state == null
+                || !serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || state.isAir()
+                || state.getDestroySpeed(serverLevel, pos) < 0.0F
+                || !state.getFluidState().isEmpty()
+                || serverLevel.getBlockEntity(pos) != null) {
+            return false;
+        }
+
+        return !state.getCollisionShape(serverLevel, pos).isEmpty()
+                || allowSoftCover && isSoftCoverState(state);
     }
 
     private static boolean isSoftCoverState(BlockState state) {
         return state != null
                 && !state.isAir()
-                && state.canBeReplaced()
-                && state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty();
-    }
-
-    private static boolean isSoftCoverState(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        return isSoftCoverState(state)
-                && state.getDestroySpeed(serverLevel, pos) >= 0.0F
-                && state.getFluidState().isEmpty()
-                && serverLevel.getBlockEntity(pos) == null;
+                && state.canBeReplaced();
     }
 
     private static boolean isClearable(ServerLevel serverLevel, BlockPos pos, Predicate<BlockState> targetPredicate) {
+        return isClearable(serverLevel, pos, targetPredicate, false);
+    }
+
+    private static boolean isClearable(ServerLevel serverLevel, BlockPos pos, Predicate<BlockState> targetPredicate, boolean allowSoftCover) {
         if (pos == null || targetPredicate == null || !serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
             return false;
         }
         BlockState state = serverLevel.getBlockState(pos);
         return targetPredicate.test(state)
-                && state.getDestroySpeed(serverLevel, pos) >= 0.0F
-                && state.getFluidState().isEmpty()
-                && serverLevel.getBlockEntity(pos) == null;
+                && isBreakablePathObstruction(serverLevel, pos, state, allowSoftCover);
     }
 
     private boolean moveNearTarget(ServerLevel serverLevel) {
@@ -372,7 +412,7 @@ public final class ClearBlockAi {
             return false;
         }
 
-        if (isWithinBreakReach(this.playerNpc, this.targetPos)) {
+        if (canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos)) {
             this.approachTicks = 0;
             return true;
         }
@@ -459,7 +499,8 @@ public final class ClearBlockAi {
 
     private static boolean canUseBreakStand(ServerLevel serverLevel, BlockPos standPos, BlockPos targetPos) {
         return PathNavigationAi.canStandAt(serverLevel, standPos)
-                && distanceFromStandToTargetSqr(standPos, targetPos) <= BREAK_REACH_DISTANCE_SQR;
+                && distanceFromStandToTargetSqr(standPos, targetPos) <= BREAK_REACH_DISTANCE_SQR
+                && hasClearBreakRay(serverLevel, standPos, targetPos);
     }
 
     private static boolean isWithinBreakReach(PlayerNpcEntity playerNpc, BlockPos targetPos) {
@@ -467,6 +508,38 @@ public final class ClearBlockAi {
         double dy = playerNpc.getEyeY() - centerY(targetPos);
         double dz = playerNpc.getZ() - centerZ(targetPos);
         return dx * dx + dy * dy + dz * dz <= BREAK_REACH_DISTANCE_SQR;
+    }
+
+    private static boolean canBreakFromCurrentPosition(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockPos targetPos) {
+        return isWithinBreakReach(playerNpc, targetPos)
+                && hasClearBreakRay(serverLevel, playerNpc, targetPos);
+    }
+
+    private static boolean hasClearBreakRay(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockPos targetPos) {
+        return hasClearBreakRay(
+                serverLevel,
+                new Vec3(playerNpc.getX(), playerNpc.getEyeY(), playerNpc.getZ()),
+                targetPos
+        );
+    }
+
+    private static boolean hasClearBreakRay(ServerLevel serverLevel, BlockPos standPos, BlockPos targetPos) {
+        return hasClearBreakRay(
+                serverLevel,
+                new Vec3(standPos.getX() + 0.5D, standPos.getY() + STAND_EYE_HEIGHT, standPos.getZ() + 0.5D),
+                targetPos
+        );
+    }
+
+    private static boolean hasClearBreakRay(ServerLevel serverLevel, Vec3 eye, BlockPos targetPos) {
+        BlockHitResult hit = serverLevel.clip(new ClipContext(
+                eye,
+                Vec3.atCenterOf(targetPos),
+                ClipContext.Block.OUTLINE,
+                ClipContext.Fluid.NONE,
+                null
+        ));
+        return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(targetPos);
     }
 
     private static boolean isAtBreakStand(PlayerNpcEntity playerNpc, BlockPos standPos) {
