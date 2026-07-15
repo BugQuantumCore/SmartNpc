@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
@@ -56,9 +57,11 @@ public class GatherLogsGoal extends Goal {
     private static final int STAND_SCAN_BELOW_TARGET = 12;
     private static final int STAND_SCAN_ABOVE_TARGET = 2;
     private static final int MAX_IGNORED_CLEAR_BLOCKS = 32;
+    private static final int MAX_IGNORED_LOG_TARGETS = 32;
     private static final int MAX_SAME_LEAF_CLEAR_TICKS = 40;
     private static final double BREAK_DISTANCE_SQR = 4.5D * 4.5D;
     private static final double STAND_REACHED_DISTANCE_SQR = 1.5D * 1.5D;
+    private static final double STAND_CENTER_CORRECTION_DISTANCE_SQR = 0.35D * 0.35D;
     private static final double PILLAR_APPROACH_HORIZONTAL_DISTANCE_SQR = 2.5D * 2.5D;
 
     private final PlayerNpcEntity playerNpc;
@@ -66,6 +69,7 @@ public class GatherLogsGoal extends Goal {
     private final Queue<BlockPos> logQueue = new ArrayDeque<>();
     private final Set<BlockPos> protectedPillarBlocks = new LinkedHashSet<>();
     private final Set<BlockPos> ignoredClearBlocks = new LinkedHashSet<>();
+    private final Set<BlockPos> ignoredLogTargets = new LinkedHashSet<>();
     private final ToolAi toolAi;
     private final BreakingBlockAi breakingBlockAi;
     private final ClearBlockAi clearBlockAi;
@@ -152,8 +156,9 @@ public class GatherLogsGoal extends Goal {
                 || ReturnHomeGoal.shouldSuppressExplorationForHome(this.playerNpc, serverLevel)
                 || GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
                 || !this.needsLogs(serverLevel)
-                || TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
-                || BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel)) {
+                || !this.isMiningOnlyLogSupply()
+                && (TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
+                || BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel))) {
             return false;
         }
 
@@ -277,6 +282,14 @@ public class GatherLogsGoal extends Goal {
 
     @Override
     public void stop() {
+        if (!this.gatheringDirt
+                && this.gatherTicks >= MAX_GATHER_TICKS
+                && this.targetPos != null
+                && !this.isStandingOnProtectedPillar()
+                && this.playerNpc.level() instanceof ServerLevel serverLevel
+                && this.isValidLog(serverLevel, this.targetPos)) {
+            this.ignoreLogTarget(this.targetPos);
+        }
         this.playerNpc.clearBlockBreakProgress(this.targetPos);
         this.toolAi.restoreMainHand();
         this.clearBlockAi.stop();
@@ -383,6 +396,7 @@ public class GatherLogsGoal extends Goal {
 
     private void prepareLogQueue(ServerLevel serverLevel) {
         this.pruneIgnoredClearBlocks(serverLevel);
+        this.pruneIgnoredLogTargets(serverLevel);
         this.logQueue.clear();
         Optional<Tree> tree = TreeAi.findNearest(
                 serverLevel,
@@ -413,7 +427,7 @@ public class GatherLogsGoal extends Goal {
         while (true) {
             while (!this.logQueue.isEmpty()) {
                 BlockPos candidate = this.logQueue.poll();
-                if (!this.isValidLog(serverLevel, candidate)) {
+                if (this.isIgnoredLogTarget(candidate) || !this.isValidLog(serverLevel, candidate)) {
                     continue;
                 }
 
@@ -503,6 +517,32 @@ public class GatherLogsGoal extends Goal {
         this.ignoredClearBlocks.removeIf(pos ->
                 pos.distSqr(feet) > TREE_SEARCH_RADIUS * TREE_SEARCH_RADIUS
                         || !isLogClearBlock(serverLevel.getBlockState(pos)));
+    }
+
+    private void ignoreLogTarget(BlockPos pos) {
+        if (pos == null) {
+            return;
+        }
+        this.ignoredLogTargets.add(pos.immutable());
+        while (this.ignoredLogTargets.size() > MAX_IGNORED_LOG_TARGETS) {
+            Iterator<BlockPos> iterator = this.ignoredLogTargets.iterator();
+            if (!iterator.hasNext()) {
+                return;
+            }
+            iterator.next();
+            iterator.remove();
+        }
+    }
+
+    private boolean isIgnoredLogTarget(BlockPos pos) {
+        return pos != null && this.ignoredLogTargets.contains(pos.immutable());
+    }
+
+    private void pruneIgnoredLogTargets(ServerLevel serverLevel) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        this.ignoredLogTargets.removeIf(pos ->
+                pos.distSqr(feet) > TREE_SEARCH_RADIUS * TREE_SEARCH_RADIUS
+                        || !this.isValidLog(serverLevel, pos));
     }
 
     private static boolean isLogClearBlock(BlockState state) {
@@ -760,13 +800,29 @@ public class GatherLogsGoal extends Goal {
                 && !this.needsLogs(serverLevel)
                 && this.tryStartPillarDescent(serverLevel)) {
             return;
+        } else if (result == BreakingBlockAi.TickResult.FAILED
+                && !this.gatheringDirt
+                && this.targetPos != null
+                && this.isValidLog(serverLevel, this.targetPos)) {
+            this.ignoreLogTarget(this.targetPos);
         }
         this.selectNextTarget(serverLevel);
     }
 
     private boolean needsLogs(ServerLevel serverLevel) {
+        if (this.isMiningOnlyLogSupply()) {
+            return this.playerNpc.shouldPrioritizeLogGathering();
+        }
+        if (!this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
+            return false;
+        }
         return this.playerNpc.shouldPrioritizeLogGathering()
                 || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, this.playerNpc);
+    }
+
+    private boolean isMiningOnlyLogSupply() {
+        return this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
+                && !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING);
     }
 
     private boolean tryStartPillarDescent(ServerLevel serverLevel) {
@@ -1112,10 +1168,33 @@ public class GatherLogsGoal extends Goal {
     }
 
     private boolean moveToStandPos() {
-        if (this.standPos == null
-                || this.playerNpc.distanceToSqr(this.standPos.getX() + 0.5D, this.standPos.getY(), this.standPos.getZ() + 0.5D)
-                <= STAND_REACHED_DISTANCE_SQR) {
-            return this.standPos != null;
+        if (this.standPos == null) {
+            return false;
+        }
+
+        double standDistanceSqr = this.playerNpc.distanceToSqr(
+                this.standPos.getX() + 0.5D,
+                this.standPos.getY(),
+                this.standPos.getZ() + 0.5D
+        );
+        if (standDistanceSqr <= STAND_REACHED_DISTANCE_SQR) {
+            if (this.targetPos == null || this.distanceToTargetSqr() <= BREAK_DISTANCE_SQR) {
+                return true;
+            }
+            if (standDistanceSqr > STAND_CENTER_CORRECTION_DISTANCE_SQR) {
+                this.playerNpc.getMoveControl().setWantedPosition(
+                        this.standPos.getX() + 0.5D,
+                        this.standPos.getY(),
+                        this.standPos.getZ() + 0.5D,
+                        this.speed
+                );
+                this.pillarTraceDetail = "closing on log stand @ "
+                        + posText(this.standPos)
+                        + " "
+                        + targetMetricsText(this.playerNpc.blockPosition(), this.targetPos);
+                return true;
+            }
+            return false;
         }
 
         Path path = this.playerNpc.getNavigation().createPath(this.standPos, 0);

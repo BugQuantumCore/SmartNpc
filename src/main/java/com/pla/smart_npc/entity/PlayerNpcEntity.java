@@ -130,6 +130,16 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int EXPLORATION_RETURN_ESCAPE_MAX_PILLAR_BLOCKS = 24;
     private static final int STARTUP_IDLE_WAKE_TICKS = 20 * 4;
     private static final int TASKLESS_IDLE_WAKE_TICKS = 20;
+    private static final long DAY_LENGTH_TICKS = 24000L;
+    private static final long DAILY_JOB_ROLL_TIME = 1L;
+    private static final long DAILY_JOB_FALLBACK_ROLL_END_TIME = 12000L;
+    private static final List<PlayerNpcInterest> DAILY_JOB_INTERESTS = List.of(
+            PlayerNpcInterest.BUILDING,
+            PlayerNpcInterest.MINING,
+            PlayerNpcInterest.FARMING,
+            PlayerNpcInterest.FISHING,
+            PlayerNpcInterest.EXPLORING
+    );
     public static final String AI_IDLE = "ai.player_npc.idle";
     private static final List<ItemLike> REGULAR_FOODS = List.of(
             Items.COOKED_BEEF,
@@ -217,6 +227,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int woodSupplyTarget = 64;
     private int cobblestoneSupplyTarget = 24;
     private long lastSupplyGoalRerollDay = -1L;
+    @Nullable
+    private PlayerNpcInterest selectedDailyJobInterest;
+    private long selectedDailyJobDay = -1L;
     private ItemStack mainWeaponItem = ItemStack.EMPTY;
     private ItemStack offWeaponItem = ItemStack.EMPTY;
     private boolean suppressHeldItemCacheUpdate = false;
@@ -515,6 +528,72 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             }
         }
         return false;
+    }
+
+    public boolean isInterestGateActive(List<PlayerNpcInterest> interests) {
+        if (interests == null || interests.isEmpty()) {
+            return false;
+        }
+
+        boolean matchedCharacteristic = false;
+        boolean matchedSelectedJob = false;
+        for (PlayerNpcInterest interest : interests) {
+            if (!this.hasInterest(interest)) {
+                continue;
+            }
+            if (interest.isJob()) {
+                matchedSelectedJob = matchedSelectedJob || this.isDailyJobActive(interest);
+            } else {
+                matchedCharacteristic = true;
+            }
+        }
+        return matchedSelectedJob || matchedCharacteristic;
+    }
+
+    public boolean isDailyJobActive(PlayerNpcInterest interest) {
+        if (interest == null || !interest.isJob() || !this.hasInterest(interest)) {
+            return false;
+        }
+        if (this.isBuildingBaseSelectionLocked()) {
+            return interest == PlayerNpcInterest.BUILDING;
+        }
+        if (this.level() instanceof ServerLevel serverLevel) {
+            if (interest == PlayerNpcInterest.BUILDING && this.shouldRunBuildingHomeDuty(serverLevel)) {
+                return true;
+            }
+            this.tickDailyJobSelection(serverLevel);
+        }
+        return this.selectedDailyJobInterest == interest;
+    }
+
+    public Optional<PlayerNpcInterest> getSelectedDailyJobInterest() {
+        return Optional.ofNullable(this.selectedDailyJobInterest);
+    }
+
+    public long getSelectedDailyJobDay() {
+        return this.selectedDailyJobDay;
+    }
+
+    public String getSelectedDailyJobDisplayText() {
+        return this.selectedDailyJobInterest == null ? "none" : this.selectedDailyJobInterest.displayName();
+    }
+
+    public boolean isBuildingBaseSelectionLocked() {
+        return this.hasInterest(PlayerNpcInterest.BUILDING)
+                && PlayerNpcHomeUtil.getHomeLayoutId(this).isEmpty();
+    }
+
+    private boolean shouldRunBuildingHomeDuty(ServerLevel serverLevel) {
+        if (!this.hasInterest(PlayerNpcInterest.BUILDING)
+                || PlayerNpcHomeUtil.getHome(this).isEmpty()
+                || (!serverLevel.isNight() && !serverLevel.isThundering())) {
+            return false;
+        }
+
+        long day = serverLevel.getDayTime() / DAY_LENGTH_TICKS;
+        return this.selectedDailyJobDay != day
+                || this.selectedDailyJobInterest == null
+                || this.selectedDailyJobInterest == PlayerNpcInterest.BUILDING;
     }
 
     public String getInterestsDisplayText() {
@@ -1099,6 +1178,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         tag.putInt("WoodSupplyTarget", this.woodSupplyTarget);
         tag.putInt("CobblestoneSupplyTarget", this.cobblestoneSupplyTarget);
         tag.putLong("LastSupplyGoalRerollDay", this.lastSupplyGoalRerollDay);
+        tag.putLong("SelectedDailyJobDay", this.selectedDailyJobDay);
+        if (this.selectedDailyJobInterest != null) {
+            tag.putString("SelectedDailyJobInterest", this.selectedDailyJobInterest.name());
+        }
         tag.putBoolean("UseBow", this.useBow);
         tag.putDouble("BlockProjectileChance", this.placeBlockToParryChance);
         tag.putInt("BlockParryCooldown", this.placeBlockParryCooldown);
@@ -1180,6 +1263,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (tag.contains("LastSupplyGoalRerollDay", Tag.TAG_LONG)) {
             this.lastSupplyGoalRerollDay = tag.getLong("LastSupplyGoalRerollDay");
         }
+        if (tag.contains("SelectedDailyJobDay", Tag.TAG_LONG)) {
+            this.selectedDailyJobDay = tag.getLong("SelectedDailyJobDay");
+        }
+        this.selectedDailyJobInterest = parseSavedDailyJobInterest(tag.getString("SelectedDailyJobInterest")).orElse(null);
         this.useBow = tag.getBoolean("UseBow");
         if (tag.contains("BlockProjectileChance", Tag.TAG_DOUBLE)) {
             this.placeBlockToParryChance = tag.getDouble("BlockProjectileChance");
@@ -1336,7 +1423,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(3, new PickupNearbyItemGoal(this, 1.0D));
         this.goalSelector.addGoal(3, new RecoverWeaponInCombatGoal(this, 1.0D, 8.0D));
         this.goalSelector.addGoal(3, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS));
-        this.goalSelector.addGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
+        this.goalSelector.addGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(5, this.gated(new TerraformBuildSiteGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new MeleeAttackGoal(this, 1.0D, true));
         this.goalSelector.addGoal(5, new BuildHouseGoal(this));
@@ -1358,7 +1445,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(5, this.gated(new BoatStockpileGoal(this), PlayerNpcInterest.FISHING, PlayerNpcInterest.EXPLORING));
         this.goalSelector.addGoal(5, this.gated(new PlantSaplingGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new UseSpyglassGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.CAUTIOUS));
-        this.goalSelector.addGoal(6, this.gated(new GatherLogsGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.EXPLORING));
+        this.goalSelector.addGoal(6, this.gated(new GatherLogsGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
@@ -1374,7 +1461,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && !this.shouldStayHomeForWeather(level)
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> GatherLogsGoal.hasNearbyLogTarget(this, level)
-        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.EXPLORING));
+        ), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
@@ -1396,7 +1483,27 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> GatherMissingBuildMaterialGoal.hasNearbyGatherTarget(this, level)
         ), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(8, this.gated(new BeingAtHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+                this,
+                1.0D,
+                "exploring",
+                level -> this.isDailyJobActive(PlayerNpcInterest.EXPLORING)
+                        && !this.shouldStayHomeForWeather(level),
+                level -> false
+        ), PlayerNpcInterest.EXPLORING));
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+                this,
+                1.0D,
+                "patrolling home for monsters",
+                level -> this.hasInterest(PlayerNpcInterest.BUILDING)
+                        && this.hasInterest(PlayerNpcInterest.HUNT_MONSTERS)
+                        && PlayerNpcHomeUtil.getHome(this).isPresent()
+                        && (level.isNight() || level.isThundering()),
+                level -> this.getTarget() != null,
+                true,
+                false
+        ), PlayerNpcInterest.HUNT_MONSTERS));
+        this.goalSelector.addGoal(4, this.gated(new BeingAtHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
         ((GroundPathNavigation) this.getNavigation()).setCanOpenDoors(true);
         ((GroundPathNavigation) this.getNavigation()).setCanFloat(true);
@@ -2004,6 +2111,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         if (!(this.level() instanceof ServerLevel serverLevel)) return;
 
+        this.tickDailyJobSelection(serverLevel);
         this.tickDailySupplyGoalReroll(serverLevel);
         this.tickAiCooldowns();
         this.clearStaleHealingState();
@@ -2079,8 +2187,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     private void tickDailySupplyGoalReroll(ServerLevel serverLevel) {
         long dayTime = serverLevel.getDayTime();
-        long day = dayTime / 24000L;
-        if (dayTime % 24000L != 0L || day == this.lastSupplyGoalRerollDay) {
+        long day = dayTime / DAY_LENGTH_TICKS;
+        if (dayTime % DAY_LENGTH_TICKS != 0L || day == this.lastSupplyGoalRerollDay) {
             return;
         }
 
@@ -2094,6 +2202,85 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 + this.rawLogReserveTarget
                 + " stone="
                 + this.cobblestoneSupplyTarget);
+    }
+
+    private void tickDailyJobSelection(ServerLevel serverLevel) {
+        long dayTime = serverLevel.getDayTime();
+        long day = dayTime / DAY_LENGTH_TICKS;
+        long timeOfDay = dayTime % DAY_LENGTH_TICKS;
+
+        if (this.isBuildingBaseSelectionLocked()) {
+            this.selectDailyJob(day, PlayerNpcInterest.BUILDING, "building base selection locked");
+            return;
+        }
+
+        if (this.selectedDailyJobDay == day
+                && this.selectedDailyJobInterest != null
+                && this.hasInterest(this.selectedDailyJobInterest)) {
+            return;
+        }
+        if (this.selectedDailyJobDay == day
+                && this.selectedDailyJobInterest == null
+                && this.availableDailyJobs().isEmpty()) {
+            return;
+        }
+
+        boolean exactRollTime = timeOfDay == DAILY_JOB_ROLL_TIME;
+        boolean fallbackDayRoll = timeOfDay > DAILY_JOB_ROLL_TIME
+                && timeOfDay < DAILY_JOB_FALLBACK_ROLL_END_TIME
+                && this.selectedDailyJobDay != day;
+        if (!exactRollTime && !fallbackDayRoll) {
+            return;
+        }
+
+        List<PlayerNpcInterest> jobs = this.availableDailyJobs();
+        if (jobs.isEmpty()) {
+            this.selectDailyJob(day, null, "no job interests");
+            return;
+        }
+
+        PlayerNpcInterest selected = jobs.get(this.getRandom().nextInt(jobs.size()));
+        this.selectDailyJob(day, selected, "daily roll");
+    }
+
+    private List<PlayerNpcInterest> availableDailyJobs() {
+        List<PlayerNpcInterest> jobs = new ArrayList<>();
+        for (PlayerNpcInterest interest : DAILY_JOB_INTERESTS) {
+            if (this.hasInterest(interest)) {
+                jobs.add(interest);
+            }
+        }
+        return jobs;
+    }
+
+    private void selectDailyJob(long day, @Nullable PlayerNpcInterest interest, String reason) {
+        if (interest != null && (!interest.isJob() || !this.hasInterest(interest))) {
+            interest = null;
+        }
+        if (this.selectedDailyJobDay == day && this.selectedDailyJobInterest == interest) {
+            return;
+        }
+
+        this.selectedDailyJobDay = day;
+        this.selectedDailyJobInterest = interest;
+        this.gatherCooldown = 0;
+        this.biomeExploreCooldown = 0;
+        this.setCurrentAiDetail("daily job="
+                + (interest == null ? "none" : interest.displayName())
+                + " reason="
+                + reason);
+    }
+
+    private static Optional<PlayerNpcInterest> parseSavedDailyJobInterest(String name) {
+        if (name == null || name.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            PlayerNpcInterest interest = PlayerNpcInterest.valueOf(name);
+            return interest.isJob() ? Optional.of(interest) : Optional.empty();
+        } catch (IllegalArgumentException ignored) {
+            return Optional.empty();
+        }
     }
 
     private static int tickCooldown(int cooldown) {

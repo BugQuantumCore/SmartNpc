@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
@@ -101,7 +102,9 @@ public class ExploreCaveOreGoal extends Goal {
 
         OreTarget target = this.findOreTarget(serverLevel);
         if (target == null) {
-            this.requestSurfaceEscapeIfUnderground(serverLevel);
+            if (this.shouldRequestSurfaceEscapeAfterOreMiss()) {
+                this.requestSurfaceEscapeIfUnderground(serverLevel);
+            }
             return false;
         }
 
@@ -314,6 +317,15 @@ public class ExploreCaveOreGoal extends Goal {
         if (surfaceTarget != null) {
             this.playerNpc.requestUpwardEscapeTo(surfaceTarget, UPWARD_ESCAPE_REQUEST_TICKS);
         }
+    }
+
+    private boolean shouldRequestSurfaceEscapeAfterOreMiss() {
+        if (!this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
+                || this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
+            return true;
+        }
+
+        return this.playerNpc.shouldPrioritizeLogGathering();
     }
 
     private BlockPos findSurfaceEscapeTarget(ServerLevel serverLevel, BlockPos feet) {

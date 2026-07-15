@@ -46,7 +46,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.WeakHashMap;
 
 public class BuildHouseGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 90;
@@ -65,9 +67,11 @@ public class BuildHouseGoal extends Goal {
     private static final int BUILD_MOTION_INTERVAL_TICKS = 12;
     private static final int BUILD_WORK_AREA_MARGIN = 4;
     private static final int BUILD_WORK_AREA_HEIGHT = 8;
+    private static final int READY_BUILD_WORK_CACHE_TICKS = 20 * 3;
     private static final double BUILD_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double BUILD_HORIZONTAL_DISTANCE_SQR = 4.0D * 4.0D;
     private static final String ACTIVE_BUILD_BATCH_KEY = "SmartNpcActiveBuildBatch";
+    private static final Map<PlayerNpcEntity, HomeBuildWorkCache> HOME_BUILD_WORK_CACHE = new WeakHashMap<>();
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
             Direction.NORTH,
             Direction.SOUTH,
@@ -119,6 +123,7 @@ public class BuildHouseGoal extends Goal {
 
     public static boolean hasReadyHomeBuildWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         if (!playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || !playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
                 || playerNpc.getBuildHouseCooldown() > 0) {
             return false;
         }
@@ -128,27 +133,91 @@ public class BuildHouseGoal extends Goal {
     }
 
     public static boolean hasContinuableHomeBuildWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        if (!playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
+        if (!playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || !playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
             return false;
         }
 
+        return cachedContinuableHomeBuildWork(playerNpc, serverLevel);
+    }
+
+    public static void invalidateHomeBuildWorkCache(PlayerNpcEntity playerNpc) {
+        HOME_BUILD_WORK_CACHE.remove(playerNpc);
+    }
+
+    private static boolean cachedContinuableHomeBuildWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         Optional<PlayerNpcHomeUtil.HomeArea> existingHome = PlayerNpcHomeUtil.getHome(playerNpc);
         if (existingHome.isEmpty()) {
             return false;
         }
 
-        Optional<PlayerNpcBuildLayout> layout = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc)
-                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
+        PlayerNpcHomeUtil.HomeArea homeArea = existingHome.get();
+        String layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc).orElse("");
+        int inventoryHash = buildWorkInventoryHash(playerNpc);
+        HomeBuildWorkCache cache = HOME_BUILD_WORK_CACHE.get(playerNpc);
+        if (cache != null
+                && cache.matches(
+                playerNpc.tickCount,
+                serverLevel.dimension().location(),
+                homeArea,
+                layoutId,
+                inventoryHash
+        )) {
+            return cache.continuable();
+        }
+
+        Optional<PlayerNpcBuildLayout> layout = layoutId.isEmpty()
+                ? Optional.empty()
+                : PlayerNpcBuildLayoutLoader.getLayout(layoutId);
         if (layout.isEmpty()) {
+            HOME_BUILD_WORK_CACHE.put(playerNpc, HomeBuildWorkCache.create(
+                    playerNpc,
+                    serverLevel.dimension().location(),
+                    homeArea,
+                    layoutId,
+                    inventoryHash,
+                    false
+            ));
             return false;
         }
 
         BuildHouseGoal checker = new BuildHouseGoal(playerNpc);
-        PlayerNpcHomeUtil.HomeArea homeArea = existingHome.get();
-        return layout.get().width() == homeArea.width()
+        boolean continuable = layout.get().width() == homeArea.width()
                 && layout.get().depth() == homeArea.depth()
                 && checker.hasUnfinishedPlacement(serverLevel, layout.get(), homeArea.origin())
                 && checker.hasMaterialForAnyPlacement(serverLevel, layout.get(), homeArea.origin());
+        HOME_BUILD_WORK_CACHE.put(playerNpc, HomeBuildWorkCache.create(
+                playerNpc,
+                serverLevel.dimension().location(),
+                homeArea,
+                layoutId,
+                inventoryHash,
+                continuable
+        ));
+        return continuable;
+    }
+
+    private static int buildWorkInventoryHash(PlayerNpcEntity playerNpc) {
+        int hash = 1;
+        hash = 31 * hash + itemStackHash(playerNpc.getMainHandItem());
+        hash = 31 * hash + itemStackHash(playerNpc.getOffhandItem());
+        for (int i = 0; i < playerNpc.getInventory().getContainerSize(); i++) {
+            hash = 31 * hash + itemStackHash(playerNpc.getInventory().getItem(i));
+        }
+        return hash;
+    }
+
+    private static int itemStackHash(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return 0;
+        }
+        ResourceLocation id = ForgeRegistries.ITEMS.getKey(stack.getItem());
+        int hash = id == null ? 0 : id.hashCode();
+        hash = 31 * hash + stack.getCount();
+        if (stack.hasTag()) {
+            hash = 31 * hash + stack.getTag().hashCode();
+        }
+        return hash;
     }
 
     public static int countAvailableBuildingBlocks(PlayerNpcEntity playerNpc) {
@@ -168,6 +237,7 @@ public class BuildHouseGoal extends Goal {
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
                 || !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || !this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
@@ -182,6 +252,10 @@ public class BuildHouseGoal extends Goal {
             return false;
         }
         boolean shelterBuild = shouldBuildDuringShelter(serverLevel);
+        boolean existingHome = PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent();
+        if (shelterBuild && existingHome) {
+            return false;
+        }
         if (!shelterBuild && this.playerNpc.getBuildHouseCooldown() > 0) {
             return false;
         }
@@ -189,7 +263,6 @@ public class BuildHouseGoal extends Goal {
             return true;
         }
 
-        boolean existingHome = PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent();
         BuildSelection selection = this.findBuildSelection(serverLevel);
         if (selection == null) {
             setBuildBatchActive(this.playerNpc, false);
@@ -261,10 +334,12 @@ public class BuildHouseGoal extends Goal {
         return this.origin != null
                 && !this.blueprint.isEmpty()
                 && this.isInsideBuildWorkArea(this.homeArea)
+                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
                 && this.playerNpc.isAlive()
                 && this.playerNpc.getUpwardEscapeTarget() == null
                 && this.playerNpc.getHoleEscapeCooldown() <= 0
-                && this.playerNpc.getTarget() == null;
+                && this.playerNpc.getTarget() == null
+                && !this.shouldShelterAtExistingHome();
     }
 
     @Override
@@ -620,6 +695,12 @@ public class BuildHouseGoal extends Goal {
         return serverLevel.isNight() || serverLevel.isThundering();
     }
 
+    private boolean shouldShelterAtExistingHome() {
+        return this.playerNpc.level() instanceof ServerLevel serverLevel
+                && shouldBuildDuringShelter(serverLevel)
+                && PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent();
+    }
+
     private static boolean isBuildBatchActive(PlayerNpcEntity playerNpc) {
         return playerNpc.getPersistentData().getBoolean(ACTIVE_BUILD_BATCH_KEY);
     }
@@ -631,6 +712,7 @@ public class BuildHouseGoal extends Goal {
         } else {
             data.remove(ACTIVE_BUILD_BATCH_KEY);
         }
+        invalidateHomeBuildWorkCache(playerNpc);
     }
 
     private int countAvailableBaseSelectionBlocks() {
@@ -1719,4 +1801,51 @@ public class BuildHouseGoal extends Goal {
     private record PairedPlacement(BlockPos pos, BlockState state) {}
 
     private record BuildSelection(PlayerNpcBuildLayout layout, BlockPos origin) {}
+
+    private record HomeBuildWorkCache(
+            int tick,
+            ResourceLocation dimension,
+            BlockPos origin,
+            int width,
+            int depth,
+            String layoutId,
+            int inventoryHash,
+            boolean continuable
+    ) {
+        static HomeBuildWorkCache create(
+                PlayerNpcEntity playerNpc,
+                ResourceLocation dimension,
+                PlayerNpcHomeUtil.HomeArea homeArea,
+                String layoutId,
+                int inventoryHash,
+                boolean continuable
+        ) {
+            return new HomeBuildWorkCache(
+                    playerNpc.tickCount,
+                    dimension,
+                    homeArea.origin(),
+                    homeArea.width(),
+                    homeArea.depth(),
+                    layoutId,
+                    inventoryHash,
+                    continuable
+            );
+        }
+
+        boolean matches(
+                int currentTick,
+                ResourceLocation currentDimension,
+                PlayerNpcHomeUtil.HomeArea homeArea,
+                String currentLayoutId,
+                int currentInventoryHash
+        ) {
+            return currentTick - this.tick <= READY_BUILD_WORK_CACHE_TICKS
+                    && this.dimension.equals(currentDimension)
+                    && this.origin.equals(homeArea.origin())
+                    && this.width == homeArea.width()
+                    && this.depth == homeArea.depth()
+                    && this.layoutId.equals(currentLayoutId)
+                    && this.inventoryHash == currentInventoryHash;
+        }
+    }
 }

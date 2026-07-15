@@ -263,9 +263,19 @@ public class PickupNearbyItemGoal extends Goal {
         if (playerNpc.isPassenger() || playerNpc.isNoAi() || playerNpc.isHealing()) {
             return false;
         }
+        if (shouldDeferPickupForHomeShelter()) {
+            return false;
+        }
 
         LivingEntity target = playerNpc.getTarget();
         return target == null || !target.isAlive() || playerNpc.hasAnimalLootPriority() && target instanceof Animal;
+    }
+
+    private boolean shouldDeferPickupForHomeShelter() {
+        return !playerNpc.hasAnimalLootPriority()
+                && playerNpc.level() instanceof ServerLevel serverLevel
+                && (serverLevel.isNight() || serverLevel.isThundering())
+                && PlayerNpcHomeUtil.getHome(playerNpc).isPresent();
     }
 
     private ItemEntity findTargetItem() {

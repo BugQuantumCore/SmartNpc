@@ -24,3 +24,6 @@
 
 ## License & Use
 GNU GENERAL PUBLIC LICENSE
+
+## Notices
+See `NOTICE.md` for credits and third-party notices.

@@ -42,7 +42,7 @@ public final class PlayerNpcGoalTraceLogger {
     private static final int TRACE_INTERVAL_TICKS = 20;
     private static final int UNCHANGED_ACTIVE_TRACE_INTERVAL_TICKS = 20 * 5;
     private static final int UNCHANGED_PASSIVE_TRACE_INTERVAL_TICKS = 20 * 10;
-    private static final int BUILDING_TEXT_CACHE_TICKS = 40;
+    private static final int BUILDING_TEXT_CACHE_TICKS = 20 * 5;
     private static final double MAX_NON_INSPECTATOR_TRACE_DISTANCE_SQR = 64.0D * 64.0D;
     private static final String PASSIVE_HOME_STATE = "ai.player_npc.being_at_home";
     private static final Map<PlayerNpcEntity, BuildingTextCache> BUILDING_TEXT_CACHE = new WeakHashMap<>();
@@ -292,6 +292,10 @@ public final class PlayerNpcGoalTraceLogger {
 
     private static String flagsText(PlayerNpcEntity playerNpc) {
         StringJoiner joiner = new StringJoiner(",");
+        joiner.add("job=" + sanitize(playerNpc.getSelectedDailyJobDisplayText()));
+        if (playerNpc.isBuildingBaseSelectionLocked()) {
+            joiner.add("baseLock");
+        }
         if (playerNpc.isHealing()) {
             joiner.add("healing");
         }
@@ -346,8 +350,7 @@ public final class PlayerNpcGoalTraceLogger {
         appendCooldown(joiner, "combatFish", playerNpc.getCombatFishingCooldown());
         appendCooldown(joiner, "shieldCraft", playerNpc.getShieldCraftCooldown());
         appendCooldown(joiner, "shieldGuard", playerNpc.getShieldGuardCooldown());
-        String text = joiner.toString();
-        return text.isBlank() ? "none" : text;
+        return joiner.toString();
     }
 
     private static String buildingText(PlayerNpcEntity playerNpc) {

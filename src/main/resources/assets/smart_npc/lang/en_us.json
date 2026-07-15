@@ -8,6 +8,7 @@
   "gui.player_npc.inspector.health": "Current health: %s / %s",
   "gui.player_npc.inspector.ai": "AI playing: %s",
   "gui.player_npc.inspector.interests": "Interests: %s",
+  "gui.player_npc.inspector.daily_job": "Job: %s",
   "gui.player_npc.inspector.build": "Build: %s",
   "gui.player_npc.inspector.performance": "Server: %s",
   "gui.player_npc.inspector.trace": "Trace: %s",

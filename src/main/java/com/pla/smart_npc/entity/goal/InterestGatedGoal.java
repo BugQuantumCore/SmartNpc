@@ -25,12 +25,12 @@ public class InterestGatedGoal extends Goal {
 
     @Override
     public boolean canUse() {
-        return this.playerNpc.hasAnyInterest(this.interests) && this.delegate.canUse();
+        return this.playerNpc.isInterestGateActive(this.interests) && this.delegate.canUse();
     }
 
     @Override
     public boolean canContinueToUse() {
-        return this.playerNpc.hasAnyInterest(this.interests) && this.delegate.canContinueToUse();
+        return this.playerNpc.isInterestGateActive(this.interests) && this.delegate.canContinueToUse();
     }
 
     @Override

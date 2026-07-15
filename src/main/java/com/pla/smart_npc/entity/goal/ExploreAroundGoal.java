@@ -48,6 +48,7 @@ public class ExploreAroundGoal extends Goal {
     private final Predicate<ServerLevel> shouldExplore;
     private final Predicate<ServerLevel> shouldYieldToSubGoal;
     private final boolean allowUpwardEscapeRequest;
+    private final boolean stopForHomeNow;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle(EXPLORE_CAN_USE_INTERVAL_TICKS);
     private BlockPos targetPos;
     private int exploreTicks;
@@ -78,6 +79,18 @@ public class ExploreAroundGoal extends Goal {
             Predicate<ServerLevel> shouldYieldToSubGoal,
             boolean allowUpwardEscapeRequest
     ) {
+        this(playerNpc, speed, detail, shouldExplore, shouldYieldToSubGoal, allowUpwardEscapeRequest, true);
+    }
+
+    public ExploreAroundGoal(
+            PlayerNpcEntity playerNpc,
+            double speed,
+            String detail,
+            Predicate<ServerLevel> shouldExplore,
+            Predicate<ServerLevel> shouldYieldToSubGoal,
+            boolean allowUpwardEscapeRequest,
+            boolean stopForHomeNow
+    ) {
         this.playerNpc = playerNpc;
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
         this.speed = speed;
@@ -85,6 +98,7 @@ public class ExploreAroundGoal extends Goal {
         this.shouldExplore = shouldExplore;
         this.shouldYieldToSubGoal = shouldYieldToSubGoal;
         this.allowUpwardEscapeRequest = allowUpwardEscapeRequest;
+        this.stopForHomeNow = stopForHomeNow;
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -326,6 +340,10 @@ public class ExploreAroundGoal extends Goal {
         }
 
         BlockPos feet = this.playerNpc.blockPosition();
+        if (PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, feet)
+                || (routeHint != null && PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, routeHint))) {
+            return false;
+        }
         BlockPos escapeTarget = this.findShortSurfaceEscapeTarget(serverLevel, feet, routeHint);
         if (escapeTarget == null) {
             return false;
@@ -427,7 +445,8 @@ public class ExploreAroundGoal extends Goal {
     }
 
     private boolean shouldStopForHomeNow(ServerLevel serverLevel) {
-        return PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent()
+        return this.stopForHomeNow
+                && PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent()
                 && (this.playerNpc.hasExplorationReturnHomeRequest()
                 || serverLevel.isNight()
                 || serverLevel.isThundering());

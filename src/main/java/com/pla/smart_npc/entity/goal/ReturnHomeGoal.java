@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.ReturnPositionAi;
 import com.pla.smart_npc.util.InventoryUtils;
@@ -61,6 +62,7 @@ public class ReturnHomeGoal extends Goal {
             return true;
         }
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
+        boolean miningShelterOnly = isMiningShelterOnly(playerNpc);
         if (needsHomeSurfaceRecovery(playerNpc, homeArea)) {
             return true;
         }
@@ -68,7 +70,10 @@ public class ReturnHomeGoal extends Goal {
             return false;
         }
         if (shouldReturnAfterCompletedStoneTrip(playerNpc, serverLevel, homeArea)) {
-            return true;
+            return !miningShelterOnly;
+        }
+        if (miningShelterOnly) {
+            return serverLevel.isNight() || serverLevel.isThundering();
         }
         if (playerNpc.shouldPrioritizeLogGathering() || playerNpc.shouldPrioritizeCobblestoneGathering()) {
             return serverLevel.isNight() || serverLevel.isThundering();
@@ -111,11 +116,21 @@ public class ReturnHomeGoal extends Goal {
         double distanceSqr = this.playerNpc.distanceToSqr(this.homeCenter.getX() + 0.5D, this.homeCenter.getY(), this.homeCenter.getZ() + 0.5D);
         boolean inventoryHalfFull = this.inventoryMoreThanHalfFull();
         boolean inventoryMostlyFull = this.inventoryMostlyFull();
+        boolean miningShelterOnly = isMiningShelterOnly(this.playerNpc);
         this.shelterReturn = this.shouldShelterAtHome(serverLevel);
-        this.buildReturn = BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
-        this.completedStoneTripReturn = shouldReturnAfterCompletedStoneTrip(this.playerNpc, serverLevel, homeArea);
+        this.buildReturn = !miningShelterOnly && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
+        this.completedStoneTripReturn = !miningShelterOnly && shouldReturnAfterCompletedStoneTrip(this.playerNpc, serverLevel, homeArea);
         this.explorationRecoveryReturn = forcedExplorationReturn;
         this.homeSurfaceRecoveryReturn = forcedHomeSurfaceRecovery;
+        if (miningShelterOnly
+                && !this.shelterReturn
+                && !this.explorationRecoveryReturn
+                && !this.homeSurfaceRecoveryReturn) {
+            this.utilityReturn = false;
+            this.buildReturn = false;
+            this.completedStoneTripReturn = false;
+            return false;
+        }
         if (this.homeSurfaceRecoveryReturn) {
             this.utilityReturn = false;
             this.buildReturn = false;
@@ -175,13 +190,23 @@ public class ReturnHomeGoal extends Goal {
             return false;
         }
 
-        if (this.shouldDeferUtilityReturnForBuildMaterialGathering(serverLevel, inventoryMostlyFull)) {
+        if (this.shouldDeferUtilityReturnForBuildMaterialGathering(serverLevel, inventoryMostlyFull, homeArea)) {
             this.utilityReturn = false;
             this.buildReturn = false;
             this.shelterReturn = false;
             this.completedStoneTripReturn = false;
             this.explorationRecoveryReturn = false;
             this.homeSurfaceRecoveryReturn = false;
+            return false;
+        }
+
+        if (this.playerNpc.getReturnHomeCooldown() > 0
+                && !this.shelterReturn
+                && !this.completedStoneTripReturn
+                && !this.explorationRecoveryReturn
+                && !this.homeSurfaceRecoveryReturn) {
+            this.utilityReturn = false;
+            this.buildReturn = false;
             return false;
         }
 
@@ -485,12 +510,24 @@ public class ReturnHomeGoal extends Goal {
                 || this.playerNpc.shouldPrioritizeCobblestoneGathering();
     }
 
-    private boolean shouldDeferUtilityReturnForBuildMaterialGathering(ServerLevel serverLevel, boolean inventoryMostlyFull) {
-        return !inventoryMostlyFull
-                && !this.shouldShelterAtHome(serverLevel)
-                && (PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, this.playerNpc)
+    private boolean shouldDeferUtilityReturnForBuildMaterialGathering(
+            ServerLevel serverLevel,
+            boolean inventoryMostlyFull,
+            PlayerNpcHomeUtil.HomeArea homeArea
+    ) {
+        if (this.shouldShelterAtHome(serverLevel)) {
+            return false;
+        }
+
+        boolean needsMaterialWork = this.needsBuildMaterialReserves()
+                || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, this.playerNpc)
                 || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, this.playerNpc)
-                || GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(this.playerNpc, serverLevel));
+                || GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(this.playerNpc, serverLevel);
+        if (!needsMaterialWork) {
+            return false;
+        }
+
+        return !inventoryMostlyFull || !this.hasStorageWork(serverLevel, homeArea);
     }
 
     private static boolean shouldReturnAfterCompletedStoneTrip(
@@ -498,7 +535,8 @@ public class ReturnHomeGoal extends Goal {
             ServerLevel serverLevel,
             PlayerNpcHomeUtil.HomeArea homeArea
     ) {
-        if (playerNpc.shouldPrioritizeCobblestoneGathering()
+        if (playerNpc.shouldPrioritizeLogGathering()
+                || playerNpc.shouldPrioritizeCobblestoneGathering()
                 || isInsideHomeWorkArea(playerNpc, homeArea)) {
             return false;
         }
@@ -515,6 +553,11 @@ public class ReturnHomeGoal extends Goal {
         }
 
         return !serverLevel.canSeeSky(feet.above()) || belowHomeBlocks >= 5;
+    }
+
+    private static boolean isMiningShelterOnly(PlayerNpcEntity playerNpc) {
+        return playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
+                && !playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING);
     }
 
 

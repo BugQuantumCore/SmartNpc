@@ -50,7 +50,7 @@ import java.util.WeakHashMap;
 public final class PlayerNpcBuildMaterialUtil {
     private static final int BUILD_CRAFT_RAW_LOG_RESERVE = 0;
     private static final int GLASS_PANE_CRAFT_INPUT = 6;
-    private static final int MISSING_NEED_CACHE_TICKS = 20;
+    private static final int MISSING_NEED_CACHE_TICKS = 20 * 3;
     private static final EnumMap<MaterialFamily, List<Item>> CANDIDATE_CACHE = new EnumMap<>(MaterialFamily.class);
     private static final Map<PlayerNpcEntity, MissingNeedCache> MISSING_NEED_CACHE = new WeakHashMap<>();
     private static final Set<String> WOOD_PREFIXES = Set.of(
@@ -437,8 +437,9 @@ public final class PlayerNpcBuildMaterialUtil {
         }
 
         Optional<String> layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc);
+        int inventoryHash = missingNeedInventoryHash(playerNpc);
         MissingNeedCache cache = MISSING_NEED_CACHE.get(playerNpc);
-        if (cache != null && cache.matches(playerNpc.tickCount, home.get(), layoutId.orElse(""))) {
+        if (cache != null && cache.matches(playerNpc.tickCount, home.get(), layoutId.orElse(""), inventoryHash)) {
             return cache.need();
         }
 
@@ -452,6 +453,7 @@ public final class PlayerNpcBuildMaterialUtil {
                     home.get().width(),
                     home.get().depth(),
                     layoutId.orElse(""),
+                    inventoryHash,
                     Optional.empty()
             ));
             return Optional.empty();
@@ -476,6 +478,7 @@ public final class PlayerNpcBuildMaterialUtil {
                     home.get().width(),
                     home.get().depth(),
                     layoutId.orElse(""),
+                    inventoryHash,
                     need
             ));
             return need;
@@ -486,9 +489,33 @@ public final class PlayerNpcBuildMaterialUtil {
                 home.get().width(),
                 home.get().depth(),
                 layoutId.orElse(""),
+                inventoryHash,
                 Optional.empty()
         ));
         return Optional.empty();
+    }
+
+    private static int missingNeedInventoryHash(PlayerNpcEntity playerNpc) {
+        int hash = 1;
+        hash = 31 * hash + missingNeedStackHash(playerNpc.getMainHandItem());
+        hash = 31 * hash + missingNeedStackHash(playerNpc.getOffhandItem());
+        for (int i = 0; i < playerNpc.getInventory().getContainerSize(); i++) {
+            hash = 31 * hash + missingNeedStackHash(playerNpc.getInventory().getItem(i));
+        }
+        return hash;
+    }
+
+    private static int missingNeedStackHash(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return 0;
+        }
+        ResourceLocation id = ForgeRegistries.ITEMS.getKey(stack.getItem());
+        int hash = id == null ? 0 : id.hashCode();
+        hash = 31 * hash + stack.getCount();
+        if (stack.hasTag()) {
+            hash = 31 * hash + stack.getTag().hashCode();
+        }
+        return hash;
     }
 
     public static boolean needsNonPrimaryBuildMaterial(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
@@ -1486,13 +1513,15 @@ public final class PlayerNpcBuildMaterialUtil {
             int homeWidth,
             int homeDepth,
             String layoutId,
+            int inventoryHash,
             Optional<MissingBuildMaterialNeed> need) {
-        private boolean matches(int currentTick, PlayerNpcHomeUtil.HomeArea homeArea, String currentLayoutId) {
+        private boolean matches(int currentTick, PlayerNpcHomeUtil.HomeArea homeArea, String currentLayoutId, int currentInventoryHash) {
             return currentTick - this.tick <= MISSING_NEED_CACHE_TICKS
                     && this.homeOrigin.equals(homeArea.origin())
                     && this.homeWidth == homeArea.width()
                     && this.homeDepth == homeArea.depth()
-                    && this.layoutId.equals(currentLayoutId);
+                    && this.layoutId.equals(currentLayoutId)
+                    && this.inventoryHash == currentInventoryHash;
         }
     }
 

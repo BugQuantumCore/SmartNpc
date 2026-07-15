@@ -2,41 +2,61 @@
 
 ## Source
 
-- `src/main/java/com/pla/player_npc/clazz/PlayerNpcInterest.java`
-- `src/main/java/com/pla/player_npc/clazz/FakePlayer.java`
-- `src/main/java/com/pla/player_npc/entity/goal/InterestGatedGoal.java`
-- `src/main/java/com/pla/player_npc/entity/PlayerNpcEntity.java`
-- `src/main/java/com/pla/player_npc/client/gui/PlayerNpcInspectorOverlay.java`
+- `src/main/java/com/pla/smart_npc/clazz/PlayerNpcInterest.java`
+- `src/main/java/com/pla/smart_npc/clazz/FakePlayer.java`
+- `src/main/java/com/pla/smart_npc/entity/goal/InterestGatedGoal.java`
+- `src/main/java/com/pla/smart_npc/entity/PlayerNpcEntity.java`
+- `src/main/java/com/pla/smart_npc/client/gui/PlayerNpcInspectorOverlay.java`
 
 ## Purpose
 
-Hardcoded fake-player names now carry a small personality list. The list decides which long-running activity goals can start.
+Hardcoded fake-player names carry a small interest list. Interests are split into daily jobs and opportunistic characteristics.
 
-Interests include:
+Only one job interest is active for a Player NPC during a Minecraft day. Characteristics remain available as side behavior and do not become the whole-day job.
+
+Job interests:
 
 - `BUILDING`
 - `MINING`
 - `FARMING`
 - `FISHING`
+- `EXPLORING`
+
+Characteristic interests:
+
 - `HUNT_MONSTERS`
 - `HUNT_ANIMALS`
 - `HUNT_PLAYERS`
 - `HUNT_VILLAGERS`
-- `EXPLORING`
+- `TROLL_HIT`
 - `LOOTING`
 - `CAUTIOUS`
 
-Log gathering, stone gathering, crafting, and gear upgrading are baseline AI, not personality interests. Every PlayerNpc can run starter log gathering, biome log searching, dig-down stone gathering, sapling planting, basic gear crafting, stone tool upgrades, iron/diamond tool and armor upgrades, and utility crafting when those goals' own resource/cooldown checks pass.
+Default interests for custom or unknown names are `BUILDING`.
 
-Default interests for custom or unknown names are `EXPLORING` and `LOOTING`.
+## Daily Job Selection
+
+`PlayerNpcEntity` stores `selectedDailyJobInterest` and `selectedDailyJobDay`.
+
+- At day time `1`, the NPC rolls one defined job interest for that day.
+- If the NPC loads after tick `1`, it may make one fallback roll during daytime so the job is not missing for the entire day.
+- If no job interests are defined, the selected job is `none` and only characteristic/baseline goals can run.
+- If the NPC has `BUILDING` but no saved home layout id, BUILDING is forced as the selected job. This is the base-selection lock: other job interests cannot run until the base/layout has been chosen.
+- At night/thunder, a NPC with `BUILDING` and a saved home treats BUILDING home-duty goals as active even if the daytime selected job was something else. This lets return-home/shelter logic run.
 
 ## Goal Gating
 
 `PlayerNpcEntity.registerGoals()` wraps major work goals with `InterestGatedGoal`.
 
+`InterestGatedGoal` calls `PlayerNpcEntity.isInterestGateActive(...)`:
+
+- Job interests pass only when they match the selected daily job, with the building base-selection and night home-duty exceptions above.
+- Characteristic interests pass whenever the NPC has that characteristic.
+- Mixed gates, such as `MINING + HUNT_MONSTERS`, pass if either the selected daily job matches the job interest or the NPC has one of the listed characteristics.
+
 Examples:
 
-- `BUILDING`: build house, manage home, return home, sleep at home.
+- `BUILDING`: choose/save base, gather build logs/stone/materials, terraform, build house, manage home, return home, sleep at home.
 - `FISHING`: fishing and boat stockpiling.
 - `MINING`: cave-adjacent ore mining, cave path clearing, and torch placement in caves. Iron/diamond gear upgrading is baseline once materials and a crafting table are available.
 - `FARMING`: crop farming and crop food crafting.
@@ -44,10 +64,11 @@ Examples:
 - `HUNT_ANIMALS`: food-limited animal hunting, sheep hunting for beds, and cooking support.
 - `HUNT_PLAYERS`: rare smart target selection against players and other PlayerNpc entities, plus combat gear prep.
 - `HUNT_VILLAGERS`: very rare smart target selection against villagers, plus combat gear prep.
-- `EXPLORING`/`LOOTING`: chest looting, long-range travel behavior, boat stockpiling, and spyglass use.
+- `EXPLORING`: no-target roaming exploration for the day, plus explorer utility behavior such as spyglass/boat support.
+- `LOOTING`: chest looting.
 - `CAUTIOUS`: rare sneak and scared hide behavior.
 
-Emergency and survival goals such as water escape, hole escape, help calls, obstruction breaking, pickup, first-day log gathering, sapling replanting, and basic crafting remain outside personality gating where needed.
+Emergency and survival goals such as water escape, hole escape, help calls, obstruction breaking, pickup, cooking, and basic gear crafting remain outside daily-job gating where needed.
 
 Home radius rule:
 
@@ -79,4 +100,4 @@ This comes from the hardcoded name definition through `FakePlayerName`.
 
 ## Behavior Rule
 
-NPCs without `BUILDING` should not create homes. They act more like travelers: exploring, looting, fishing, mining, farming, hunting, or cautious hiding depending on their interests.
+NPCs without `BUILDING` should not run the house-building/home-shelter pipeline. They act more like travelers or job workers: exploring, looting, fishing, mining, farming, hunting, or cautious hiding depending on their interests. Job-specific anchors such as a farming area may still be persisted by that job's own goal.

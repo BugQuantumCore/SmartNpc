@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
@@ -67,7 +68,10 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     }
 
     public static boolean needsMissingBuildMaterial(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        return hasPreparedBuildSupplies(playerNpc)
+        return playerNpc != null
+                && playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
+                && hasPreparedBuildSupplies(playerNpc)
                 && !TerraformBuildSiteGoal.hasActionablePrepWork(playerNpc, serverLevel)
                 && PlayerNpcBuildMaterialUtil.needsNonPrimaryBuildMaterial(serverLevel, playerNpc);
     }
@@ -87,6 +91,8 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     @Override
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || !this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
@@ -135,6 +141,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 && this.playerNpc.getUpwardEscapeTarget() == null
                 && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
+                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
                 && !shouldStayHomeForWeather(serverLevel)
                 && needsMissingBuildMaterial(this.playerNpc, serverLevel)
                 && (this.targetPos != null && this.isValidTarget(serverLevel, this.targetPos)

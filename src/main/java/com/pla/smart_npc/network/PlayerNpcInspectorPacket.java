@@ -16,6 +16,7 @@ public class PlayerNpcInspectorPacket {
     private final List<ItemStack> items;
     private final String buildStatusText;
     private final String performanceText;
+    private final String dailyJobText;
     private final String requirementsText;
     private final boolean traceEnabled;
 
@@ -43,10 +44,23 @@ public class PlayerNpcInspectorPacket {
             String requirementsText,
             boolean traceEnabled
     ) {
+        this(entityId, items, buildStatusText, performanceText, "", requirementsText, traceEnabled);
+    }
+
+    public PlayerNpcInspectorPacket(
+            int entityId,
+            List<ItemStack> items,
+            String buildStatusText,
+            String performanceText,
+            String dailyJobText,
+            String requirementsText,
+            boolean traceEnabled
+    ) {
         this.entityId = entityId;
         this.items = List.copyOf(items);
         this.buildStatusText = buildStatusText == null ? "" : buildStatusText;
         this.performanceText = performanceText == null ? "" : performanceText;
+        this.dailyJobText = dailyJobText == null ? "" : dailyJobText;
         this.requirementsText = requirementsText == null ? "" : requirementsText;
         this.traceEnabled = traceEnabled;
     }
@@ -71,6 +85,10 @@ public class PlayerNpcInspectorPacket {
         return performanceText;
     }
 
+    public String dailyJobText() {
+        return dailyJobText;
+    }
+
     public String requirementsText() {
         return requirementsText;
     }
@@ -87,6 +105,7 @@ public class PlayerNpcInspectorPacket {
         }
         buffer.writeUtf(packet.buildStatusText);
         buffer.writeUtf(packet.performanceText);
+        buffer.writeUtf(packet.dailyJobText);
         buffer.writeUtf(packet.requirementsText);
         buffer.writeBoolean(packet.traceEnabled);
     }
@@ -100,9 +119,10 @@ public class PlayerNpcInspectorPacket {
         }
         String buildStatusText = buffer.readUtf();
         String performanceText = buffer.readUtf();
+        String dailyJobText = buffer.readUtf();
         String requirementsText = buffer.readUtf();
         boolean traceEnabled = buffer.readBoolean();
-        return new PlayerNpcInspectorPacket(entityId, items, buildStatusText, performanceText, requirementsText, traceEnabled);
+        return new PlayerNpcInspectorPacket(entityId, items, buildStatusText, performanceText, dailyJobText, requirementsText, traceEnabled);
     }
 
     public static void handle(PlayerNpcInspectorPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {

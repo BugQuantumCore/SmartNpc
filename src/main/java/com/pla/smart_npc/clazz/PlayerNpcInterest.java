@@ -5,12 +5,12 @@ public enum PlayerNpcInterest {
     MINING("Mining"),
     FARMING("Farming"),
     FISHING("Fishing"),
+    EXPLORING("Exploring"),
     HUNT_MONSTERS("Hunt Monsters"),
     HUNT_ANIMALS("Hunt Animals"),
     HUNT_PLAYERS("Hunt Players"),
     HUNT_VILLAGERS("Hunt Villagers"),
     TROLL_HIT("Troll Hit"),
-    EXPLORING("Exploring"),
     LOOTING("Looting"),
     CAUTIOUS("Cautious");
 
@@ -22,5 +22,16 @@ public enum PlayerNpcInterest {
 
     public String displayName() {
         return this.displayName;
+    }
+
+    public boolean isJob() {
+        return switch (this) {
+            case BUILDING, MINING, FARMING, FISHING, EXPLORING -> true;
+            default -> false;
+        };
+    }
+
+    public boolean isCharacteristic() {
+        return !this.isJob();
     }
 }

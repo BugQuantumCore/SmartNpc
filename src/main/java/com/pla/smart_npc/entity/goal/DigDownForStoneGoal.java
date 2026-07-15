@@ -38,6 +38,7 @@ public class DigDownForStoneGoal extends Goal {
     private static final int REPATH_INTERVAL_TICKS = 15;
     private static final int COOLDOWN_TICKS = 20 * 18;
     private static final int FAILED_WALK_COOLDOWN_TICKS = 20 * 2;
+    private static final int MINING_JOB_DIG_BLOCKS = 16;
     private static final int MAX_DIG_SITE_WALK_TICKS = 20 * 25;
     private static final int MAX_DIG_SITE_SAFE_DROP_BLOCKS = 3;
     private static final int CLEAR_OBSTRUCTION_TICKS = 24;
@@ -89,7 +90,8 @@ public class DigDownForStoneGoal extends Goal {
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
-        if (this.shouldStayHomeForWeather(serverLevel)
+        boolean miningJob = GatherStoneGoal.isMiningJobActive(this.playerNpc);
+        if (this.shouldStayHomeForWeather(serverLevel) && !miningJob
                 || !this.hasPickaxe()
                 || !GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
                 || GatherStoneGoal.hasNearbyStoneTarget(this.playerNpc, serverLevel)) {
@@ -117,7 +119,7 @@ public class DigDownForStoneGoal extends Goal {
                 && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
                 && GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
-                && !this.shouldStayHomeForWeather(serverLevel)
+                && (!this.shouldStayHomeForWeather(serverLevel) || GatherStoneGoal.isMiningJobActive(this.playerNpc))
                 && this.hasPreparedBaseForStone(serverLevel);
     }
 
@@ -128,7 +130,9 @@ public class DigDownForStoneGoal extends Goal {
         this.digSiteWalkTicks = 0;
         this.stairSteps = 0;
         this.stoneBlocksMined = 0;
-        this.stoneBlocksNeeded = Math.max(1, this.playerNpc.getCobblestoneSupplyTarget() - this.countStone());
+        this.stoneBlocksNeeded = GatherStoneGoal.isMiningJobActive(this.playerNpc)
+                ? MINING_JOB_DIG_BLOCKS
+                : Math.max(1, this.playerNpc.getCobblestoneSupplyTarget() - this.countStone());
         this.targetPos = null;
         this.minedStone = false;
         this.foundGatherStoneTarget = false;

@@ -33,7 +33,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 public class FakePlayer extends PathfinderMob {
     private static final EntityDataAccessor<String> NAME = SynchedEntityData.defineId(FakePlayer.class, EntityDataSerializers.STRING);
     private static final List<FakePlayerName> HARDCODED_NAMES = List.of(
-            new FakePlayerName("Gory_Moon", PlayerNpcInterest.BUILDING)
+            new FakePlayerName("Gory_Moon", PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING)
 //            new FakePlayerName("Darkosto", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_MONSTERS),
 //            new FakePlayerName("Darkere", PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING),
 //            new FakePlayerName("Darkhax", PlayerNpcInterest.EXPLORING),

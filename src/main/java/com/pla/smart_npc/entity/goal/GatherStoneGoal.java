@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
@@ -108,10 +109,15 @@ public class GatherStoneGoal extends Goal {
 
     public static boolean isStoneSupplyPhaseActive(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         return hasPickaxe(playerNpc)
-                && hasEnoughLogsForStonePhase(playerNpc)
                 && hasPreparedBaseForStone(playerNpc, serverLevel)
+                && (isMiningJobActive(playerNpc)
+                || hasEnoughLogsForStonePhase(playerNpc)
                 && (playerNpc.shouldPrioritizeCobblestoneGathering()
-                || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, playerNpc));
+                || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, playerNpc)));
+    }
+
+    public static boolean isMiningJobActive(PlayerNpcEntity playerNpc) {
+        return playerNpc != null && playerNpc.isDailyJobActive(PlayerNpcInterest.MINING);
     }
 
     private static boolean hasEnoughLogsForStonePhase(PlayerNpcEntity playerNpc) {
@@ -134,7 +140,8 @@ public class GatherStoneGoal extends Goal {
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
-        if (this.shouldStayHomeForWeather(serverLevel)
+        boolean miningJob = isMiningJobActive(this.playerNpc);
+        if (this.shouldStayHomeForWeather(serverLevel) && !miningJob
                 || !isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
                 || (!this.playerNpc.isStoneAccessClearing()
                 && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel))) {
@@ -905,8 +912,9 @@ public class GatherStoneGoal extends Goal {
         }
 
         this.phaseRecheckTicks = PHASE_RECHECK_INTERVAL_TICKS;
+        boolean miningJob = isMiningJobActive(this.playerNpc);
         this.phaseStillActive = isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
-                && !this.shouldStayHomeForWeather(serverLevel)
+                && (!this.shouldStayHomeForWeather(serverLevel) || miningJob)
                 && (this.clearedAccessForTarget || hasPreparedBaseForStone(this.playerNpc, serverLevel));
         return this.phaseStillActive;
     }

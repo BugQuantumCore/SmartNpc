@@ -49,6 +49,7 @@ public class InventoryViewerItem extends Item {
                             PlayerNpcInspectorData.createSnapshot(playerNpcEntity),
                             PlayerNpcInspectorData.createBuildStatusText(playerNpcEntity),
                             PlayerNpcInspectorData.createPerformanceText(),
+                            PlayerNpcInspectorData.createDailyJobText(playerNpcEntity),
                             PlayerNpcInspectorData.createBuildRequirementsText(playerNpcEntity),
                             false
                     )

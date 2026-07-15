@@ -111,7 +111,7 @@ public class BeingAtHomeGoal extends Goal {
                 || this.playerNpc.shouldPrioritizeCobblestoneGathering())) {
             return false;
         }
-        if (this.hasReadyHomeWork(serverLevel, false)) {
+        if (!this.sheltering && this.hasReadyHomeWork(serverLevel, false)) {
             return false;
         }
         if (!this.sheltering && !this.isFinishedHouse(serverLevel, this.homeArea)) {
@@ -151,7 +151,7 @@ public class BeingAtHomeGoal extends Goal {
                 && (this.sheltering
                 || !this.playerNpc.shouldPrioritizeLogGathering()
                 && !this.playerNpc.shouldPrioritizeCobblestoneGathering())
-                && !this.hasReadyHomeWork()
+                && (this.sheltering || !this.hasReadyHomeWork())
                 && (!this.sheltering || this.shouldShelterNow());
     }
 

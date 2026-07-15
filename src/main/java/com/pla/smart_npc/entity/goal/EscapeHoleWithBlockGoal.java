@@ -6,6 +6,7 @@ import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
+import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -1957,6 +1958,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private boolean isClearablePillarObstruction(ServerLevel serverLevel, BlockPos pos, BlockState state) {
         return serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
+                && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
                 && !state.isAir()
                 && !state.getCollisionShape(serverLevel, pos).isEmpty()
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F

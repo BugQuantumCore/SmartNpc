@@ -6,6 +6,7 @@
   "gui.player_npc.inspector.title": "正在检查 %s",
   "gui.player_npc.inspector.health": "当前生命值：%s / %s",
   "gui.player_npc.inspector.ai": "正在执行的 AI：%s",
+  "gui.player_npc.inspector.daily_job": "今日工作：%s",
   "gui.player_npc.inspector.task": "任务：",
   "gui.player_npc.inspector.item_name": "主手：%s",
   "gui.player_npc.inspector.equipment": "装备",

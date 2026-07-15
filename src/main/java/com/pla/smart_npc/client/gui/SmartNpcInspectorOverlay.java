@@ -64,6 +64,7 @@ public class SmartNpcInspectorOverlay {
     private static List<ItemStack> snapshot = List.of();
     private static String snapshotBuildStatusText = "";
     private static String snapshotPerformanceText = "";
+    private static String snapshotDailyJobText = "";
     private static String snapshotRequirementsText = "";
     private static boolean snapshotTraceEnabled;
     private static boolean requirementsVisible;
@@ -87,6 +88,7 @@ public class SmartNpcInspectorOverlay {
     private static int cachedHealthColor = 0xFF74E291;
     private static Component cachedAiText = Component.empty();
     private static String cachedInterestsText = "";
+    private static String cachedDailyJobText = "";
     private static String cachedBuildStatusText = "";
     private static List<String> cachedPerformanceLines = List.of("");
     private static String cachedTraceText = "";
@@ -120,6 +122,7 @@ public class SmartNpcInspectorOverlay {
         snapshot = packet.items();
         snapshotBuildStatusText = packet.buildStatusText();
         snapshotPerformanceText = packet.performanceText();
+        snapshotDailyJobText = packet.dailyJobText();
         snapshotRequirementsText = packet.requirementsText();
         snapshotTraceEnabled = packet.traceEnabled();
         lastDisplayCacheMillis = Long.MIN_VALUE;
@@ -314,6 +317,11 @@ public class SmartNpcInspectorOverlay {
                 Component.translatable("gui.player_npc.inspector.interests", playerNpc.getInterestsDisplayText()).getString(),
                 PANEL_WIDTH - 16
         );
+        cachedDailyJobText = trimToWidth(
+                font,
+                Component.translatable("gui.player_npc.inspector.daily_job", snapshotDailyJobText).getString(),
+                PANEL_WIDTH - 16
+        );
         cachedBuildStatusText = trimToWidth(
                 font,
                 Component.translatable("gui.player_npc.inspector.build", snapshotBuildStatusText).getString(),
@@ -386,8 +394,9 @@ public class SmartNpcInspectorOverlay {
         guiGraphics.drawString(font, cachedHealthText, x + 8, y + 21, cachedHealthColor, false);
         guiGraphics.drawString(font, cachedAiText, x + 8, y + 35, 0xFFB7C9E2, false);
         guiGraphics.drawString(font, cachedInterestsText, x + 8, y + 49, 0xFFB7C9E2, false);
-        guiGraphics.drawString(font, cachedBuildStatusText, x + 8, y + 63, 0xFFB7C9E2, false);
-        int performanceY = y + 77;
+        guiGraphics.drawString(font, cachedDailyJobText, x + 8, y + 63, 0xFFD6E4FF, false);
+        guiGraphics.drawString(font, cachedBuildStatusText, x + 8, y + 77, 0xFFB7C9E2, false);
+        int performanceY = y + 91;
         for (String line : cachedPerformanceLines) {
             guiGraphics.drawString(font, line, x + 8, performanceY, 0xFFB7C9E2, false);
             performanceY += 11;

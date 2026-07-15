@@ -92,7 +92,7 @@ public class FarmCropGoal extends Goal {
 
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
         if (this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
-            if (home.isEmpty() || !this.isHouseFinished(serverLevel, home.get())) {
+            if (home.isEmpty() || PlayerNpcHomeUtil.getHomeLayoutId(this.playerNpc).isEmpty()) {
                 return false;
             }
             this.homeArea = home.get();
@@ -436,9 +436,6 @@ public class FarmCropGoal extends Goal {
         BlockPos center = this.playerNpc.blockPosition();
         for (BlockPos pos : BlockPos.betweenClosed(center.offset(-HARVEST_RADIUS, -2, -HARVEST_RADIUS), center.offset(HARVEST_RADIUS, 2, HARVEST_RADIUS))) {
             BlockPos immutable = pos.immutable();
-            if (this.farmArea != null && !this.farmArea.containsCrop(immutable)) {
-                continue;
-            }
             BlockState state = serverLevel.getBlockState(immutable);
             if (state.getBlock() instanceof CropBlock cropBlock && cropBlock.isMaxAge(state)) {
                 return immutable;

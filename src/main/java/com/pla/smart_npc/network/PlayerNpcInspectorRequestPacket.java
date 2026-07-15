@@ -60,6 +60,7 @@ public class PlayerNpcInspectorRequestPacket {
                             PlayerNpcInspectorData.createSnapshot(playerNpc),
                             PlayerNpcInspectorData.createBuildStatusText(playerNpc),
                             PlayerNpcInspectorData.createPerformanceText(),
+                            PlayerNpcInspectorData.createDailyJobText(playerNpc),
                             packet.includeRequirements ? PlayerNpcInspectorData.createBuildRequirementsText(playerNpc) : "",
                             PlayerNpcGoalTraceLogger.isTracing(sender, playerNpc)
                     )
