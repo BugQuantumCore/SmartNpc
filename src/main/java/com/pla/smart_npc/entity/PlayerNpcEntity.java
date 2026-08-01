@@ -8,7 +8,6 @@ import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.entity.goal.BeingAtHomeGoal;
 import com.pla.smart_npc.entity.goal.BuildHouseGoal;
 import com.pla.smart_npc.entity.goal.BreakTargetObstructionGoal;
-import com.pla.smart_npc.entity.goal.BurnNearbyItemGoal;
 import com.pla.smart_npc.entity.goal.BoatStockpileGoal;
 import com.pla.smart_npc.entity.goal.BoatTrapMonsterGoal;
 import com.pla.smart_npc.entity.goal.CallForHelpGoal;
@@ -31,7 +30,6 @@ import com.pla.smart_npc.entity.goal.FarmCropGoal;
 import com.pla.smart_npc.entity.goal.GatherMissingBuildMaterialGoal;
 import com.pla.smart_npc.entity.goal.GatherLogsGoal;
 import com.pla.smart_npc.entity.goal.GatherStoneGoal;
-import com.pla.smart_npc.entity.goal.HuntSheepForBedGoal;
 import com.pla.smart_npc.entity.goal.IronGolemTrollGoal;
 import com.pla.smart_npc.entity.goal.InterestGatedGoal;
 import com.pla.smart_npc.entity.goal.JukeboxDanceGoal;
@@ -78,7 +76,6 @@ import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.DamageTypeTags;
-import net.minecraft.tags.ItemTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.DifficultyInstance;
@@ -120,6 +117,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final EntityDataAccessor<String> AI_STATE = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> AI_DETAIL = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<Boolean> DANCING = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
+    private static final EntityDataAccessor<Boolean> EPIC_FIGHT_DIGGING = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
     private static final EntityDataAccessor<Boolean> SNEAKING_AI_HIDES_DISPLAY_NAME = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
     private static final int MAIN_HAND_ATTACK_ANIMATION_DURATION = 10;
     private static final int MAIN_HAND_USE_ANIMATION_DURATION = 6;
@@ -1130,6 +1128,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.entityData.define(AI_STATE, AI_IDLE);
         this.entityData.define(AI_DETAIL, "");
         this.entityData.define(DANCING, false);
+        this.entityData.define(EPIC_FIGHT_DIGGING, false);
         this.entityData.define(SNEAKING_AI_HIDES_DISPLAY_NAME, false);
     }
 
@@ -1874,6 +1873,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (this.entityData.get(MAIN_HAND_ATTACK_ANIMATION_TICKS) <= 0) {
             this.entityData.set(MAIN_HAND_ATTACK_ANIMATION_TICKS, MAIN_HAND_USE_ANIMATION_DURATION);
         }
+        this.swing(InteractionHand.MAIN_HAND, true);
     }
 
     public int getMainHandAttackAnimationTicks() {
@@ -1910,6 +1910,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public void setDancing(boolean dancing) {
         this.entityData.set(DANCING, dancing);
+    }
+
+    public boolean isEpicFightDigging() {
+        return this.entityData.get(EPIC_FIGHT_DIGGING);
+    }
+
+    public void setEpicFightDigging(boolean digging) {
+        this.entityData.set(EPIC_FIGHT_DIGGING, digging);
     }
 
     public boolean isDisplayNameHiddenBySneakingAi() {

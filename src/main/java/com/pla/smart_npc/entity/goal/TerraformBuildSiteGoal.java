@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
+import com.pla.smart_npc.compat.epicfight.EpicFight;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
@@ -31,6 +32,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.fml.ModList;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -237,12 +239,14 @@ public class TerraformBuildSiteGoal extends Goal {
         }
 
         if (this.scaffoldPlacePos != null) {
+            this.stopEpicFightDiggingAnimation();
             this.tickScaffoldPlacement(serverLevel);
             return;
         }
 
         if (!this.isTargetStillValid(serverLevel, this.target)) {
             this.playerNpc.clearBlockBreakProgress(this.target.pos());
+            this.stopEpicFightDiggingAnimation();
             this.workTicks = 0;
             if (!this.temporaryScaffold.isEmpty()) {
                 this.target = null;
@@ -259,6 +263,7 @@ public class TerraformBuildSiteGoal extends Goal {
         }
         if (this.target.phase() == TerraformPhase.FILL_SUPPORT
                 && this.deferSupportFillForVerticalEscape(serverLevel, this.target.pos())) {
+            this.stopEpicFightDiggingAnimation();
             this.target = null;
             this.workTicks = 0;
             return;
@@ -268,15 +273,18 @@ public class TerraformBuildSiteGoal extends Goal {
         this.playerNpc.getLookControl().setLookAt(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, 40.0F, 40.0F);
         if (this.target.phase() == TerraformPhase.FILL_SUPPORT && this.supportClearanceMoveTicks > 0) {
             this.playerNpc.clearBlockBreakProgress(pos);
+            this.stopEpicFightDiggingAnimation();
             return;
         }
         if (this.shouldScaffoldToward(serverLevel, pos)) {
             if (this.beginScaffoldStep(serverLevel, this.playerNpc.blockPosition())) {
                 this.playerNpc.clearBlockBreakProgress(pos);
+                this.stopEpicFightDiggingAnimation();
                 return;
             }
             if (this.needsScaffoldForVerticalReach(pos)) {
                 this.playerNpc.clearBlockBreakProgress(pos);
+                this.stopEpicFightDiggingAnimation();
                 this.updateTaskDetail("pillar blocked for clear @ " + pos.getX() + " " + pos.getY() + " " + pos.getZ());
                 return;
             }
@@ -284,6 +292,7 @@ public class TerraformBuildSiteGoal extends Goal {
 
         if (!this.isWithinDirectClearReach(pos)) {
             this.playerNpc.clearBlockBreakProgress(pos);
+            this.stopEpicFightDiggingAnimation();
             if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
                 this.repathTicks = 20;
                 this.moveToTarget(serverLevel);
@@ -294,7 +303,10 @@ public class TerraformBuildSiteGoal extends Goal {
         this.playerNpc.getNavigation().stop();
         switch (this.target.phase()) {
             case CLEAR, CLEAR_WATER -> this.tickClear(serverLevel);
-            case FILL_SUPPORT -> this.tickFillSupport(serverLevel);
+            case FILL_SUPPORT -> {
+                this.stopEpicFightDiggingAnimation();
+                this.tickFillSupport(serverLevel);
+            }
         }
     }
 
@@ -322,6 +334,7 @@ public class TerraformBuildSiteGoal extends Goal {
         this.scaffoldJumpDelayTicks = 0;
         this.scaffoldPlaceDelayTicks = 0;
         this.scaffoldPlaceWaitTicks = 0;
+        this.stopEpicFightDiggingAnimation();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }
 
@@ -329,6 +342,7 @@ public class TerraformBuildSiteGoal extends Goal {
         BlockPos pos = this.target.pos();
         BlockState state = serverLevel.getBlockState(pos);
         if (this.target.phase() == TerraformPhase.CLEAR_WATER) {
+            this.stopEpicFightDiggingAnimation();
             if (state.getFluidState().isEmpty()) {
                 this.target = null;
                 return;
@@ -346,14 +360,17 @@ public class TerraformBuildSiteGoal extends Goal {
 
         if (!this.canClearForBuild(serverLevel, pos, state)) {
             this.playerNpc.clearBlockBreakProgress(pos);
+            this.stopEpicFightDiggingAnimation();
             this.target = null;
             this.workTicks = 0;
             return;
         }
 
         this.equipToolFor(state);
+        this.keepEpicFightDiggingAnimation();
         if (this.workTicks % MINE_HIT_INTERVAL_TICKS == 0) {
             this.playerNpc.triggerMainHandAttackAnimation();
+            this.playEpicFightDiggingAnimation();
             PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, pos, state, this.playerNpc);
         }
 
@@ -372,6 +389,7 @@ public class TerraformBuildSiteGoal extends Goal {
             this.playerNpc.hurtMainHandItem(1);
         }
         this.playerNpc.clearBlockBreakProgress(pos);
+        this.stopEpicFightDiggingAnimation();
         this.target = null;
         this.workTicks = 0;
         this.restorePreviousMainHand();
@@ -631,10 +649,12 @@ public class TerraformBuildSiteGoal extends Goal {
 
     private void tickScaffoldCleanup(ServerLevel serverLevel) {
         if (this.temporaryScaffold.isEmpty()) {
+            this.stopEpicFightDiggingAnimation();
             return;
         }
 
         if (!this.playerNpc.onGround()) {
+            this.stopEpicFightDiggingAnimation();
             this.lookDownAt(this.temporaryScaffold.get(this.temporaryScaffold.size() - 1));
             this.updateTaskDetail();
             return;
@@ -644,6 +664,7 @@ public class TerraformBuildSiteGoal extends Goal {
         BlockState state = serverLevel.getBlockState(pos);
         if (state.isAir()) {
             this.playerNpc.clearBlockBreakProgress(pos);
+            this.stopEpicFightDiggingAnimation();
             this.temporaryScaffold.remove(this.temporaryScaffold.size() - 1);
             this.workTicks = 0;
             this.updateTaskDetail();
@@ -653,8 +674,10 @@ public class TerraformBuildSiteGoal extends Goal {
         this.equipToolFor(state);
         this.playerNpc.getNavigation().stop();
         this.playerNpc.getLookControl().setLookAt(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, 40.0F, 40.0F);
+        this.keepEpicFightDiggingAnimation();
         if (this.workTicks % MINE_HIT_INTERVAL_TICKS == 0) {
             this.playerNpc.triggerMainHandAttackAnimation();
+            this.playEpicFightDiggingAnimation();
             PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, pos, state, this.playerNpc);
         }
 
@@ -670,12 +693,31 @@ public class TerraformBuildSiteGoal extends Goal {
             this.playerNpc.hurtMainHandItem(1);
         }
         this.playerNpc.clearBlockBreakProgress(pos);
+        this.stopEpicFightDiggingAnimation();
         this.temporaryScaffold.remove(this.temporaryScaffold.size() - 1);
         this.workTicks = 0;
         if (this.temporaryScaffold.isEmpty()) {
             this.restorePreviousMainHand();
         }
         this.updateTaskDetail();
+    }
+
+    private void keepEpicFightDiggingAnimation() {
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.keepDiggingState(this.playerNpc);
+        }
+    }
+
+    private void playEpicFightDiggingAnimation() {
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.playDiggingAnimation(this.playerNpc);
+        }
+    }
+
+    private void stopEpicFightDiggingAnimation() {
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.stopDiggingAnimation(this.playerNpc);
+        }
     }
 
     private void clearScaffoldPlacement() {

@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.compat.epicfight.EpicFight;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
@@ -12,7 +13,6 @@ import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.ItemTags;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
@@ -27,6 +27,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
+import net.minecraftforge.fml.ModList;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -105,6 +106,20 @@ public class EscapeHoleWithBlockGoal extends Goal {
         return true;
     }
 
+    private void setEscapeMode(EscapeMode inputMode) {
+        if (ModList.get().isLoaded("epicfight")) {
+            if ((this.mode == EscapeMode.GATHER_BLOCKS || this.mode == EscapeMode.CLEAR_EXIT)
+                    && (inputMode != EscapeMode.GATHER_BLOCKS && inputMode != EscapeMode.CLEAR_EXIT)) {
+                EpicFight.stopDiggingAnimation(this.playerNpc);
+            }
+            if ((this.mode != EscapeMode.GATHER_BLOCKS && this.mode != EscapeMode.CLEAR_EXIT)
+                    && (inputMode == EscapeMode.GATHER_BLOCKS || inputMode == EscapeMode.CLEAR_EXIT)) {
+//                EpicFight.playDiggingAnimation(this.playerNpc);
+            }
+            this.mode = inputMode;
+        }
+    }
+
     @Override
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
@@ -165,7 +180,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         BlockPos currentColumnTarget = this.findCurrentColumnClearTarget(serverLevel, feet);
         if (currentColumnTarget != null) {
-            this.mode = EscapeMode.CLEAR_EXIT;
+            setEscapeMode(EscapeMode.CLEAR_EXIT);
             this.exitClearPos = currentColumnTarget;
             return true;
         }
@@ -195,7 +210,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (escapeBlocks < this.requiredEscapeBlocks) {
             EscapeMaterialTarget target = this.findEscapeMaterialTarget(serverLevel);
             if (target != null) {
-                this.mode = EscapeMode.GATHER_BLOCKS;
+                setEscapeMode(EscapeMode.GATHER_BLOCKS);
                 this.minePos = target.targetPos();
                 this.mineStandPos = target.standPos();
                 return true;
@@ -206,7 +221,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
 
-        this.mode = EscapeMode.PILLAR;
+        setEscapeMode(EscapeMode.PILLAR);
         this.maxPillarBlocks = routeNeedsClimb
                 ? Math.min(escapeBlocks, Math.max(1, Math.min(this.requiredEscapeBlocks, pillarPlan.blocksNeeded())))
                 : 1;
@@ -396,6 +411,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void tickGatherBlocks(ServerLevel serverLevel) {
+        if (ModList.get().isLoaded("epicfight")) {
+//            EpicFight.playDiggingAnimation(this.playerNpc);
+        }
         if (this.countEscapeBlocks() >= this.requiredEscapeBlocks) {
             this.switchToPillar(serverLevel);
             return;
@@ -560,7 +578,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
         this.pillarBasePos = pillarPlan.basePos();
         this.pillarExitY = pillarPlan.exitY();
-        this.mode = EscapeMode.PILLAR;
+        setEscapeMode(EscapeMode.PILLAR);
         this.minePos = null;
         this.mineStandPos = null;
         this.mineTicks = 0;
@@ -690,7 +708,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (escapeBlocks < this.requiredEscapeBlocks) {
             EscapeMaterialTarget target = this.findEscapeMaterialTarget(serverLevel);
             if (target != null) {
-                this.mode = EscapeMode.GATHER_BLOCKS;
+                setEscapeMode(EscapeMode.GATHER_BLOCKS);
                 this.minePos = target.targetPos();
                 this.mineStandPos = target.standPos();
                 this.pillarsPlaced = 0;
@@ -2045,7 +2063,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void resetPlan() {
-        this.mode = EscapeMode.NONE;
+        setEscapeMode(EscapeMode.NONE);
         this.placePos = null;
         this.minePos = null;
         this.mineStandPos = null;

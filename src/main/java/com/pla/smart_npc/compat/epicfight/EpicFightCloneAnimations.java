@@ -1,0 +1,30 @@
+package com.pla.smart_npc.compat.epicfight;
+
+import com.pla.smart_npc.SmartNpc;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
+import yesman.epicfight.api.animation.AnimationManager;
+import yesman.epicfight.api.animation.types.EntityState;
+import yesman.epicfight.api.animation.types.StaticAnimation;
+import yesman.epicfight.gameasset.Armatures;
+import yesman.epicfight.model.armature.HumanoidArmature;
+
+@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.MOD)
+public final class EpicFightCloneAnimations {
+    public static AnimationManager.AnimationAccessor<StaticAnimation> DIG_MAINHAND;
+
+    private EpicFightCloneAnimations() {
+    }
+
+    @SubscribeEvent
+    public static void registerAnimations(AnimationManager.AnimationRegistryEvent event) {
+        event.newBuilder(SmartNpc.MODID, EpicFightCloneAnimations::build);
+    }
+
+    private static void build(AnimationManager.AnimationBuilder builder) {
+        Armatures.ArmatureAccessor<HumanoidArmature> humanoidArmature = Armatures.BIPED;
+        DIG_MAINHAND = builder.nextAccessor("biped/living/dig_mainhand",
+                accessor -> new StaticAnimation(0.1F, true, accessor, humanoidArmature)
+                        .addState(EntityState.CAN_BASIC_ATTACK, false));
+    }
+}
