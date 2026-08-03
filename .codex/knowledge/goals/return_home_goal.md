@@ -8,9 +8,11 @@
 
 ## Purpose
 
-Makes Player NPCs with a saved home occasionally travel back instead of wandering forever.
+Makes `BUILDING` Player NPCs with a saved home occasionally travel back instead of wandering forever.
 
 It is also the long-range night/thunder shelter handoff. `BeingAtHomeGoal` handles short-range indoor behavior after the NPC is already near the home/base area.
+
+Pure mining NPCs are not gated into `ReturnHomeGoal`; they should not use a saved-home return path or return home at night. Mining-only surface escape belongs to `ExploreCaveOreGoal` and is limited to daytime log resupply.
 
 ## Behavior
 
@@ -22,7 +24,7 @@ Build work can also bypass the ordinary return cooldown from any distance when a
 
 Night/thunder shelter return bypasses that material-reserve gate. If a home/base exists and the NPC is away from the home work area, `ReturnHomeGoal` should start even when logs or stone are still below target. Resource goals should yield during shelter weather so return can claim movement.
 
-In the building-interest bootstrap flow, the base is selected before stone gathering. Stone gathering and dig-down mining therefore use the saved home center as the known return destination. After the stone target is met, return/build behavior should route the NPC back to that base instead of choosing a build area from the mine location.
+In the building-interest bootstrap flow, the base is selected before building-driven stone gathering. Building stone gathering and dig-down mining therefore use the saved home center as the known return destination. After the stone target is met, return/build behavior should route the NPC back to that base instead of choosing a build area from the mine location.
 
 If the NPC finishes its stone supply while below the saved home/base area, `ReturnHomeGoal` can bypass both the ordinary return cooldown and the material-reserve gate even when logs have dipped below the daily target. This uses the `returning from dig site` detail and lets `ReturnPositionAi` own pathing, safe drops, route clearing, and upward escape requests. Log gathering and log exploration should yield to this condition first; otherwise the NPC can sit in a dig pit and repeatedly request exploration climbs instead of returning to the known base.
 

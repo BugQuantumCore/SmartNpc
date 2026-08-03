@@ -36,6 +36,7 @@ import com.pla.smart_npc.entity.goal.JukeboxDanceGoal;
 import com.pla.smart_npc.entity.goal.LootNearbyChestGoal;
 import com.pla.smart_npc.entity.goal.LowHealthFleeGoal;
 import com.pla.smart_npc.entity.goal.ManageHomeBaseGoal;
+import com.pla.smart_npc.entity.goal.MiningNightCampGoal;
 import com.pla.smart_npc.entity.goal.PlayerNpcFishingGoal;
 import com.pla.smart_npc.entity.goal.PlayerNpcProjectileBlockGoal;
 import com.pla.smart_npc.entity.goal.PlayerNpcRangedBowAttackGoal;
@@ -1422,10 +1423,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(3, new PickupNearbyItemGoal(this, 1.0D));
         this.goalSelector.addGoal(3, new RecoverWeaponInCombatGoal(this, 1.0D, 8.0D));
         this.goalSelector.addGoal(3, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS));
-        this.goalSelector.addGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, this.gated(new TerraformBuildSiteGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new MeleeAttackGoal(this, 1.0D, true));
-        this.goalSelector.addGoal(5, new BuildHouseGoal(this));
+        this.goalSelector.addGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
+        this.goalSelector.addGoal(4, this.gated(new MiningNightCampGoal(this, 1.0D), PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(5, new CookFoodGoal(this));
         this.goalSelector.addGoal(5, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new CraftCropFoodGoal(this), PlayerNpcInterest.FARMING));
@@ -1446,8 +1448,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(5, this.gated(new UseSpyglassGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.CAUTIOUS));
         this.goalSelector.addGoal(6, this.gated(new GatherLogsGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
-        this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, new GatherMissingBuildMaterialGoal(this, 1.0D));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
@@ -1457,10 +1459,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(level, this))
                         && this.getGatherCooldown() <= 0
                         && !GatherStoneGoal.isStoneSupplyPhaseActive(this, level)
+                        && !(this.shouldPrioritizeLogGathering()
+                        && !level.canSeeSky(this.blockPosition().above()))
                         && !this.shouldStayHomeForWeather(level)
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> GatherLogsGoal.hasNearbyLogTarget(this, level)
-        ), PlayerNpcInterest.BUILDING));
+        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
@@ -1502,7 +1506,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 true,
                 false
         ), PlayerNpcInterest.HUNT_MONSTERS));
-        this.goalSelector.addGoal(4, this.gated(new BeingAtHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(4, this.gated(new BeingAtHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
         ((GroundPathNavigation) this.getNavigation()).setCanOpenDoors(true);
         ((GroundPathNavigation) this.getNavigation()).setCanFloat(true);
@@ -1731,6 +1735,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || "ai.player_npc.gathering_materials".equals(state)
                 || "ai.player_npc.gathering_logs".equals(state)
                 || "ai.player_npc.gathering_stone".equals(state)
+                || "ai.player_npc.prospecting_ore".equals(state)
+                || "ai.player_npc.digging_down_for_stone".equals(state)
                 || "ai.player_npc.exploring_cave".equals(state)
                 || "ai.player_npc.escaping_hole".equals(state)
                 || "ai.player_npc.descending_column".equals(state)

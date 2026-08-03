@@ -24,6 +24,7 @@ public final class BreakingBlockAi {
     private static final int HIT_SOUND_INTERVAL_TICKS = 8;
     private static final int ATTACK_ANIMATION_INTERVAL_TICKS = 10;
     private static final int MAX_REQUIRED_BREAK_TICKS = 20 * 30;
+    private static final int POST_BREAK_DELAY_TICKS = 5;
     private static final float MINING_SNEAK_CHANCE = 0.12F;
     private static final int MINING_SNEAK_MIN_TICKS = 20;
     private static final int MINING_SNEAK_RANDOM_TICKS = 35;
@@ -34,6 +35,7 @@ public final class BreakingBlockAi {
     private BlockPos targetPos;
     private int breakTicks;
     private int requiredTicks;
+    private int nextBreakStartTick;
     private String detail = "breaking block";
     private String toolDetail = "";
 
@@ -74,10 +76,6 @@ public final class BreakingBlockAi {
             return TickResult.FAILED;
         }
 
-        if (!targetPos.equals(this.targetPos)) {
-            this.start(targetPos, requiredTicks, detail);
-        }
-
         BlockState state = serverLevel.getBlockState(targetPos);
         if (!targetPredicate.test(state)) {
             this.stop();
@@ -91,6 +89,13 @@ public final class BreakingBlockAi {
         this.toolAi.equipBestToolFor(state);
         this.toolDetail = this.toolAi.hasPreferredToolFor(state) ? "" : " without preferred tool";
         this.requiredTicks = requiredBreakTicks(serverLevel, targetPos, state, this.playerNpc.getMainHandItem());
+        if (!targetPos.equals(this.targetPos)) {
+            this.start(targetPos, this.requiredTicks, detail);
+        }
+        if (this.breakTicks <= 0 && this.playerNpc.tickCount < this.nextBreakStartTick) {
+            this.updateDetail();
+            return TickResult.RUNNING;
+        }
         this.playerNpc.getLookControl().setLookAt(
                 targetPos.getX() + 0.5D,
                 targetPos.getY() + 0.5D,
@@ -118,6 +123,7 @@ public final class BreakingBlockAi {
         boolean destroyed = PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, targetPos, state, this.playerNpc);
         if (destroyed) {
             this.playerNpc.hurtMainHandItem(1);
+            this.nextBreakStartTick = this.playerNpc.tickCount + POST_BREAK_DELAY_TICKS;
         }
         this.stop();
         return destroyed ? TickResult.DONE : TickResult.FAILED;
@@ -164,10 +170,14 @@ public final class BreakingBlockAi {
         if (this.targetPos == null) {
             return "";
         }
+        String progress = this.requiredTicks > 0
+                ? " " + Math.min(this.breakTicks, this.requiredTicks) + "/" + this.requiredTicks + "t"
+                : "";
         return this.detail + this.toolDetail + " @ "
                 + this.targetPos.getX() + " "
                 + this.targetPos.getY() + " "
-                + this.targetPos.getZ();
+                + this.targetPos.getZ()
+                + progress;
     }
 
     private void start(BlockPos targetPos, int requiredTicks, String detail) {

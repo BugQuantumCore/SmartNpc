@@ -23,15 +23,16 @@ Project knowledge to consult first:
 - .codex/knowledge/goals/craft_iron_gear_goal.md
 
 Core mining-interest flow:
-- `PlayerNpcEntity.registerGoals()` wires mining through `ReturnHomeGoal`, `CraftIronGearGoal`, `GatherLogsGoal`, `GatherStoneGoal`, `DigDownForStoneGoal`, and `ExploreCaveOreGoal`.
+- `PlayerNpcEntity.registerGoals()` wires mining through `CraftIronGearGoal`, `GatherLogsGoal`, `GatherStoneGoal`, `DigDownForStoneGoal`, and `ExploreCaveOreGoal`. House selection, `ReturnHomeGoal`, and `BeingAtHomeGoal` are `BUILDING`-gated only; a pure miner must not create, choose, or use a home area.
 - Mining is a daily job interest. Use `PlayerNpcEntity.isDailyJobActive(PlayerNpcInterest.MINING)` and `GatherStoneGoal.isMiningJobActive(...)` instead of checking the raw interest alone when a behavior should run only on a mining workday.
-- `GatherStoneGoal.isStoneSupplyPhaseActive(...)` is the central stone-work gate. It requires a pickaxe, prepared base state, and either an active mining job or the building stone-supply/build-material need path.
+- `GatherStoneGoal.isStoneSupplyPhaseActive(...)` is the central stone-work gate. It requires log supply to be met before stone work, requires a carried pickaxe, and then either allows pure mining without a saved home/base or requires the building prepared-base path for building-driven stone work.
 - Mining-interest NPCs may gather logs because `GatherLogsGoal` is gated for both building and mining. Keep this as support work for tools and torches, but do not let log support permanently suppress the active mining job.
+- `CraftBasicGearGoal` must not strand a pure miner after log gathering. It should reuse a reachable persisted temporary crafting table outside the normal five-block scan, clear stale/unreachable temporary table tags so a new table can be placed, and prefer a missing pickaxe before shovel work once the pure miner has met its log supply target.
 - `GatherStoneGoal` owns exposed stone cluster mining. It should mine from a reachable same-Y adjacent stand cell, a safe reachable descent, or a clearable near obstruction, and it must keep protected home/build/below-home volumes intact.
-- `DigDownForStoneGoal` is the opener when there is no nearby actionable stone target. It chooses an outside-home surface dig site, carves a walkable stair, and stops without cooldown once `GatherStoneGoal.hasNearbyStoneTarget(...)` can take over.
+- `DigDownForStoneGoal` is the opener when there is no nearby actionable stone target. Pure miners center the search around their current work area and do not create a home; building NPCs still choose outside-home dig sites. It carves a walkable stair using cardinal or diagonal horizontal offsets and stops without cooldown once `GatherStoneGoal.hasNearbyStoneTarget(...)` can take over.
 - On a pure mining job, `DigDownForStoneGoal` uses `MINING_JOB_DIG_BLOCKS` as its local work target instead of only chasing building stone supply.
-- `ExploreCaveOreGoal` handles cave-exposed coal, iron, and copper ore. It searches a bounded volume, prioritizes ore families, follows connected veins, checks reachable stand positions, may clear local ore-path obstructions, can place torches in low-light cave spots, and uses `oreMiningCooldown`.
-- `ReturnHomeGoal` is part of mining behavior because mining can leave the NPC underground. It should handle `returning from dig site`, surface recovery, local route fallback, route clearing, bounded pillaring, and upward escape requests instead of making exploration goals solve underground returns.
+- `ExploreCaveOreGoal` handles cave-exposed coal, iron, gold, and copper ore after log and stone supply goals are met. It searches a bounded volume, prioritizes ore families, follows connected veins, requires a reachable stand with ore line of sight or clearable cover, clears local ore-path obstructions with `ClearBlockAi`, can place torches in low-light cave spots, and uses `oreMiningCooldown`.
+- Pure miners request upward escape only for daytime log resupply when logs fall below the supply goal. Direct log gathering and log exploration should defer while a pure miner is underground at night. Building miners rely on the existing building home-duty/night-return path.
 
 Cave detection guidance:
 - Minecraft does not expose a simple runtime "is cave" flag or cave graph for entity AI. Generated cave carvers/noise caves affect blocks during world generation; normal AI code should infer cave-like conditions from the world state.
@@ -53,8 +54,10 @@ Reusable AI classes and utilities:
 
 Rules:
 - Keep mining mechanics in goals and reusable `entity.ai` helpers, not as large behavior blobs in `PlayerNpcEntity`.
+- Do not call `PlayerNpcHomeUtil.getOrCreateHome(...)` or `setHome(...)` from mining-only logic. Use `getHome(...)` only for protection/radius checks, and treat missing home as normal for pure miners.
 - Do not add ad hoc persistent-data cooldown tags. Add integer cooldown fields to `PlayerNpcEntity`, save/load them if persistent, and tick them through `tickAiCooldowns()`.
 - Mining, return, chase, flee, and work navigation speed must not exceed `1.0D`.
+- Do not compile or run Gradle/build verification unless the user explicitly asks for it. Use focused code inspection, log inspection, and targeted searches by default.
 - Do not let mining goals break protected home/build blocks. The return-home under-footprint recovery exception belongs to return rescue behavior, not ordinary mining.
 - If mining behavior changes, update the matching `.codex/knowledge` note. If a new mining goal is added, add a goal note under `.codex/knowledge/goals/`.
 

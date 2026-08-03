@@ -19,7 +19,7 @@ Project knowledge to consult first:
 - .codex/knowledge/goals/*.md
 
 Collaboration rules:
-- The user wants direct implementation for concrete code requests. Read the relevant files, patch the code, update knowledge when behavior changes, and verify once at the end.
+- The user wants direct implementation for concrete code requests. Read the relevant files, patch the code, update knowledge when behavior changes, and use focused code/log inspection for checks unless they explicitly ask for build verification.
 - Keep changes scoped to Player NPC behavior unless the user explicitly asks for broader mod behavior.
 - Preserve user changes and do not revert unrelated files.
 - Explain important tradeoffs briefly, but do not stop at a proposal when the request clearly asks for a code change.
@@ -38,8 +38,8 @@ Movement rule:
 - Eating movement is slower and should not sprint.
 
 Compile rule:
-- Compile only once at the end of a request after the patches are complete.
-- Do not run repeated compile loops while still editing. Use targeted searches and file reads during development, then run the final Gradle verification once.
+- Do not compile or run Gradle/build verification unless the user explicitly asks for it.
+- Use targeted searches, file reads, log inspection, and small reasoning checks during development.
 
 Knowledge rule:
 - If a code change changes Player NPC behavior, update the matching `.codex/knowledge` note.

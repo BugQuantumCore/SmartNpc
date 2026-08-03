@@ -1,11 +1,11 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
-import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -21,9 +21,12 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 public class DigDownForStoneGoal extends Goal {
     private static final int MIN_HOME_DISTANCE = 18;
@@ -39,7 +42,11 @@ public class DigDownForStoneGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 18;
     private static final int FAILED_WALK_COOLDOWN_TICKS = 20 * 2;
     private static final int MINING_JOB_DIG_BLOCKS = 16;
+    private static final int MINING_PROSPECT_COOLDOWN_TICKS = 20;
+    private static final int ORE_SEARCH_INTERVAL_TICKS = 20 * 2;
     private static final int MAX_DIG_SITE_WALK_TICKS = 20 * 25;
+    private static final int LOCAL_PROSPECT_STUCK_TICKS = 20 * 2;
+    private static final int LOCAL_PROSPECT_CLEAR_STUCK_TICKS = 20 * 3;
     private static final int MAX_DIG_SITE_SAFE_DROP_BLOCKS = 3;
     private static final int CLEAR_OBSTRUCTION_TICKS = 24;
     private static final double CLEAR_OBSTRUCTION_DISTANCE_SQR = 5.0D * 5.0D;
@@ -50,17 +57,25 @@ public class DigDownForStoneGoal extends Goal {
     private final ClearBlockAi clearBlockAi;
     private final PathNavigationAi pathNavigationAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
+    private final Set<BlockPos> skippedClearTargets = new HashSet<>();
     private BlockPos digOrigin;
     private BlockPos targetPos;
-    private Direction digDirection;
+    private BlockPos digStepOffset;
+    private BlockPos lastLocalProspectWalkPos;
+    private BlockPos activeClearTarget;
     private int goalTicks;
     private int repathTicks;
     private int digSiteWalkTicks;
     private int stairSteps;
     private int stoneBlocksMined;
     private int stoneBlocksNeeded;
+    private int nextProspectCheckTick;
+    private int oreSearchTicks;
+    private int localProspectStillTicks;
+    private int activeClearTargetTicks;
     private boolean minedStone;
     private boolean foundGatherStoneTarget;
+    private boolean prospectingOre;
     private boolean reachedDigSite;
     private boolean finished;
 
@@ -84,25 +99,40 @@ public class DigDownForStoneGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
-                || this.playerNpc.getGatherCooldown() > 0) {
+                || this.playerNpc.getGatherCooldown() > 0
+                || MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
             return false;
         }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
         boolean miningJob = GatherStoneGoal.isMiningJobActive(this.playerNpc);
-        if (this.shouldStayHomeForWeather(serverLevel) && !miningJob
+        boolean stoneSupplyActive = GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel);
+        boolean miningProspecting = this.isMiningProspecting(serverLevel);
+        if ((this.shouldStayHomeForWeather(serverLevel) && !miningJob)
                 || !this.hasPickaxe()
-                || !GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
-                || GatherStoneGoal.hasNearbyStoneTarget(this.playerNpc, serverLevel)) {
+                || (!stoneSupplyActive && !miningProspecting)
+                || (stoneSupplyActive && GatherStoneGoal.hasNearbyStoneTarget(this.playerNpc, serverLevel))) {
             return false;
         }
+        if (miningProspecting) {
+            if (this.playerNpc.tickCount < this.nextProspectCheckTick) {
+                return false;
+            }
+            this.nextProspectCheckTick = this.playerNpc.tickCount + ORE_SEARCH_INTERVAL_TICKS;
+            if (this.playerNpc.getOreMiningCooldown() <= 0
+                    && ExploreCaveOreGoal.hasNearbyOreTarget(this.playerNpc, serverLevel)) {
+                return false;
+            }
+        }
+
+        this.prospectingOre = miningProspecting;
 
         this.digOrigin = this.findDigOrigin(serverLevel);
         if (this.digOrigin == null) {
             return false;
         }
-        this.digDirection = this.chooseDigDirection();
+        this.digStepOffset = this.chooseDigStepOffset();
         return true;
     }
 
@@ -111,16 +141,23 @@ public class DigDownForStoneGoal extends Goal {
         return !this.finished
                 && this.goalTicks < MAX_GOAL_TICKS
                 && this.stairSteps < MAX_STAIR_STEPS
-                && this.stoneBlocksMined < this.stoneBlocksNeeded
+                && (this.prospectingOre || this.stoneBlocksMined < this.stoneBlocksNeeded)
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
                 && this.playerNpc.getTarget() == null
                 && this.playerNpc.getUpwardEscapeTarget() == null
                 && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
-                && GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
+                && (GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
+                || this.isMiningProspecting(serverLevel))
                 && (!this.shouldStayHomeForWeather(serverLevel) || GatherStoneGoal.isMiningJobActive(this.playerNpc))
+                && !MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
                 && this.hasPreparedBaseForStone(serverLevel);
+    }
+
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
     }
 
     @Override
@@ -130,15 +167,25 @@ public class DigDownForStoneGoal extends Goal {
         this.digSiteWalkTicks = 0;
         this.stairSteps = 0;
         this.stoneBlocksMined = 0;
+        this.oreSearchTicks = ORE_SEARCH_INTERVAL_TICKS;
+        this.activeClearTargetTicks = 0;
         this.stoneBlocksNeeded = GatherStoneGoal.isMiningJobActive(this.playerNpc)
                 ? MINING_JOB_DIG_BLOCKS
                 : Math.max(1, this.playerNpc.getCobblestoneSupplyTarget() - this.countStone());
         this.targetPos = null;
+        this.lastLocalProspectWalkPos = null;
+        this.activeClearTarget = null;
+        this.skippedClearTargets.clear();
         this.minedStone = false;
         this.foundGatherStoneTarget = false;
         this.reachedDigSite = false;
         this.finished = false;
-        this.playerNpc.setCurrentAiState("ai.player_npc.digging_down_for_stone");
+        if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            this.prospectingOre = this.isMiningProspecting(serverLevel);
+        }
+        this.playerNpc.setCurrentAiState(this.prospectingOre
+                ? "ai.player_npc.prospecting_ore"
+                : "ai.player_npc.digging_down_for_stone");
         this.updateWalkDetail();
         if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
             this.moveTo(serverLevel, this.digOrigin);
@@ -147,19 +194,21 @@ public class DigDownForStoneGoal extends Goal {
 
     @Override
     public void tick() {
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || this.digOrigin == null || this.digDirection == null) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || this.digOrigin == null || this.digStepOffset == null) {
             this.finished = true;
             return;
         }
 
         this.goalTicks++;
-        if (this.shouldYieldToGatherStone(serverLevel)) {
+        if (this.shouldYieldToHigherPriorityMiningTarget(serverLevel)) {
             this.foundGatherStoneTarget = true;
             this.finished = true;
             this.clearBlockAi.stop();
             this.breakingBlockAi.stop();
             this.playerNpc.getNavigation().stop();
-            this.playerNpc.setCurrentAiDetail("stone exposed for gathering");
+            this.playerNpc.setCurrentAiDetail(this.prospectingOre
+                    ? "ore found for mining"
+                    : "stone exposed for gathering");
             return;
         }
 
@@ -167,15 +216,29 @@ public class DigDownForStoneGoal extends Goal {
             return;
         }
 
-        if (!this.hasReached(this.digOrigin)) {
+        if (!this.hasReachedDigOrigin(serverLevel)) {
             this.digSiteWalkTicks++;
             this.updateWalkDetail();
             if (this.digSiteWalkTicks > MAX_DIG_SITE_WALK_TICKS) {
+                if (this.prospectingOre) {
+                    this.recoverFromProspectRouteFailure();
+                    return;
+                }
                 this.finished = true;
+                return;
+            }
+            if (this.tryMoveToLocalProspectingOrigin(serverLevel)) {
                 return;
             }
             if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
                 if (!this.moveTo(serverLevel, this.digOrigin)) {
+                    if (this.prospectingOre) {
+                        if (!this.startClearingDigRoute(serverLevel)) {
+                            this.recoverFromProspectRouteFailure();
+                        }
+                        this.repathTicks = REPATH_INTERVAL_TICKS;
+                        return;
+                    }
                     if (this.shouldAbandonUnreachableInitialSite() || !this.startClearingDigRoute(serverLevel)) {
                         this.finished = true;
                     }
@@ -208,8 +271,12 @@ public class DigDownForStoneGoal extends Goal {
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
         if (!this.playerNpc.level().isClientSide) {
+            boolean miningProspecting = this.playerNpc.level() instanceof ServerLevel serverLevel
+                    && this.isMiningProspecting(serverLevel);
             int cooldown = this.foundGatherStoneTarget
                     ? 0
+                    : miningProspecting
+                    ? MINING_PROSPECT_COOLDOWN_TICKS
                     : this.minedStone
                     ? COOLDOWN_TICKS
                     : this.reachedDigSite
@@ -221,24 +288,34 @@ public class DigDownForStoneGoal extends Goal {
         this.playerNpc.setCurrentAiDetail("");
         this.digOrigin = null;
         this.targetPos = null;
-        this.digDirection = null;
+        this.digStepOffset = null;
+        this.lastLocalProspectWalkPos = null;
+        this.activeClearTarget = null;
+        this.skippedClearTargets.clear();
         this.goalTicks = 0;
         this.repathTicks = 0;
         this.digSiteWalkTicks = 0;
         this.stairSteps = 0;
+        this.oreSearchTicks = 0;
+        this.localProspectStillTicks = 0;
+        this.activeClearTargetTicks = 0;
         this.minedStone = false;
         this.foundGatherStoneTarget = false;
+        this.prospectingOre = false;
         this.reachedDigSite = false;
         this.finished = false;
     }
 
     private BlockPos findDigOrigin(ServerLevel serverLevel) {
-        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
-        if (home.isEmpty()) {
-            return null;
+        if (this.prospectingOre) {
+            BlockPos localOrigin = this.findCurrentProspectingOrigin(serverLevel);
+            if (localOrigin != null) {
+                return localOrigin;
+            }
         }
 
-        BlockPos center = PlayerNpcHomeUtil.center(home.get());
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
+        BlockPos center = home.map(PlayerNpcHomeUtil::center).orElseGet(() -> this.playerNpc.blockPosition().immutable());
         List<BlockPos> candidates = new ArrayList<>();
         for (int x = center.getX() - DIG_SITE_MAX_RADIUS; x <= center.getX() + DIG_SITE_MAX_RADIUS; x++) {
             for (int z = center.getZ() - DIG_SITE_MAX_RADIUS; z <= center.getZ() + DIG_SITE_MAX_RADIUS; z++) {
@@ -268,21 +345,118 @@ public class DigDownForStoneGoal extends Goal {
         return null;
     }
 
-    private Direction chooseDigDirection() {
-        Direction[] directions = Direction.Plane.HORIZONTAL.stream().toArray(Direction[]::new);
-        return directions[this.playerNpc.getRandom().nextInt(directions.length)];
+    private BlockPos findCurrentProspectingOrigin(ServerLevel serverLevel) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.isValidLocalProspectingOrigin(serverLevel, feet)) {
+            return feet.immutable();
+        }
+
+        List<BlockPos> candidates = new ArrayList<>();
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            candidates.add(feet.relative(direction));
+            candidates.add(feet.relative(direction).below());
+            candidates.add(feet.relative(direction).above());
+        }
+
+        candidates.sort(Comparator.comparingDouble(feet::distSqr));
+        for (BlockPos candidate : candidates) {
+            BlockPos immutable = candidate.immutable();
+            if (!this.isValidLocalProspectingOrigin(serverLevel, immutable)) {
+                continue;
+            }
+            if (feet.distSqr(immutable) <= LOCAL_STEP_DISTANCE_SQR
+                    || this.pathNavigationAi.canReachOrSafelyDropTo(serverLevel, immutable, MAX_DIG_SITE_SAFE_DROP_BLOCKS)) {
+                return immutable;
+            }
+        }
+        return null;
+    }
+
+    private boolean isValidLocalProspectingOrigin(ServerLevel serverLevel, BlockPos pos) {
+        return this.canStandAt(serverLevel, pos)
+                && !this.isProtectedHomeBlock(pos)
+                && this.isInsideResourceRadius(pos)
+                && (this.isAwayFromHome(pos) || !serverLevel.canSeeSky(pos.above()));
+    }
+
+    private BlockPos chooseDigStepOffset() {
+        List<BlockPos> offsets = this.digStepOffsets();
+        return offsets.get(this.playerNpc.getRandom().nextInt(offsets.size()));
+    }
+
+    private List<BlockPos> digStepOffsets() {
+        List<BlockPos> offsets = new ArrayList<>();
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                offsets.add(new BlockPos(dx, 0, dz));
+            }
+        }
+        return offsets;
     }
 
     private BlockPos findNextDigTarget(ServerLevel serverLevel) {
-        BlockPos feet = this.playerNpc.blockPosition();
-        BlockPos forwardHead = feet.relative(this.digDirection);
-        BlockPos forwardFeet = forwardHead.below();
+        if (this.prospectingOre) {
+            return this.findNextProspectingDigTarget(serverLevel);
+        }
 
-        if (this.shouldYieldToGatherStone(serverLevel)) {
+        BlockPos feet = this.playerNpc.blockPosition();
+
+        if (this.shouldYieldToHigherPriorityMiningTarget(serverLevel)) {
             this.foundGatherStoneTarget = true;
             this.finished = true;
             return null;
         }
+
+        return this.findDigTargetForOffset(serverLevel, feet, this.digStepOffset);
+    }
+
+    private BlockPos findNextProspectingDigTarget(ServerLevel serverLevel) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.shouldYieldToHigherPriorityMiningTarget(serverLevel)) {
+            this.foundGatherStoneTarget = true;
+            this.finished = true;
+            return null;
+        }
+
+        List<BlockPos> offsets = this.digStepOffsets();
+        if (this.digStepOffset != null && offsets.remove(this.digStepOffset)) {
+            BlockPos originBefore = this.digOrigin;
+            BlockPos target = this.findDigTargetForOffset(serverLevel, feet, this.digStepOffset);
+            if (target != null || this.originChanged(originBefore)) {
+                return target;
+            }
+        }
+
+        while (!offsets.isEmpty()) {
+            BlockPos offset = offsets.remove(this.playerNpc.getRandom().nextInt(offsets.size()));
+            BlockPos originBefore = this.digOrigin;
+            BlockPos target = this.findDigTargetForOffset(serverLevel, feet, offset);
+            if (target != null || this.originChanged(originBefore)) {
+                this.digStepOffset = offset;
+                return target;
+            }
+        }
+
+        BlockPos below = feet.below();
+        if (this.isDiggable(serverLevel, below, serverLevel.getBlockState(below))) {
+            return below.immutable();
+        }
+        if (this.canStandAt(serverLevel, below)) {
+            this.advanceProspectingOrigin(serverLevel, below, this.chooseDigStepOffset());
+        }
+        return null;
+    }
+
+    private BlockPos findDigTargetForOffset(ServerLevel serverLevel, BlockPos feet, BlockPos offset) {
+        if (offset == null) {
+            return null;
+        }
+
+        BlockPos forwardHead = feet.offset(offset);
+        BlockPos forwardFeet = forwardHead.below();
 
         if (this.isDiggable(serverLevel, forwardHead, serverLevel.getBlockState(forwardHead))) {
             return forwardHead.immutable();
@@ -291,14 +465,28 @@ public class DigDownForStoneGoal extends Goal {
             return forwardFeet.immutable();
         }
         if (this.canStandAt(serverLevel, forwardFeet)) {
-            this.digOrigin = forwardFeet.immutable();
-            this.reachedDigSite = false;
-            this.digSiteWalkTicks = 0;
-            this.stairSteps++;
-            this.moveTo(serverLevel, this.digOrigin);
+            this.advanceProspectingOrigin(serverLevel, forwardFeet, offset);
             return null;
         }
         return null;
+    }
+
+    private void advanceProspectingOrigin(ServerLevel serverLevel, BlockPos origin, BlockPos offset) {
+        this.digOrigin = origin.immutable();
+        this.digStepOffset = offset == null ? this.chooseDigStepOffset() : offset.immutable();
+        this.reachedDigSite = false;
+        this.digSiteWalkTicks = 0;
+        this.resetLocalProspectingMovement();
+        this.skippedClearTargets.clear();
+        this.stairSteps++;
+        this.moveTo(serverLevel, this.digOrigin);
+    }
+
+    private boolean originChanged(BlockPos previousOrigin) {
+        if (previousOrigin == null) {
+            return this.digOrigin != null;
+        }
+        return !previousOrigin.equals(this.digOrigin);
     }
 
     private void tickMineTarget(ServerLevel serverLevel) {
@@ -333,7 +521,9 @@ public class DigDownForStoneGoal extends Goal {
                 this.targetPos,
                 targetState -> this.isDiggable(serverLevel, minedPos, targetState),
                 requiredMineTicks,
-                targetIsStone ? "mining dig-site stone" : "digging stone search path"
+                this.prospectingOre
+                        ? "digging ore search path"
+                        : targetIsStone ? "mining dig-site stone" : "digging stone search path"
         );
         if (result == BreakingBlockAi.TickResult.RUNNING) {
             return;
@@ -382,13 +572,52 @@ public class DigDownForStoneGoal extends Goal {
             return false;
         }
 
+        BlockPos clearTarget = this.clearBlockAi.targetPos();
+        this.trackActiveClearTarget(clearTarget);
         ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
         if (result == ClearBlockAi.TickResult.RUNNING) {
+            if (this.prospectingOre && this.activeClearTargetTicks >= LOCAL_PROSPECT_CLEAR_STUCK_TICKS) {
+                this.abortSlowProspectClearTarget(clearTarget);
+                return false;
+            }
             return true;
         }
 
+        if (result == ClearBlockAi.TickResult.FAILED && clearTarget != null) {
+            this.skippedClearTargets.add(clearTarget.immutable());
+        }
+        this.activeClearTarget = null;
+        this.activeClearTargetTicks = 0;
         this.repathTicks = 0;
         return false;
+    }
+
+    private void trackActiveClearTarget(BlockPos clearTarget) {
+        if (clearTarget == null) {
+            this.activeClearTarget = null;
+            this.activeClearTargetTicks = 0;
+            return;
+        }
+
+        if (!clearTarget.equals(this.activeClearTarget)) {
+            this.activeClearTarget = clearTarget.immutable();
+            this.activeClearTargetTicks = 0;
+        }
+        this.activeClearTargetTicks++;
+    }
+
+    private void abortSlowProspectClearTarget(BlockPos clearTarget) {
+        if (clearTarget != null) {
+            this.skippedClearTargets.add(clearTarget.immutable());
+            this.playerNpc.clearBlockBreakProgress(clearTarget);
+        }
+        this.clearBlockAi.stop();
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
+        this.activeClearTarget = null;
+        this.activeClearTargetTicks = 0;
+        this.repathTicks = 0;
+        this.recoverFromProspectRouteFailure();
     }
 
     private boolean startClearingDigRoute(ServerLevel serverLevel) {
@@ -396,20 +625,19 @@ public class DigDownForStoneGoal extends Goal {
             return false;
         }
 
-        List<BlockPos> candidates = new ArrayList<>();
         BlockPos feet = this.playerNpc.blockPosition();
-        addBodyColumn(candidates, feet);
-        addBodyColumn(candidates, this.digOrigin);
+        List<BlockPos> candidates = new ArrayList<>(ClearBlockAi.gatherObstructionCandidates(feet, this.digOrigin, this.digOrigin));
         addLineCandidates(candidates, feet.above(), this.digOrigin.above(), 12);
         addLineCandidates(candidates, feet, this.digOrigin, 12);
         addLocalRouteCandidates(candidates, feet, this.digOrigin);
-        candidates.removeIf(pos -> this.isProtectedHomeBlock(pos));
+        candidates.removeIf(pos -> this.isProtectedHomeBlock(pos)
+                || this.skippedClearTargets.contains(pos.immutable()));
 
         return this.clearBlockAi.startNearest(
                 serverLevel,
                 candidates,
                 this::isClearablePathState,
-                "clearing dig path",
+                this.prospectingOre ? "clearing ore prospect path" : "clearing dig path",
                 CLEAR_OBSTRUCTION_TICKS,
                 CLEAR_OBSTRUCTION_DISTANCE_SQR
         );
@@ -436,18 +664,151 @@ public class DigDownForStoneGoal extends Goal {
         return false;
     }
 
+    private boolean tryMoveToLocalProspectingOrigin(ServerLevel serverLevel) {
+        if (!this.prospectingOre
+                || this.digOrigin == null
+                || this.playerNpc.blockPosition().distSqr(this.digOrigin) > LOCAL_STEP_DISTANCE_SQR
+                || !this.isValidLocalProspectingOrigin(serverLevel, this.digOrigin)) {
+            return false;
+        }
+
+        boolean stalled = this.hasLocalProspectingMovementStalled();
+        if ((this.hasBlockedLocalProspectingRoute(serverLevel) || stalled)
+                && this.startClearingDigRoute(serverLevel)) {
+            this.resetLocalProspectingMovement();
+            return true;
+        }
+        if (stalled) {
+            this.recoverFromProspectRouteFailure();
+            return true;
+        }
+
+        this.playerNpc.getNavigation().stop();
+        this.playerNpc.getLookControl().setLookAt(
+                this.digOrigin.getX() + 0.5D,
+                this.digOrigin.getY(),
+                this.digOrigin.getZ() + 0.5D,
+                30.0F,
+                30.0F
+        );
+        this.playerNpc.getMoveControl().setWantedPosition(
+                this.digOrigin.getX() + 0.5D,
+                this.digOrigin.getY(),
+                this.digOrigin.getZ() + 0.5D,
+                this.speed
+        );
+        return true;
+    }
+
+    private boolean hasBlockedLocalProspectingRoute(ServerLevel serverLevel) {
+        if (this.digOrigin == null) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.hasBlockingBodyColumn(serverLevel, feet)
+                || this.hasBlockingBodyColumn(serverLevel, this.digOrigin)) {
+            return true;
+        }
+
+        int stepX = Integer.compare(this.digOrigin.getX(), feet.getX());
+        int stepZ = Integer.compare(this.digOrigin.getZ(), feet.getZ());
+        if (stepX == 0 || stepZ == 0) {
+            return false;
+        }
+
+        return this.hasBlockingBodyColumn(serverLevel, feet.offset(stepX, 0, 0))
+                || this.hasBlockingBodyColumn(serverLevel, feet.offset(0, 0, stepZ));
+    }
+
+    private boolean hasBlockingBodyColumn(ServerLevel serverLevel, BlockPos feet) {
+        return !serverLevel.getBlockState(feet).getCollisionShape(serverLevel, feet).isEmpty()
+                || !serverLevel.getBlockState(feet.above()).getCollisionShape(serverLevel, feet.above()).isEmpty();
+    }
+
+    private boolean hasLocalProspectingMovementStalled() {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (!feet.equals(this.lastLocalProspectWalkPos)) {
+            this.lastLocalProspectWalkPos = feet.immutable();
+            this.localProspectStillTicks = 0;
+            return false;
+        }
+
+        return ++this.localProspectStillTicks >= LOCAL_PROSPECT_STUCK_TICKS;
+    }
+
+    private void resetLocalProspectingMovement() {
+        this.lastLocalProspectWalkPos = null;
+        this.localProspectStillTicks = 0;
+    }
+
+    private void recoverFromProspectRouteFailure() {
+        if (!this.prospectingOre || !(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            this.finished = true;
+            return;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (!this.isValidLocalProspectingOrigin(serverLevel, feet)) {
+            this.finished = true;
+            return;
+        }
+
+        this.playerNpc.clearBlockBreakProgress(this.targetPos);
+        this.clearBlockAi.stop();
+        this.breakingBlockAi.stop();
+        this.playerNpc.getNavigation().stop();
+        this.targetPos = null;
+        this.digOrigin = feet.immutable();
+        this.digStepOffset = this.chooseDigStepOffset();
+        this.reachedDigSite = true;
+        this.digSiteWalkTicks = 0;
+        this.repathTicks = 0;
+        this.resetLocalProspectingMovement();
+        this.playerNpc.setCurrentAiDetail("prospecting nearby ore");
+    }
+
     private boolean shouldAbandonUnreachableInitialSite() {
         return this.stairSteps == 0
                 && this.digOrigin != null
                 && this.playerNpc.blockPosition().distSqr(this.digOrigin) > LOCAL_STEP_DISTANCE_SQR;
     }
 
-    private boolean shouldYieldToGatherStone(ServerLevel serverLevel) {
+    private boolean shouldYieldToHigherPriorityMiningTarget(ServerLevel serverLevel) {
+        if (this.prospectingOre) {
+            if (this.playerNpc.getOreMiningCooldown() > 0) {
+                return false;
+            }
+            if (this.oreSearchTicks-- > 0) {
+                return false;
+            }
+            this.oreSearchTicks = ORE_SEARCH_INTERVAL_TICKS;
+            return ExploreCaveOreGoal.hasNearbyOreTarget(this.playerNpc, serverLevel);
+        }
+
         return GatherStoneGoal.hasNearbyStoneTarget(this.playerNpc, serverLevel);
     }
 
     private boolean hasReached(BlockPos pos) {
         return pos != null && this.playerNpc.blockPosition().equals(pos);
+    }
+
+    private boolean hasReachedDigOrigin(ServerLevel serverLevel) {
+        if (this.hasReached(this.digOrigin)) {
+            return true;
+        }
+        if (!this.prospectingOre || this.digOrigin == null) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (feet.distSqr(this.digOrigin) > LOCAL_STEP_DISTANCE_SQR
+                || !this.isValidLocalProspectingOrigin(serverLevel, feet)) {
+            return false;
+        }
+
+        this.digOrigin = feet.immutable();
+        return true;
     }
 
     private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
@@ -457,7 +818,7 @@ public class DigDownForStoneGoal extends Goal {
     private boolean isAwayFromHome(BlockPos pos) {
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
         if (home.isEmpty()) {
-            return false;
+            return true;
         }
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
         BlockPos homeCenter = PlayerNpcHomeUtil.center(homeArea);
@@ -473,6 +834,11 @@ public class DigDownForStoneGoal extends Goal {
     }
 
     private boolean hasPreparedBaseForStone(ServerLevel serverLevel) {
+        if (GatherStoneGoal.isMiningJobActive(this.playerNpc)
+                && !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
+            return true;
+        }
+
         return PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent()
                 && !TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel);
     }
@@ -482,9 +848,15 @@ public class DigDownForStoneGoal extends Goal {
                 && (serverLevel.isNight() || serverLevel.isThundering());
     }
 
+    private boolean isMiningProspecting(ServerLevel serverLevel) {
+        return GatherStoneGoal.isMiningJobActive(this.playerNpc)
+                && !this.playerNpc.shouldPrioritizeLogGathering()
+                && !this.playerNpc.shouldPrioritizeCobblestoneGathering()
+                && this.hasPreparedBaseForStone(serverLevel);
+    }
+
     private boolean hasPickaxe() {
-        return this.playerNpc.getMainHandItem().getItem() instanceof PickaxeItem
-                || InventoryUtils.hasItem(this.playerNpc, stack -> stack.getItem() instanceof PickaxeItem);
+        return this.playerNpc.hasCarriedTool(PickaxeItem.class);
     }
 
     private int countStone() {
@@ -501,10 +873,14 @@ public class DigDownForStoneGoal extends Goal {
 
     private void updateWalkDetail() {
         if (this.digOrigin == null) {
-            this.playerNpc.setCurrentAiDetail("walking to dig site");
+            this.playerNpc.setCurrentAiDetail(this.prospectingOre
+                    ? "walking to ore prospect"
+                    : "walking to dig site");
             return;
         }
-        this.playerNpc.setCurrentAiDetail("walking to dig site @ "
+        this.playerNpc.setCurrentAiDetail((this.prospectingOre
+                ? "walking to ore prospect @ "
+                : "walking to dig site @ ")
                 + this.digOrigin.getX() + " "
                 + this.digOrigin.getY() + " "
                 + this.digOrigin.getZ());
@@ -516,6 +892,7 @@ public class DigDownForStoneGoal extends Goal {
         }
         candidates.add(feet);
         candidates.add(feet.above());
+        candidates.add(feet.above(2));
     }
 
     private static void addLocalRouteCandidates(List<BlockPos> candidates, BlockPos feet, BlockPos target) {

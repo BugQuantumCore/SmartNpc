@@ -2,17 +2,21 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.compat.epicfight.EpicFight;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
+import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.ItemTags;
+import net.minecraft.util.Mth;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
@@ -27,6 +31,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
+import net.minecraft.world.phys.AABB;
 import net.minecraftforge.fml.ModList;
 
 import java.util.ArrayDeque;
@@ -56,6 +61,12 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int PILLAR_PLAN_RETRY_TICKS = 20;
     private static final int PILLAR_SURFACE_SCAN_UP = 96;
     private static final double PILLAR_BASE_REACHED_SQR = 1.2D * 1.2D;
+    private static final int PILLAR_STUCK_MIN_TICKS = 20 * 2;
+    private static final int PILLAR_STUCK_RECHECK_TICKS = 20 * 5;
+    private static final double PILLAR_CENTER_EPSILON = 0.05D;
+    private static final double PILLAR_COLLISION_BLOCKER_PADDING = 0.08D;
+    private static final double PILLAR_COLLISION_TOP_PADDING = 0.45D;
+    private static final double PILLAR_CENTER_BLOCKER_PADDING = 0.04D;
     private static final int ROUTE_NAV_REPATH_TICKS = 10;
     private static final int ROUTE_NAV_MAX_FAILED_TICKS = 20 * 4;
     private static final int ROUTE_NAV_HORIZONTAL_RADIUS = 18;
@@ -68,6 +79,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
+    private final ToolAi toolAi;
+    private final BreakingBlockAi breakingBlockAi;
     private EscapeMode mode = EscapeMode.NONE;
     private BlockPos placePos;
     private BlockPos minePos;
@@ -76,6 +89,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private BlockPos climbTargetPos;
     private BlockPos pillarBasePos;
     private BlockPos pillarClearPos;
+    private BlockPos pillarStuckWatchPos;
     private BlockPos exitClearPos;
     private int pillarExitY;
     private ItemStack previousMainHand = ItemStack.EMPTY;
@@ -91,13 +105,18 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private int pillarsPlaced;
     private int nextPillarPlanTick;
     private int failedPillarPlaceAttempts;
+    private int pillarStuckWatchStartTick;
+    private int nextPillarStuckRecoveryTick;
+    private int pillarStuckWatchPillarsPlaced;
     private boolean usingTemporaryPickaxe;
     private boolean usingTemporaryBlock;
     private boolean finished;
 
     public EscapeHoleWithBlockGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.toolAi = new ToolAi(playerNpc);
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
+        this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.JUMP, Flag.LOOK));
     }
 
@@ -285,6 +304,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.failedPathTicks = 0;
         this.pillarsPlaced = 0;
         this.failedPillarPlaceAttempts = 0;
+        this.resetPillarStuckWatch();
         this.finished = false;
         this.previousMainHand = ItemStack.EMPTY;
         this.previousPillarMainHand = ItemStack.EMPTY;
@@ -339,6 +359,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.playerNpc.clearBlockBreakProgress(this.minePos);
         this.playerNpc.clearBlockBreakProgress(this.pillarClearPos);
         this.playerNpc.clearBlockBreakProgress(this.exitClearPos);
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
         this.restorePreviousMainHand();
         this.restorePreviousPillarMainHand();
         if (!this.playerNpc.level().isClientSide) {
@@ -594,6 +616,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         if (this.placePos == null) {
+            this.resetPillarStuckWatch();
             if (!this.shouldContinuePillaring(serverLevel)) {
                 if (this.tryContinueRequestedRoutePillar(serverLevel)) {
                     return;
@@ -611,6 +634,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return;
         }
 
+        if (this.tryRecoverStuckPillar(serverLevel)) {
+            return;
+        }
+
         if (this.placeDelayTicks > 0) {
             this.placeDelayTicks--;
             return;
@@ -618,7 +645,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         this.placeWaitTicks++;
         if (this.placeWaitTicks > MAX_PLACE_WAIT_TICKS) {
-            BlockPos obstruction = this.findPillarObstruction(serverLevel, this.playerNpc.blockPosition());
+            BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, this.playerNpc.blockPosition());
             if (obstruction != null) {
                 this.startPillarClearance(serverLevel, obstruction);
                 return;
@@ -640,6 +667,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         if (!this.hasPillarPlacementClearance()) {
+            BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, this.playerNpc.blockPosition());
+            if (obstruction != null && this.placeWaitTicks >= PILLAR_STUCK_MIN_TICKS) {
+                this.startPillarClearance(serverLevel, obstruction);
+                return;
+            }
             this.lookDownAt(this.placePos);
             return;
         }
@@ -660,6 +692,19 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return;
         }
 
+        if (!this.canPlacePillarWithoutClipping(serverLevel, this.placePos, blockItem.getBlock().defaultBlockState())) {
+            BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, this.playerNpc.blockPosition());
+            if (obstruction != null) {
+                this.startPillarClearance(serverLevel, obstruction);
+                return;
+            }
+            if (this.tryRecoverPillarPosition(serverLevel, this.playerNpc.blockPosition())) {
+                return;
+            }
+            this.finished = true;
+            return;
+        }
+
         this.lookDownAt(this.placePos);
         if (!this.placingBlockAi.placeHeldBlock(serverLevel, this.placePos, blockItem.getBlock().defaultBlockState())) {
             this.finished = true;
@@ -671,7 +716,163 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.placePos = null;
         this.placeDelayTicks = 0;
         this.placeWaitTicks = 0;
+        this.resetPillarStuckWatch();
         this.updatePillarDetail();
+    }
+
+    private boolean tryRecoverStuckPillar(ServerLevel serverLevel) {
+        if (this.placePos == null || this.pillarClearPos != null) {
+            this.resetPillarStuckWatch();
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.pillarStuckWatchPos == null
+                || !this.pillarStuckWatchPos.equals(feet)
+                || this.pillarStuckWatchPillarsPlaced != this.pillarsPlaced) {
+            this.pillarStuckWatchPos = feet.immutable();
+            this.pillarStuckWatchPillarsPlaced = this.pillarsPlaced;
+            this.pillarStuckWatchStartTick = this.playerNpc.tickCount;
+            this.nextPillarStuckRecoveryTick = this.playerNpc.tickCount + PILLAR_STUCK_MIN_TICKS;
+            return false;
+        }
+
+        if (this.playerNpc.tickCount - this.pillarStuckWatchStartTick < PILLAR_STUCK_MIN_TICKS
+                || this.playerNpc.tickCount < this.nextPillarStuckRecoveryTick) {
+            return false;
+        }
+
+        this.nextPillarStuckRecoveryTick = this.playerNpc.tickCount + PILLAR_STUCK_RECHECK_TICKS;
+        BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, feet);
+        if (obstruction != null) {
+            this.startPillarClearance(serverLevel, obstruction);
+            return true;
+        }
+
+        return this.tryRecoverPillarPosition(serverLevel, feet);
+    }
+
+    private BlockPos findPillarRecoveryObstruction(ServerLevel serverLevel, BlockPos feet) {
+        BlockPos obstruction = this.findPillarObstruction(serverLevel, feet);
+        if (obstruction != null) {
+            return obstruction;
+        }
+
+        obstruction = this.findCurrentPillarCollisionBlocker(serverLevel);
+        if (obstruction != null) {
+            return obstruction;
+        }
+
+        return this.findCenteredPillarCollisionBlocker(serverLevel);
+    }
+
+    private boolean tryRecoverPillarPosition(ServerLevel serverLevel, BlockPos feet) {
+        if (this.tryCenterOnPillarBase(serverLevel)) {
+            return true;
+        }
+
+        return this.tryMoveToAlternatePillarBase(serverLevel, feet);
+    }
+
+    private boolean tryCenterOnPillarBase(ServerLevel serverLevel) {
+        if (this.placePos == null) {
+            return false;
+        }
+
+        double targetX = this.placePos.getX() + 0.5D;
+        double targetZ = this.placePos.getZ() + 0.5D;
+        double dx = targetX - this.playerNpc.getX();
+        double dz = targetZ - this.playerNpc.getZ();
+        if (Math.abs(dx) <= PILLAR_CENTER_EPSILON && Math.abs(dz) <= PILLAR_CENTER_EPSILON) {
+            return false;
+        }
+
+        AABB centeredBox = this.playerNpc.getBoundingBox().move(dx, 0.0D, dz);
+        if (!PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, centeredBox)) {
+            return false;
+        }
+
+        double motionY = Math.max(0.0D, this.playerNpc.getDeltaMovement().y);
+        this.playerNpc.setPos(targetX, this.playerNpc.getY(), targetZ);
+        this.playerNpc.setDeltaMovement(0.0D, motionY, 0.0D);
+        this.playerNpc.fallDistance = 0.0F;
+        this.placeDelayTicks = PLACE_DELAY_TICKS;
+        this.placeWaitTicks = 0;
+        this.playerNpc.getNavigation().stop();
+        this.lookDownAt(this.placePos);
+        if (this.playerNpc.onGround()) {
+            this.playerNpc.shortPillarJump();
+        }
+        this.resetPillarStuckWatch();
+        this.updatePillarRecoveryDetail("re-centering pillar");
+        return true;
+    }
+
+    private boolean tryMoveToAlternatePillarBase(ServerLevel serverLevel, BlockPos feet) {
+        BlockPos routeTarget = this.climbTargetPos;
+        for (Direction direction : this.directionsToward(feet, routeTarget == null ? feet.above() : routeTarget)) {
+            BlockPos candidate = feet.relative(direction);
+            PillarPlan plan = this.createPillarPlan(serverLevel, candidate, routeTarget);
+            if (plan == null || routeTarget != null && this.exceedsRequestedRouteMax(plan)) {
+                continue;
+            }
+
+            int escapeBlocks = this.countEscapeBlocks();
+            if (escapeBlocks <= 0) {
+                return false;
+            }
+
+            this.pillarBasePos = plan.basePos();
+            this.pillarExitY = plan.exitY();
+            if (routeTarget != null) {
+                this.requiredEscapeBlocks = Math.max(1, plan.blocksNeeded());
+            }
+            this.maxPillarBlocks = routeTarget == null
+                    ? 1
+                    : Math.min(escapeBlocks, Math.max(1, Math.min(this.requiredEscapeBlocks, plan.blocksNeeded())));
+            this.pillarsPlaced = 0;
+            this.placePos = null;
+            this.placeDelayTicks = 0;
+            this.placeWaitTicks = 0;
+            this.failedPillarPlaceAttempts = 0;
+            this.resetPillarStuckWatch();
+            this.playerNpc.getNavigation().moveTo(
+                    plan.basePos().getX() + 0.5D,
+                    plan.basePos().getY(),
+                    plan.basePos().getZ() + 0.5D,
+                    1.0D
+            );
+            this.playerNpc.getMoveControl().setWantedPosition(
+                    plan.basePos().getX() + 0.5D,
+                    plan.basePos().getY(),
+                    plan.basePos().getZ() + 0.5D,
+                    0.8D
+            );
+            this.updatePillarRecoveryDetail("shifting pillar base");
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean canPlacePillarWithoutClipping(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        if (!this.placingBlockAi.findBlockingPlacementEntities(serverLevel, pos, state).isEmpty()) {
+            return false;
+        }
+
+        List<AABB> boxes = this.placingBlockAi.placementCollisionBoxes(serverLevel, pos, state);
+        if (boxes.stream().noneMatch(box -> box.intersects(this.playerNpc.getBoundingBox().inflate(0.02D)))) {
+            return true;
+        }
+
+        double snapUp = pos.getY() + 1.0D - this.playerNpc.getBoundingBox().minY;
+        if (snapUp < -0.05D || snapUp > 0.35D) {
+            return false;
+        }
+
+        AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
+        return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
+                && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox);
     }
 
     private boolean tryContinueRequestedRoutePillar(ServerLevel serverLevel) {
@@ -795,48 +996,42 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         if (!this.isAtPillarBase()) {
-            this.playerNpc.clearBlockBreakProgress(this.pillarClearPos);
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
             this.updatePillarClearDetail(state);
             this.moveToPillarBase();
             return;
         }
 
         this.restorePreviousPillarMainHand();
-        if (!this.equipPreferredToolForPillarClear(state)) {
-            this.clearPillarClearance();
+        this.playerNpc.getNavigation().stop();
+        BlockPos clearPos = this.pillarClearPos;
+        BreakingBlockAi.TickResult result = this.breakingBlockAi.tick(
+                serverLevel,
+                clearPos,
+                clearState -> this.isClearablePillarObstruction(serverLevel, clearPos, clearState),
+                this.getRequiredMineTicks(serverLevel, clearPos, state),
+                String.format(
+                        java.util.Locale.ROOT,
+                        "pillaring %d/%d clearing %s",
+                        this.pillarsPlaced,
+                        this.maxPillarBlocks,
+                        state.getBlock().getDescriptionId()
+                )
+        );
+        if (result == BreakingBlockAi.TickResult.RUNNING) {
+            return;
+        }
+
+        this.toolAi.restoreMainHand();
+        if (result == BreakingBlockAi.TickResult.DONE) {
+            this.pillarClearPos = null;
+            this.mineTicks = 0;
             this.beginPillarStep(serverLevel);
             return;
         }
-        this.playerNpc.getNavigation().stop();
-        this.playerNpc.getLookControl().setLookAt(
-                this.pillarClearPos.getX() + 0.5D,
-                this.pillarClearPos.getY() + 0.5D,
-                this.pillarClearPos.getZ() + 0.5D,
-                60.0F,
-                60.0F
-        );
 
-        if (this.mineTicks % 8 == 0) {
-            this.playerNpc.triggerMainHandAttackAnimation();
-            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, this.pillarClearPos, state, this.playerNpc);
-        }
-
-        this.mineTicks++;
-        int requiredMineTicks = this.getRequiredMineTicks(serverLevel, this.pillarClearPos, state);
-        this.playerNpc.showBlockBreakProgress(this.pillarClearPos, this.mineTicks, requiredMineTicks);
-        this.updatePillarClearDetail(state);
-        if (this.mineTicks < requiredMineTicks) {
-            return;
-        }
-
-        BlockPos clearedPos = this.pillarClearPos;
-        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, clearedPos, state, this.playerNpc)) {
-            this.playerNpc.hurtMainHandItem(1);
-        }
-        this.playerNpc.clearBlockBreakProgress(clearedPos);
-        this.pillarClearPos = null;
-        this.mineTicks = 0;
-        this.restorePreviousPillarMainHand();
+        this.clearPillarClearance();
         this.beginPillarStep(serverLevel);
     }
 
@@ -846,7 +1041,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         BlockPos feet = this.playerNpc.blockPosition();
-        if (this.pillarClearPos.getY() <= feet.getY()) {
+        if (this.pillarClearPos.getY() <= feet.getY()
+                && this.pillarClearPos.getX() == feet.getX()
+                && this.pillarClearPos.getZ() == feet.getZ()) {
             return true;
         }
 
@@ -857,7 +1054,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void clearPillarClearance() {
-        this.playerNpc.clearBlockBreakProgress(this.pillarClearPos);
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
         this.pillarClearPos = null;
         this.mineTicks = 0;
         this.restorePreviousPillarMainHand();
@@ -873,6 +1071,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.placeWaitTicks = 0;
         this.pillarClearPos = obstruction.immutable();
         this.mineTicks = 0;
+        this.resetPillarStuckWatch();
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
         this.restorePreviousPillarMainHand();
         this.playerNpc.getNavigation().stop();
         this.updatePillarClearDetail(serverLevel.getBlockState(this.pillarClearPos));
@@ -1107,6 +1308,67 @@ public class EscapeHoleWithBlockGoal extends Goal {
             }
             if (this.hasBlockingCollision(serverLevel, pos)) {
                 return null;
+            }
+        }
+        return null;
+    }
+
+    private BlockPos findCurrentPillarCollisionBlocker(ServerLevel serverLevel) {
+        return this.findClearableCollisionBlocker(
+                serverLevel,
+                this.playerNpc.getBoundingBox(),
+                PILLAR_COLLISION_BLOCKER_PADDING,
+                PILLAR_COLLISION_TOP_PADDING
+        );
+    }
+
+    private BlockPos findCenteredPillarCollisionBlocker(ServerLevel serverLevel) {
+        if (this.placePos == null) {
+            return null;
+        }
+
+        double targetX = this.placePos.getX() + 0.5D;
+        double targetZ = this.placePos.getZ() + 0.5D;
+        double dx = targetX - this.playerNpc.getX();
+        double dz = targetZ - this.playerNpc.getZ();
+        if (Math.abs(dx) <= PILLAR_CENTER_EPSILON && Math.abs(dz) <= PILLAR_CENTER_EPSILON) {
+            return null;
+        }
+
+        return this.findClearableCollisionBlocker(
+                serverLevel,
+                this.playerNpc.getBoundingBox().move(dx, 0.0D, dz),
+                PILLAR_CENTER_BLOCKER_PADDING,
+                PILLAR_COLLISION_TOP_PADDING
+        );
+    }
+
+    private BlockPos findClearableCollisionBlocker(ServerLevel serverLevel, AABB box, double horizontalPadding, double topPadding) {
+        AABB checkBox = new AABB(
+                box.minX - horizontalPadding,
+                box.minY + 0.05D,
+                box.minZ - horizontalPadding,
+                box.maxX + horizontalPadding,
+                box.maxY + topPadding,
+                box.maxZ + horizontalPadding
+        );
+
+        int minX = Mth.floor(checkBox.minX);
+        int minY = Mth.floor(checkBox.minY);
+        int minZ = Mth.floor(checkBox.minZ);
+        int maxX = Mth.floor(checkBox.maxX);
+        int maxY = Mth.floor(checkBox.maxY);
+        int maxZ = Mth.floor(checkBox.maxZ);
+        for (BlockPos mutable : BlockPos.betweenClosed(minX, minY, minZ, maxX, maxY, maxZ)) {
+            BlockPos pos = mutable.immutable();
+            BlockState state = serverLevel.getBlockState(pos);
+            if (!this.isClearablePillarObstruction(serverLevel, pos, state)) {
+                continue;
+            }
+            for (AABB collisionBox : state.getCollisionShape(serverLevel, pos).toAabbs()) {
+                if (collisionBox.move(pos).intersects(checkBox)) {
+                    return pos;
+                }
             }
         }
         return null;
@@ -2051,6 +2313,17 @@ public class EscapeHoleWithBlockGoal extends Goal {
         ));
     }
 
+    private void updatePillarRecoveryDetail(String action) {
+        this.playerNpc.setCurrentAiDetail(String.format(
+                java.util.Locale.ROOT,
+                "pillaring %d/%d %s\ngiving up in %ds",
+                this.pillarsPlaced,
+                this.maxPillarBlocks,
+                action,
+                this.getRemainingGoalSeconds()
+        ));
+    }
+
     private void updateExitClearDetail(BlockState state) {
         this.playerNpc.setCurrentAiDetail(String.format(
                 java.util.Locale.ROOT,
@@ -2071,6 +2344,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.climbTargetPos = null;
         this.pillarBasePos = null;
         this.pillarClearPos = null;
+        this.pillarStuckWatchPos = null;
         this.exitClearPos = null;
         this.pillarExitY = 0;
         this.previousMainHand = ItemStack.EMPTY;
@@ -2085,9 +2359,19 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.maxPillarBlocks = 0;
         this.pillarsPlaced = 0;
         this.failedPillarPlaceAttempts = 0;
+        this.pillarStuckWatchStartTick = 0;
+        this.nextPillarStuckRecoveryTick = 0;
+        this.pillarStuckWatchPillarsPlaced = 0;
         this.usingTemporaryPickaxe = false;
         this.usingTemporaryBlock = false;
         this.finished = false;
+    }
+
+    private void resetPillarStuckWatch() {
+        this.pillarStuckWatchPos = null;
+        this.pillarStuckWatchStartTick = 0;
+        this.nextPillarStuckRecoveryTick = 0;
+        this.pillarStuckWatchPillarsPlaced = this.pillarsPlaced;
     }
 
     private int getRemainingGoalSeconds() {

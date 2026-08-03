@@ -108,12 +108,18 @@ public class GatherStoneGoal extends Goal {
     }
 
     public static boolean isStoneSupplyPhaseActive(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        return hasPickaxe(playerNpc)
-                && hasPreparedBaseForStone(playerNpc, serverLevel)
-                && (isMiningJobActive(playerNpc)
-                || hasEnoughLogsForStonePhase(playerNpc)
+        if (playerNpc == null
+                || !hasPickaxe(playerNpc)
+                || !hasEnoughLogsForStonePhase(playerNpc)
+                || !hasPreparedBaseForStone(playerNpc, serverLevel)) {
+            return false;
+        }
+
+        boolean miningJob = isMiningJobActive(playerNpc);
+        return miningJob && playerNpc.shouldPrioritizeCobblestoneGathering()
+                || !miningJob
                 && (playerNpc.shouldPrioritizeCobblestoneGathering()
-                || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, playerNpc)));
+                || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, playerNpc));
     }
 
     public static boolean isMiningJobActive(PlayerNpcEntity playerNpc) {
@@ -134,7 +140,8 @@ public class GatherStoneGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
-                || this.playerNpc.getGatherCooldown() > 0) {
+                || this.playerNpc.getGatherCooldown() > 0
+                || MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
             return false;
         }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
@@ -161,6 +168,7 @@ public class GatherStoneGoal extends Goal {
                 && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && hasPickaxe(this.playerNpc)
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
+                && !MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
                 && this.canContinueStoneWork(serverLevel);
     }
 
@@ -228,7 +236,6 @@ public class GatherStoneGoal extends Goal {
                         && this.standRouteAttempts >= MAX_STAND_ROUTE_ATTEMPTS_BEFORE_CLEAR
                         && this.startClearingRoute(serverLevel)) {
                     this.standRouteAttempts = 0;
-                    this.failedAccessAttempts = 0;
                     this.repathTicks = REPATH_INTERVAL_TICKS;
                     this.updateDetail();
                     return;
@@ -238,7 +245,6 @@ public class GatherStoneGoal extends Goal {
                 if (!moved) {
                     if (this.startClearingRoute(serverLevel)) {
                         this.standRouteAttempts = 0;
-                        this.failedAccessAttempts = 0;
                         this.repathTicks = REPATH_INTERVAL_TICKS;
                         this.updateDetail();
                         return;
@@ -254,7 +260,6 @@ public class GatherStoneGoal extends Goal {
                     if (this.standRouteAttempts >= MAX_STAND_ROUTE_ATTEMPTS_BEFORE_CLEAR
                             && this.startClearingRoute(serverLevel)) {
                         this.standRouteAttempts = 0;
-                        this.failedAccessAttempts = 0;
                         this.repathTicks = REPATH_INTERVAL_TICKS;
                         this.updateDetail();
                         return;
@@ -275,7 +280,6 @@ public class GatherStoneGoal extends Goal {
                 if (!moved) {
                     if (this.startClearingRoute(serverLevel)) {
                         this.standRouteAttempts = 0;
-                        this.failedAccessAttempts = 0;
                         this.repathTicks = REPATH_INTERVAL_TICKS;
                         this.updateDetail();
                         return;
@@ -569,6 +573,14 @@ public class GatherStoneGoal extends Goal {
     }
 
     private static boolean hasPreparedBaseForStone(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null) {
+            return false;
+        }
+        if (isMiningJobActive(playerNpc)
+                && !playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
+            return true;
+        }
+
         return PlayerNpcHomeUtil.getHome(playerNpc).isPresent()
                 && (playerNpc.isStoneAccessClearing()
                 || !TerraformBuildSiteGoal.hasActionablePrepWork(playerNpc, serverLevel));
@@ -863,13 +875,21 @@ public class GatherStoneGoal extends Goal {
 
         if (result == ClearBlockAi.TickResult.DONE) {
             this.failedAccessAttempts = 0;
+            this.repathTicks = 0;
         } else if (result == ClearBlockAi.TickResult.FAILED) {
             if (clearTarget != null) {
                 this.skippedAccessClearBlocks.add(clearTarget.immutable());
             }
-            this.failedAccessAttempts++;
+            if (this.recordAccessFailureAndShouldReselect(serverLevel)) {
+                this.playerNpc.clearBlockBreakProgress(this.targetPos);
+                if (!this.selectTarget(serverLevel)) {
+                    this.targetPos = null;
+                }
+                this.repathTicks = 0;
+                return true;
+            }
+            return false;
         }
-        this.repathTicks = 0;
         return false;
     }
 

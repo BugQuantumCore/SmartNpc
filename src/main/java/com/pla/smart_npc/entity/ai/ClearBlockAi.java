@@ -32,6 +32,7 @@ public final class ClearBlockAi {
     private static final double DEFAULT_CLEAR_DISTANCE_SQR = 4.5D * 4.5D;
     private static final double BREAK_REACH_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double BREAK_STAND_REACHED_SQR = 0.95D * 0.95D;
+    private static final double BREAK_STAND_CENTERED_SQR = 0.35D * 0.35D;
     private static final double STAND_EYE_HEIGHT = 1.5D;
     private static final int BREAK_STAND_RADIUS = 2;
     private static final int BREAK_STAND_VERTICAL_RANGE = 2;
@@ -231,6 +232,9 @@ public final class ClearBlockAi {
     }
 
     public String detail() {
+        if (this.breakingBlockAi.isRunning()) {
+            return this.breakingBlockAi.detail();
+        }
         if (this.targetPos == null) {
             return "";
         }
@@ -438,6 +442,7 @@ public final class ClearBlockAi {
 
         if (isAtBreakStand(this.playerNpc, this.standPos)) {
             this.playerNpc.getNavigation().stop();
+            this.nudgeTowardBreakStandCenter();
             return true;
         }
         if (this.approachRepathTicks > 0
@@ -546,6 +551,25 @@ public final class ClearBlockAi {
         return playerNpc.blockPosition().getY() == standPos.getY()
                 && playerNpc.distanceToSqr(standPos.getX() + 0.5D, standPos.getY(), standPos.getZ() + 0.5D)
                 <= BREAK_STAND_REACHED_SQR;
+    }
+
+    private void nudgeTowardBreakStandCenter() {
+        if (this.standPos == null || this.isCenteredOnBreakStand()) {
+            return;
+        }
+
+        this.playerNpc.getMoveControl().setWantedPosition(
+                this.standPos.getX() + 0.5D,
+                this.playerNpc.getY(),
+                this.standPos.getZ() + 0.5D,
+                1.0D
+        );
+    }
+
+    private boolean isCenteredOnBreakStand() {
+        double dx = this.playerNpc.getX() - (this.standPos.getX() + 0.5D);
+        double dz = this.playerNpc.getZ() - (this.standPos.getZ() + 0.5D);
+        return dx * dx + dz * dz <= BREAK_STAND_CENTERED_SQR;
     }
 
     private static double distanceFromStandToTargetSqr(BlockPos standPos, BlockPos targetPos) {

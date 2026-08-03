@@ -58,7 +58,7 @@ Examples:
 
 - `BUILDING`: choose/save base, gather build logs/stone/materials, terraform, build house, manage home, return home, sleep at home.
 - `FISHING`: fishing and boat stockpiling.
-- `MINING`: cave-adjacent ore mining, cave path clearing, and torch placement in caves. Iron/diamond gear upgrading is baseline once materials and a crafting table are available.
+- `MINING`: mining supply progression, cave-adjacent ore mining, cave path clearing, torch placement in caves, and temporary furnace support for ore smelting. A pure miner gathers logs first, then stone, then searches coal/iron/gold/copper ore; it must not choose or create a house.
 - `FARMING`: crop farming and crop food crafting.
 - `HUNT_MONSTERS`: smart target selection against monsters and combat gear prep.
 - `HUNT_ANIMALS`: food-limited animal hunting, sheep hunting for beds, and cooking support.
@@ -100,4 +100,4 @@ This comes from the hardcoded name definition through `FakePlayerName`.
 
 ## Behavior Rule
 
-NPCs without `BUILDING` should not run the house-building/home-shelter pipeline. They act more like travelers or job workers: exploring, looting, fishing, mining, farming, hunting, or cautious hiding depending on their interests. Job-specific anchors such as a farming area may still be persisted by that job's own goal.
+NPCs without `BUILDING` should not run the house-building/home-shelter pipeline. They act more like travelers or job workers: exploring, looting, fishing, mining, farming, hunting, or cautious hiding depending on their interests. Pure mining NPCs should not call `PlayerNpcHomeUtil.getOrCreateHome(...)`, choose a home area, set a house, or return home at night; when underground, they only start surface log resupply during daytime. Job-specific anchors such as a farming area may still be persisted by that job's own goal.

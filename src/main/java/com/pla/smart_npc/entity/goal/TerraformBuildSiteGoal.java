@@ -115,6 +115,9 @@ public class TerraformBuildSiteGoal extends Goal {
     }
 
     public static boolean hasActionablePrepWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (!hasActiveBuildingJob(playerNpc, serverLevel)) {
+            return false;
+        }
         if (hasActiveVerticalEscape(playerNpc) || playerNpc.isStoneAccessClearing()) {
             return false;
         }
@@ -124,7 +127,17 @@ public class TerraformBuildSiteGoal extends Goal {
     }
 
     public static boolean hasPrepWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (!hasActiveBuildingJob(playerNpc, serverLevel)) {
+            return false;
+        }
         return findNextTarget(serverLevel, playerNpc, true).isPresent();
+    }
+
+    private static boolean hasActiveBuildingJob(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return playerNpc != null
+                && serverLevel != null
+                && playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING);
     }
 
     private static boolean hasActiveVerticalEscape(PlayerNpcEntity playerNpc) {
@@ -134,6 +147,9 @@ public class TerraformBuildSiteGoal extends Goal {
     }
 
     public static boolean needsShovelForPrep(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (!hasActiveBuildingJob(playerNpc, serverLevel)) {
+            return false;
+        }
         Optional<TerraformTarget> target = findNextTarget(serverLevel, playerNpc, true);
         return target.isPresent()
                 && target.get().phase() == TerraformPhase.CLEAR

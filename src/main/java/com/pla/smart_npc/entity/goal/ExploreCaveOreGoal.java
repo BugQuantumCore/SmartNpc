@@ -2,10 +2,12 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
-import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
-import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -19,10 +21,12 @@ import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.PickaxeItem;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.pathfinder.Path;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.registries.ForgeRegistries;
 
@@ -38,19 +42,28 @@ import java.util.Queue;
 import java.util.Set;
 
 public class ExploreCaveOreGoal extends Goal {
-    private static final int SEARCH_RADIUS = 16;
+    private static final int SEARCH_RADIUS = 15;
     private static final int LOCAL_RESOURCE_RADIUS = 96;
-    private static final int SEARCH_DOWN = 8;
-    private static final int SEARCH_UP = 6;
+    private static final int SEARCH_DOWN = 15;
+    private static final int SEARCH_UP = 15;
     private static final int MAX_ORE_TARGET_PATH_CHECKS = 24;
+    private static final int ORE_SEARCH_INTERVAL_TICKS = 20 * 5;
     private static final double BREAK_DISTANCE_SQR = 3.0D * 3.0D;
     private static final double PATH_OBSTRUCTION_BREAK_DISTANCE_SQR = 4.5D * 4.5D;
     private static final int COOLDOWN_TICKS = 20 * 12;
+    private static final int FAILED_RETRY_COOLDOWN_TICKS = ORE_SEARCH_INTERVAL_TICKS;
     private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int MAX_MINE_TICKS = 20 * 12;
-    private static final int MAX_FAILED_PATH_TICKS = 20 * 3;
+    private static final int MAX_FAILED_PATH_TICKS = 20 * 2;
+    private static final int MAX_ORE_CLEAR_TARGET_TICKS = 20 * 5;
     private static final int MAX_CLUSTER_SCAN_BLOCKS = 48;
     private static final int MAX_SAFE_DROP_BLOCKS = 4;
+    private static final int ORE_WALK_STUCK_TICKS = 20 * 2;
+    private static final int LOCAL_ROUTE_HORIZONTAL_RADIUS = 8;
+    private static final int LOCAL_ROUTE_VERTICAL_DOWN = 5;
+    private static final int LOCAL_ROUTE_VERTICAL_UP = 6;
+    private static final int CLEAR_OBSTRUCTION_TICKS = 28;
+    private static final double STAND_EYE_HEIGHT = 1.5D;
     private static final int SUCCESS_COOLDOWN_TICKS = 20 * 2;
     private static final int TORCH_PLACE_INTERVAL_TICKS = 20 * 4;
     private static final float TORCH_PLACE_CHANCE = 0.35F;
@@ -60,7 +73,11 @@ public class ExploreCaveOreGoal extends Goal {
     private static final int UPWARD_ESCAPE_REQUEST_TICKS = 20 * 8;
 
     private final PlayerNpcEntity playerNpc;
+    private final ToolAi toolAi;
+    private final BreakingBlockAi breakingBlockAi;
+    private final ClearBlockAi clearBlockAi;
     private final PlacingBlockAi placingBlockAi;
+    private final PathNavigationAi pathNavigationAi;
     private final double speed;
     private final Set<BlockPos> clusterOres = new HashSet<>();
     private final Set<BlockPos> minedClusterOres = new HashSet<>();
@@ -69,21 +86,36 @@ public class ExploreCaveOreGoal extends Goal {
     private BlockPos targetPos;
     private BlockPos standPos;
     private BlockPos pathObstructionPos;
+    private BlockPos activeClearTarget;
+    private BlockPos lastOreWalkPos;
     private ItemStack previousMainHand = ItemStack.EMPTY;
     private OreFamily clusterFamily = OreFamily.NONE;
     private int mineTicks;
     private int repathTicks;
     private int failedPathTicks;
-    private int pathObstructionMineTicks;
+    private int activeClearTargetTicks;
+    private int oreWalkStillTicks;
     private int torchPlaceTicks;
+    private int nextOreSearchTick;
     private boolean usingTemporaryPickaxe;
     private boolean minedAnyOre;
 
     public ExploreCaveOreGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
+        this.toolAi = new ToolAi(playerNpc);
+        this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
+        this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
+        this.pathNavigationAi = new PathNavigationAi(playerNpc);
         this.speed = Math.min(speed, 1.0D);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
+    }
+
+    public static boolean hasNearbyOreTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null || serverLevel == null) {
+            return false;
+        }
+        return new ExploreCaveOreGoal(playerNpc, 1.0D).findOreTarget(serverLevel) != null;
     }
 
     @Override
@@ -96,15 +128,23 @@ public class ExploreCaveOreGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getOreMiningCooldown() > 0
                 || !this.hasAnyPickaxe()
-                || this.inventoryIsMostlyFull()) {
+                || this.inventoryIsMostlyFull()
+                || MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
             return false;
         }
+        if (!this.isReadyForOreMining(serverLevel)) {
+            if (this.shouldRequestSurfaceEscapeForLogResupply(serverLevel)) {
+                this.requestSurfaceEscapeIfUnderground(serverLevel);
+            }
+            return false;
+        }
+        if (this.playerNpc.tickCount < this.nextOreSearchTick) {
+            return false;
+        }
+        this.nextOreSearchTick = this.playerNpc.tickCount + ORE_SEARCH_INTERVAL_TICKS;
 
         OreTarget target = this.findOreTarget(serverLevel);
         if (target == null) {
-            if (this.shouldRequestSurfaceEscapeAfterOreMiss()) {
-                this.requestSurfaceEscapeIfUnderground(serverLevel);
-            }
             return false;
         }
 
@@ -119,7 +159,18 @@ public class ExploreCaveOreGoal extends Goal {
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
                 && this.playerNpc.getTarget() == null
-                && this.mineTicks < MAX_MINE_TICKS;
+                && this.playerNpc.getUpwardEscapeTarget() == null
+                && this.playerNpc.getHoleEscapeCooldown() <= 0
+                && this.mineTicks < MAX_MINE_TICKS
+                && this.playerNpc.level() instanceof ServerLevel serverLevel
+                && this.isReadyForOreMining(serverLevel)
+                && !MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
+                && this.hasAnyPickaxe();
+    }
+
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
     }
 
     @Override
@@ -127,14 +178,19 @@ public class ExploreCaveOreGoal extends Goal {
         this.mineTicks = 0;
         this.repathTicks = 0;
         this.failedPathTicks = 0;
-        this.pathObstructionMineTicks = 0;
         this.torchPlaceTicks = this.playerNpc.getRandom().nextInt(TORCH_PLACE_INTERVAL_TICKS);
         this.pathObstructionPos = null;
+        this.activeClearTarget = null;
+        this.lastOreWalkPos = null;
         this.previousMainHand = ItemStack.EMPTY;
         this.clusterFamily = OreFamily.NONE;
         this.clusterOres.clear();
         this.minedClusterOres.clear();
         this.skippedPathObstructions.clear();
+        this.clearBlockAi.stop();
+        this.breakingBlockAi.stop();
+        this.activeClearTargetTicks = 0;
+        this.oreWalkStillTicks = 0;
         this.usingTemporaryPickaxe = false;
         this.minedAnyOre = false;
         this.playerNpc.setCurrentAiState("ai.player_npc.exploring_cave");
@@ -148,7 +204,9 @@ public class ExploreCaveOreGoal extends Goal {
             }
             this.updateTaskDetail(serverLevel);
         }
-        this.moveToTarget();
+        if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            this.moveToTarget(serverLevel);
+        }
     }
 
     @Override
@@ -157,9 +215,16 @@ public class ExploreCaveOreGoal extends Goal {
             return;
         }
 
+        this.mineTicks++;
+        if (this.tickClearBlock(serverLevel)) {
+            this.updateTaskDetail(serverLevel);
+            return;
+        }
+
         BlockState state = serverLevel.getBlockState(this.targetPos);
         if (!this.isOreBlock(state)) {
             this.playerNpc.clearBlockBreakProgress(this.targetPos);
+            this.breakingBlockAi.stop();
             OreTarget nextOre = this.findNextOreInCluster(serverLevel, this.targetPos);
             if (!this.switchToNextClusterOre(serverLevel, nextOre)) {
                 this.targetPos = null;
@@ -171,13 +236,11 @@ public class ExploreCaveOreGoal extends Goal {
         }
         if (this.oreFamily(state) != this.clusterFamily || !this.equipPickaxeFor(state)) {
             this.playerNpc.clearBlockBreakProgress(this.targetPos);
+            this.breakingBlockAi.stop();
             this.targetPos = null;
             return;
         }
         this.tickTorchPlacement(serverLevel);
-        if (this.tickPathObstruction(serverLevel)) {
-            return;
-        }
 
         this.playerNpc.getLookControl().setLookAt(
                 this.targetPos.getX() + 0.5D,
@@ -189,12 +252,21 @@ public class ExploreCaveOreGoal extends Goal {
 
         if (this.playerNpc.distanceToSqr(this.targetPos.getX() + 0.5D, this.targetPos.getY() + 0.5D, this.targetPos.getZ() + 0.5D) > BREAK_DISTANCE_SQR) {
             this.playerNpc.clearBlockBreakProgress(this.targetPos);
-            if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            this.breakingBlockAi.stop();
+            boolean navigationDone = this.playerNpc.getNavigation().isDone();
+            boolean navigationStuck = this.playerNpc.getNavigation().isStuck();
+            if ((navigationDone || navigationStuck) && this.hasOreWalkStalled()) {
+                this.skipCurrentOreTarget();
+                this.playerNpc.clearBlockBreakProgress(this.targetPos);
+                this.targetPos = null;
+                return;
+            }
+            if (this.repathTicks-- <= 0 || navigationDone || navigationStuck) {
                 if (this.tryStartPathObstructionMining(serverLevel)) {
                     return;
                 } else if (this.tryStepDownToward(serverLevel, this.standPos)) {
                     this.failedPathTicks = 0;
-                } else if (this.moveToTarget()) {
+                } else if (this.moveToTarget(serverLevel)) {
                     this.failedPathTicks = 0;
                 } else {
                     this.failedPathTicks += REPATH_INTERVAL_TICKS;
@@ -209,27 +281,42 @@ public class ExploreCaveOreGoal extends Goal {
             this.updateTaskDetail(serverLevel);
             return;
         }
+        this.resetOreWalkStall();
 
-        this.playerNpc.getNavigation().stop();
-        if (this.mineTicks % 8 == 0) {
-            this.playerNpc.triggerMainHandAttackAnimation();
-            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, this.targetPos, state, this.playerNpc);
+        if (!this.hasClearMiningRay(serverLevel, this.playerNpc.blockPosition(), this.targetPos)
+                && this.tryStartOreCoverClearing(serverLevel)) {
+            this.updateTaskDetail(serverLevel);
+            return;
         }
-
-        this.mineTicks++;
-        this.updateTaskDetail(serverLevel);
-        int requiredMineTicks = this.getRequiredMineTicks(serverLevel, state);
-        this.playerNpc.showBlockBreakProgress(this.targetPos, this.mineTicks, requiredMineTicks);
-        if (this.mineTicks < requiredMineTicks) {
+        if (!this.hasClearMiningRay(serverLevel, this.playerNpc.blockPosition(), this.targetPos)) {
+            this.skipCurrentOreTarget();
+            this.playerNpc.clearBlockBreakProgress(this.targetPos);
+            this.breakingBlockAi.stop();
+            this.targetPos = null;
             return;
         }
 
+        this.playerNpc.getNavigation().stop();
         BlockPos minedPos = this.targetPos;
-        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, minedPos, state, this.playerNpc)) {
+        BreakingBlockAi.TickResult result = this.breakingBlockAi.tick(
+                serverLevel,
+                this.targetPos,
+                this::isMineableOreState,
+                MAX_MINE_TICKS,
+                "mining ore"
+        );
+        this.updateTaskDetail(serverLevel);
+        if (result == BreakingBlockAi.TickResult.RUNNING) {
+            return;
+        }
+
+        this.resetOreWalkStall();
+        if (result == BreakingBlockAi.TickResult.DONE) {
             this.minedAnyOre = true;
             this.minedClusterOres.add(minedPos.immutable());
             this.skippedOreTargets.remove(minedPos.immutable());
-            this.playerNpc.hurtMainHandItem(1);
+        } else {
+            this.skipCurrentOreTarget();
         }
         this.playerNpc.clearBlockBreakProgress(minedPos);
         OreTarget nextOre = this.findNextOreInCluster(serverLevel, minedPos);
@@ -243,14 +330,20 @@ public class ExploreCaveOreGoal extends Goal {
     public void stop() {
         this.playerNpc.clearBlockBreakProgress(this.targetPos);
         this.playerNpc.clearBlockBreakProgress(this.pathObstructionPos);
+        this.clearBlockAi.stop();
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
         this.restorePreviousMainHand();
         this.targetPos = null;
         this.standPos = null;
         this.pathObstructionPos = null;
+        this.activeClearTarget = null;
+        this.lastOreWalkPos = null;
         this.mineTicks = 0;
         this.repathTicks = 0;
         this.failedPathTicks = 0;
-        this.pathObstructionMineTicks = 0;
+        this.activeClearTargetTicks = 0;
+        this.oreWalkStillTicks = 0;
         this.torchPlaceTicks = 0;
         this.clusterFamily = OreFamily.NONE;
         this.clusterOres.clear();
@@ -258,7 +351,7 @@ public class ExploreCaveOreGoal extends Goal {
         this.skippedPathObstructions.clear();
         int cooldown = this.minedAnyOre
                 ? SUCCESS_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 2)
-                : COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 8);
+                : FAILED_RETRY_COOLDOWN_TICKS;
         this.minedAnyOre = false;
         this.playerNpc.setOreMiningCooldown(cooldown);
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -273,9 +366,10 @@ public class ExploreCaveOreGoal extends Goal {
                 center.offset(SEARCH_RADIUS, SEARCH_UP, SEARCH_RADIUS))) {
             BlockPos immutable = pos.immutable();
             BlockState state = serverLevel.getBlockState(immutable);
-            if (this.skippedOreTargets.contains(immutable)
+            if (center.distSqr(immutable) > SEARCH_RADIUS * SEARCH_RADIUS
+                    || this.skippedOreTargets.contains(immutable)
                     || !this.isInsideResourceRadius(immutable)
-                    || !this.isCaveOre(serverLevel, immutable, state)
+                    || !this.isOreSearchTarget(serverLevel, immutable, state)
                     || !this.hasUsablePickaxeFor(state)) {
                 continue;
             }
@@ -285,6 +379,7 @@ public class ExploreCaveOreGoal extends Goal {
 
         oreCandidates.sort(Comparator
                 .comparingInt((BlockPos pos) -> this.orePriority(serverLevel.getBlockState(pos)))
+                .thenComparingInt(pos -> this.hasAdjacentAir(serverLevel, pos) ? 0 : 1)
                 .thenComparingDouble(center::distSqr));
         int checked = 0;
         for (BlockPos oreCandidate : oreCandidates) {
@@ -303,6 +398,7 @@ public class ExploreCaveOreGoal extends Goal {
 
         candidates.sort(Comparator
                 .comparingInt((OreTarget target) -> this.orePriority(serverLevel.getBlockState(target.targetPos())))
+                .thenComparingInt(target -> this.hasAdjacentAir(serverLevel, target.targetPos()) ? 0 : 1)
                 .thenComparingDouble(target -> center.distSqr(target.standPos())));
         return candidates.get(this.playerNpc.getRandom().nextInt(Math.min(candidates.size(), 6)));
     }
@@ -319,13 +415,18 @@ public class ExploreCaveOreGoal extends Goal {
         }
     }
 
-    private boolean shouldRequestSurfaceEscapeAfterOreMiss() {
-        if (!this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
-                || this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
-            return true;
-        }
+    private boolean isReadyForOreMining(ServerLevel serverLevel) {
+        return this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
+                && !this.playerNpc.shouldPrioritizeLogGathering()
+                && !this.playerNpc.shouldPrioritizeCobblestoneGathering();
+    }
 
-        return this.playerNpc.shouldPrioritizeLogGathering();
+    private boolean shouldRequestSurfaceEscapeForLogResupply(ServerLevel serverLevel) {
+        return this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
+                && !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && this.playerNpc.shouldPrioritizeLogGathering()
+                && !serverLevel.isNight()
+                && !serverLevel.canSeeSky(this.playerNpc.blockPosition().above());
     }
 
     private BlockPos findSurfaceEscapeTarget(ServerLevel serverLevel, BlockPos feet) {
@@ -339,16 +440,16 @@ public class ExploreCaveOreGoal extends Goal {
         return null;
     }
 
-    private boolean isCaveOre(ServerLevel serverLevel, BlockPos pos) {
-        return this.isCaveOre(serverLevel, pos, serverLevel.getBlockState(pos));
+    private boolean isOreSearchTarget(ServerLevel serverLevel, BlockPos pos) {
+        return this.isOreSearchTarget(serverLevel, pos, serverLevel.getBlockState(pos));
     }
 
-    private boolean isCaveOre(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        if (!this.isOreBlock(state) || !this.hasAdjacentAir(serverLevel, pos)) {
+    private boolean isOreSearchTarget(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        if (!this.isOreBlock(state) || this.isProtectedHomeBlock(pos)) {
             return false;
         }
 
-        return pos.getY() <= serverLevel.getSeaLevel() + 12 || !serverLevel.canSeeSky(pos.above());
+        return true;
     }
 
     private boolean hasAdjacentAir(ServerLevel serverLevel, BlockPos pos) {
@@ -516,8 +617,10 @@ public class ExploreCaveOreGoal extends Goal {
         this.mineTicks = 0;
         this.repathTicks = 0;
         this.failedPathTicks = 0;
+        this.activeClearTarget = null;
+        this.activeClearTargetTicks = 0;
         this.updateTaskDetail(serverLevel);
-        this.moveToTarget();
+        this.moveToTarget(serverLevel);
         return true;
     }
 
@@ -548,7 +651,8 @@ public class ExploreCaveOreGoal extends Goal {
         for (BlockPos candidate : candidates) {
             BlockPos immutable = candidate.immutable();
             if (this.canReachStand(serverLevel, immutable, target)
-                    && immutable.distSqr(target) <= BREAK_DISTANCE_SQR + 2.0D) {
+                    && immutable.distSqr(target) <= BREAK_DISTANCE_SQR + 2.0D
+                    && this.hasOreAccessFromStand(serverLevel, immutable, target)) {
                 return immutable;
             }
         }
@@ -556,43 +660,46 @@ public class ExploreCaveOreGoal extends Goal {
     }
 
     private boolean canReachStand(ServerLevel serverLevel, BlockPos pos, BlockPos target) {
-        if (!this.canStandAt(serverLevel, pos)) {
-            return false;
-        }
-
-        if (this.playerNpc.blockPosition().equals(pos)
-                || this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D) <= 2.0D * 2.0D) {
+        if (this.canStandAt(serverLevel, pos)
+                && (this.playerNpc.blockPosition().equals(pos)
+                || this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D) <= 2.0D * 2.0D)) {
             return true;
         }
 
-        Path path = this.playerNpc.getNavigation().createPath(pos, 0);
-        return path != null && path.canReach()
-                || this.canReachBySafeDrop(serverLevel, pos)
-                || this.hasLocalPathObstructionToward(serverLevel, pos, target);
-    }
-
-    private boolean canReachBySafeDrop(ServerLevel serverLevel, BlockPos destination) {
-        BlockPos feet = this.playerNpc.blockPosition();
-        if (destination.getY() >= feet.getY()) {
-            return false;
+        if (this.canStandAt(serverLevel, pos)) {
+            return this.pathNavigationAi.canReachOrSafelyDropTo(serverLevel, pos, MAX_SAFE_DROP_BLOCKS);
         }
 
-        for (Direction direction : this.directionsToward(feet, destination)) {
-            BlockPos edgeFeet = feet.relative(direction);
-            BlockPos landingFeet = this.findSafeDropLanding(serverLevel, edgeFeet);
-            if (landingFeet != null && landingFeet.distSqr(destination) <= feet.distSqr(destination) + 4.0D) {
-                return true;
-            }
-        }
-        return false;
+        return this.canClearStandAt(serverLevel, pos)
+                && this.playerNpc.blockPosition().distSqr(pos) <= PATH_OBSTRUCTION_BREAK_DISTANCE_SQR
+                && this.hasOreAccessFromStand(serverLevel, pos, target)
+                && this.findPathObstructionToward(serverLevel, pos, target) != null;
     }
 
     private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
-        return serverLevel.isInWorldBounds(pos)
-                && serverLevel.getWorldBorder().isWithinBounds(pos)
-                && serverLevel.getBlockState(pos).isAir()
-                && serverLevel.getBlockState(pos.above()).isAir()
-                && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+        return PathNavigationAi.canStandAt(serverLevel, pos);
+    }
+
+    private boolean canClearStandAt(ServerLevel serverLevel, BlockPos pos) {
+        if (!serverLevel.isInWorldBounds(pos)
+                || !serverLevel.isInWorldBounds(pos.above())
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos.above())) {
+            return false;
+        }
+
+        return serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below())
+                && this.canClearBodySpace(serverLevel, pos)
+                && this.canClearBodySpace(serverLevel, pos.above());
+    }
+
+    private boolean canClearBodySpace(ServerLevel serverLevel, BlockPos pos) {
+        BlockState state = serverLevel.getBlockState(pos);
+        if (state.getCollisionShape(serverLevel, pos).isEmpty()) {
+            return serverLevel.getFluidState(pos).isEmpty();
+        }
+
+        return this.isPathObstructionBlock(serverLevel, pos, state);
     }
 
     private boolean tryStepDownToward(ServerLevel serverLevel, BlockPos destination) {
@@ -682,96 +789,172 @@ public class ExploreCaveOreGoal extends Goal {
                 && serverLevel.getFluidState(pos.above()).isEmpty();
     }
 
-    private boolean moveToTarget() {
+    private boolean moveToTarget(ServerLevel serverLevel) {
         if (this.standPos == null) {
             return false;
         }
 
-        Path path = this.playerNpc.getNavigation().createPath(this.standPos, 0);
-        if (path == null || !path.canReach()) {
-            return false;
+        boolean moved = this.pathNavigationAi.moveToWithLocalFallback(
+                serverLevel,
+                this.standPos,
+                this.speed,
+                MAX_SAFE_DROP_BLOCKS,
+                LOCAL_ROUTE_HORIZONTAL_RADIUS,
+                LOCAL_ROUTE_VERTICAL_DOWN,
+                LOCAL_ROUTE_VERTICAL_UP);
+        if (moved) {
+            this.resetOreWalkStall();
         }
-        return this.playerNpc.getNavigation().moveTo(path, this.speed);
+        return moved;
     }
 
     private boolean tryStartPathObstructionMining(ServerLevel serverLevel) {
         BlockPos obstruction = this.findPathObstructionTarget(serverLevel);
-        if (obstruction == null) {
-            return false;
-        }
-
-        this.pathObstructionPos = obstruction;
-        this.pathObstructionMineTicks = 0;
-        this.playerNpc.clearBlockBreakProgress(this.targetPos);
-        this.playerNpc.getNavigation().stop();
-        return this.tickPathObstruction(serverLevel);
+        return this.startClearingBlock(serverLevel, obstruction, "clearing ore path");
     }
 
-    private boolean tickPathObstruction(ServerLevel serverLevel) {
-        if (this.pathObstructionPos == null) {
-            return false;
-        }
-
-        BlockState state = serverLevel.getBlockState(this.pathObstructionPos);
-        if (!this.isPathObstructionBlock(serverLevel, this.pathObstructionPos, state)) {
-            this.clearPathObstruction();
-            return false;
-        }
-        if (this.playerNpc.distanceToSqr(
-                this.pathObstructionPos.getX() + 0.5D,
-                this.pathObstructionPos.getY() + 0.5D,
-                this.pathObstructionPos.getZ() + 0.5D
-        ) > PATH_OBSTRUCTION_BREAK_DISTANCE_SQR) {
-            this.skippedPathObstructions.add(this.pathObstructionPos.immutable());
-            this.clearPathObstruction();
-            return false;
-        }
-        if (!this.equipToolForPathObstruction(state)) {
-            this.skippedPathObstructions.add(this.pathObstructionPos.immutable());
-            this.clearPathObstruction();
-            return false;
-        }
-
-        this.playerNpc.getNavigation().stop();
-        this.playerNpc.getLookControl().setLookAt(
-                this.pathObstructionPos.getX() + 0.5D,
-                this.pathObstructionPos.getY() + 0.5D,
-                this.pathObstructionPos.getZ() + 0.5D,
-                40.0F,
-                40.0F
-        );
-        if (this.pathObstructionMineTicks % 8 == 0) {
-            this.playerNpc.triggerMainHandAttackAnimation();
-            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, this.pathObstructionPos, state, this.playerNpc);
-        }
-
-        this.pathObstructionMineTicks++;
-        int requiredMineTicks = this.getRequiredMineTicks(serverLevel, this.pathObstructionPos, state);
-        this.playerNpc.showBlockBreakProgress(this.pathObstructionPos, this.pathObstructionMineTicks, requiredMineTicks);
-        this.updatePathObstructionDetail(serverLevel, state, requiredMineTicks);
-        if (this.pathObstructionMineTicks < requiredMineTicks) {
+    private boolean tryStartOreCoverClearing(ServerLevel serverLevel) {
+        Optional<BlockPos> rayBlocker = this.findMiningRayBlocker(serverLevel, this.playerNpc.blockPosition(), this.targetPos);
+        if (rayBlocker.isPresent()
+                && this.startClearingBlock(serverLevel, rayBlocker.get(), "clearing ore cover")) {
             return true;
         }
 
-        BlockPos clearedPos = this.pathObstructionPos;
-        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, clearedPos, state, this.playerNpc)) {
-            this.playerNpc.hurtMainHandItem(1);
+        List<BlockPos> candidates = ClearBlockAi.gatherObstructionCandidates(
+                this.playerNpc.blockPosition(),
+                this.standPos,
+                this.targetPos
+        );
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> this.targetPos == null ? 0.0D : pos.distSqr(this.targetPos))
+                .thenComparingDouble(this::distanceToBlockCenterSqr));
+        for (BlockPos candidate : candidates) {
+            if (this.startClearingBlock(serverLevel, candidate, "clearing ore cover")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean tickClearBlock(ServerLevel serverLevel) {
+        if (!this.clearBlockAi.isRunning()) {
+            return false;
+        }
+
+        BlockPos clearTarget = this.clearBlockAi.targetPos();
+        this.trackActiveClearTarget(clearTarget);
+        ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            if (this.activeClearTargetTicks >= MAX_ORE_CLEAR_TARGET_TICKS) {
+                this.abortSlowClearTarget(clearTarget);
+                return false;
+            }
+            return true;
+        }
+
+        this.toolAi.restoreMainHand();
+        if (result == ClearBlockAi.TickResult.DONE) {
             this.failedPathTicks = 0;
             this.repathTicks = 0;
-            this.moveToTarget();
-        } else {
-            this.skippedPathObstructions.add(clearedPos.immutable());
+            this.clearPathObstruction();
+            this.moveToTarget(serverLevel);
+            return true;
+        }
+
+        if (clearTarget != null) {
+            this.skippedPathObstructions.add(clearTarget.immutable());
         }
         this.clearPathObstruction();
-        return true;
+        return false;
+    }
+
+    private void trackActiveClearTarget(BlockPos clearTarget) {
+        if (clearTarget == null) {
+            this.activeClearTarget = null;
+            this.activeClearTargetTicks = 0;
+            return;
+        }
+
+        if (!clearTarget.equals(this.activeClearTarget)) {
+            this.activeClearTarget = clearTarget.immutable();
+            this.activeClearTargetTicks = 0;
+        }
+        this.activeClearTargetTicks++;
+    }
+
+    private void abortSlowClearTarget(BlockPos clearTarget) {
+        this.toolAi.restoreMainHand();
+        if (clearTarget != null) {
+            this.skippedPathObstructions.add(clearTarget.immutable());
+        }
+        this.failedPathTicks += REPATH_INTERVAL_TICKS;
+        this.repathTicks = 0;
+        this.clearPathObstruction();
+    }
+
+    private boolean startClearingBlock(ServerLevel serverLevel, BlockPos pos, String detail) {
+        if (pos == null) {
+            return false;
+        }
+
+        BlockPos immutable = pos.immutable();
+        if (this.skippedPathObstructions.contains(immutable)
+                || this.targetPos != null && immutable.equals(this.targetPos)
+                || !serverLevel.isInWorldBounds(immutable)
+                || !serverLevel.getWorldBorder().isWithinBounds(immutable)) {
+            return false;
+        }
+
+        BlockState state = serverLevel.getBlockState(immutable);
+        if (!this.isPathObstructionBlock(serverLevel, immutable, state)
+                || !this.equipToolForPathObstruction(state)) {
+            return false;
+        }
+
+        this.pathObstructionPos = immutable;
+        this.playerNpc.clearBlockBreakProgress(this.targetPos);
+        this.breakingBlockAi.stop();
+        this.playerNpc.getNavigation().stop();
+        if (this.clearBlockAi.start(
+                serverLevel,
+                immutable,
+                targetState -> this.isPathObstructionBlock(serverLevel, immutable, targetState),
+                detail,
+                CLEAR_OBSTRUCTION_TICKS,
+                PATH_OBSTRUCTION_BREAK_DISTANCE_SQR
+        )) {
+            return true;
+        }
+
+        this.skippedPathObstructions.add(immutable);
+        this.clearPathObstruction();
+        return false;
     }
 
     private void clearPathObstruction() {
         if (this.pathObstructionPos != null) {
             this.playerNpc.clearBlockBreakProgress(this.pathObstructionPos);
         }
+        this.clearBlockAi.stop();
         this.pathObstructionPos = null;
-        this.pathObstructionMineTicks = 0;
+        this.activeClearTarget = null;
+        this.activeClearTargetTicks = 0;
+    }
+
+    private boolean hasOreWalkStalled() {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (!feet.equals(this.lastOreWalkPos)) {
+            this.lastOreWalkPos = feet.immutable();
+            this.oreWalkStillTicks = 0;
+            return false;
+        }
+
+        return ++this.oreWalkStillTicks >= ORE_WALK_STUCK_TICKS;
+    }
+
+    private void resetOreWalkStall() {
+        this.lastOreWalkPos = null;
+        this.oreWalkStillTicks = 0;
     }
 
     private BlockPos findPathObstructionTarget(ServerLevel serverLevel) {
@@ -789,15 +972,18 @@ public class ExploreCaveOreGoal extends Goal {
 
     private BlockPos findPathObstructionToward(ServerLevel serverLevel, BlockPos destination, BlockPos target) {
         BlockPos feet = this.playerNpc.blockPosition();
-        List<BlockPos> candidates = new ArrayList<>();
-        candidates.add(feet.above());
-        candidates.add(feet.above(2));
+        List<BlockPos> candidates = new ArrayList<>(ClearBlockAi.gatherObstructionCandidates(feet, destination, target));
+        this.addDiagonalRouteCandidates(candidates, feet, destination);
         for (Direction direction : Direction.Plane.HORIZONTAL) {
             BlockPos side = feet.relative(direction);
             candidates.add(side);
             candidates.add(side.above());
             if (destination.getY() > feet.getY()) {
                 candidates.add(side.above(2));
+            }
+            if (destination.getY() < feet.getY()) {
+                candidates.add(side.below());
+                candidates.add(side.below(2));
             }
         }
 
@@ -821,6 +1007,98 @@ public class ExploreCaveOreGoal extends Goal {
             }
         }
         return null;
+    }
+
+    private void addDiagonalRouteCandidates(List<BlockPos> candidates, BlockPos feet, BlockPos destination) {
+        if (feet == null || destination == null) {
+            return;
+        }
+
+        int stepX = Integer.compare(destination.getX(), feet.getX());
+        int stepZ = Integer.compare(destination.getZ(), feet.getZ());
+        if (stepX == 0 && stepZ == 0) {
+            return;
+        }
+
+        BlockPos step = feet.offset(stepX, 0, stepZ);
+        candidates.add(step);
+        candidates.add(step.above());
+        if (destination.getY() > feet.getY()) {
+            candidates.add(step.above(2));
+        }
+        if (destination.getY() < feet.getY()) {
+            candidates.add(step.below());
+            candidates.add(step.below(2));
+        }
+
+        if (stepX != 0 && stepZ != 0) {
+            BlockPos xStep = feet.offset(stepX, 0, 0);
+            BlockPos zStep = feet.offset(0, 0, stepZ);
+            candidates.add(xStep);
+            candidates.add(xStep.above());
+            candidates.add(zStep);
+            candidates.add(zStep.above());
+            if (destination.getY() < feet.getY()) {
+                candidates.add(xStep.below());
+                candidates.add(zStep.below());
+            }
+        }
+    }
+
+    private boolean hasOreAccessFromStand(ServerLevel serverLevel, BlockPos stand, BlockPos target) {
+        if (this.hasClearMiningRay(serverLevel, stand, target)) {
+            return true;
+        }
+
+        Optional<BlockPos> blocker = this.findMiningRayBlocker(serverLevel, stand, target);
+        if (blocker.isEmpty()) {
+            return false;
+        }
+
+        BlockPos blockerPos = blocker.get();
+        BlockState blockerState = serverLevel.getBlockState(blockerPos);
+        return !this.skippedPathObstructions.contains(blockerPos)
+                && this.isPathObstructionBlock(serverLevel, blockerPos, blockerState);
+    }
+
+    private boolean hasClearMiningRay(ServerLevel serverLevel, BlockPos stand, BlockPos target) {
+        if (stand == null || target == null) {
+            return false;
+        }
+
+        BlockHitResult hit = serverLevel.clip(new ClipContext(
+                this.miningEyeForStand(stand),
+                Vec3.atCenterOf(target),
+                ClipContext.Block.OUTLINE,
+                ClipContext.Fluid.NONE,
+                this.playerNpc
+        ));
+        return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(target);
+    }
+
+    private Optional<BlockPos> findMiningRayBlocker(ServerLevel serverLevel, BlockPos stand, BlockPos target) {
+        if (stand == null || target == null) {
+            return Optional.empty();
+        }
+
+        BlockHitResult hit = serverLevel.clip(new ClipContext(
+                this.miningEyeForStand(stand),
+                Vec3.atCenterOf(target),
+                ClipContext.Block.OUTLINE,
+                ClipContext.Fluid.NONE,
+                this.playerNpc
+        ));
+        if (hit.getType() != HitResult.Type.BLOCK || hit.getBlockPos().equals(target)) {
+            return Optional.empty();
+        }
+        return Optional.of(hit.getBlockPos().immutable());
+    }
+
+    private Vec3 miningEyeForStand(BlockPos stand) {
+        if (stand.equals(this.playerNpc.blockPosition())) {
+            return new Vec3(this.playerNpc.getX(), this.playerNpc.getEyeY(), this.playerNpc.getZ());
+        }
+        return new Vec3(stand.getX() + 0.5D, stand.getY() + STAND_EYE_HEIGHT, stand.getZ() + 0.5D);
     }
 
     private boolean isPathObstructionBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
@@ -854,23 +1132,32 @@ public class ExploreCaveOreGoal extends Goal {
         return PlayerNpcHomeUtil.isInsideActivityRadius(this.playerNpc, pos, LOCAL_RESOURCE_RADIUS, true);
     }
 
+    private boolean isMineableOreState(BlockState state) {
+        return this.isOreBlock(state) && this.hasUsablePickaxeFor(state);
+    }
+
     private boolean isOreBlock(BlockState state) {
         return state.is(Blocks.IRON_ORE)
                 || state.is(Blocks.DEEPSLATE_IRON_ORE)
                 || state.is(Blocks.COAL_ORE)
                 || state.is(Blocks.DEEPSLATE_COAL_ORE)
+                || state.is(Blocks.GOLD_ORE)
+                || state.is(Blocks.DEEPSLATE_GOLD_ORE)
                 || state.is(Blocks.COPPER_ORE)
                 || state.is(Blocks.DEEPSLATE_COPPER_ORE);
     }
 
     private int orePriority(BlockState state) {
-        if (state.is(Blocks.IRON_ORE) || state.is(Blocks.DEEPSLATE_IRON_ORE)) {
+        if (state.is(Blocks.COAL_ORE) || state.is(Blocks.DEEPSLATE_COAL_ORE)) {
             return 0;
         }
-        if (state.is(Blocks.COAL_ORE) || state.is(Blocks.DEEPSLATE_COAL_ORE)) {
+        if (state.is(Blocks.IRON_ORE) || state.is(Blocks.DEEPSLATE_IRON_ORE)) {
             return 1;
         }
-        return 2;
+        if (state.is(Blocks.GOLD_ORE) || state.is(Blocks.DEEPSLATE_GOLD_ORE)) {
+            return 2;
+        }
+        return 3;
     }
 
     private OreFamily oreFamily(BlockState state) {
@@ -879,6 +1166,9 @@ public class ExploreCaveOreGoal extends Goal {
         }
         if (state.is(Blocks.COAL_ORE) || state.is(Blocks.DEEPSLATE_COAL_ORE)) {
             return OreFamily.COAL;
+        }
+        if (state.is(Blocks.GOLD_ORE) || state.is(Blocks.DEEPSLATE_GOLD_ORE)) {
+            return OreFamily.GOLD;
         }
         if (state.is(Blocks.COPPER_ORE) || state.is(Blocks.DEEPSLATE_COPPER_ORE)) {
             return OreFamily.COPPER;
@@ -912,12 +1202,14 @@ public class ExploreCaveOreGoal extends Goal {
     }
 
     private boolean hasAnyPickaxe() {
-        return this.playerNpc.getMainHandItem().getItem() instanceof PickaxeItem
-                || InventoryUtils.hasItem(this.playerNpc, stack -> stack.getItem() instanceof PickaxeItem);
+        return this.playerNpc.hasCarriedTool(PickaxeItem.class);
     }
 
     private boolean hasUsablePickaxeFor(BlockState state) {
         return this.isUsablePickaxeFor(this.playerNpc.getMainHandItem(), state)
+                || this.isUsablePickaxeFor(this.playerNpc.getOffhandItem(), state)
+                || this.isUsablePickaxeFor(this.playerNpc.getMainWeaponItem(), state)
+                || this.isUsablePickaxeFor(this.playerNpc.getOffWeaponItem(), state)
                 || InventoryUtils.hasItem(this.playerNpc, stack -> this.isUsablePickaxeFor(stack, state));
     }
 
@@ -934,10 +1226,33 @@ public class ExploreCaveOreGoal extends Goal {
 
         ItemStack pickaxe = this.playerNpc.consumeInventoryItem(stack -> this.isUsablePickaxeFor(stack, state), 1)
                 .orElse(ItemStack.EMPTY);
+        if (!pickaxe.isEmpty()) {
+            return this.equipTemporaryPickaxe(pickaxe);
+        }
+
+        ItemStack offhandPickaxe = this.playerNpc.getOffhandItem();
+        if (this.isUsablePickaxeFor(offhandPickaxe, state)) {
+            this.playerNpc.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+            return this.equipTemporaryPickaxe(offhandPickaxe.copy());
+        }
+
+        ItemStack mainWeaponPickaxe = this.playerNpc.takeMainWeaponItem(stack -> this.isUsablePickaxeFor(stack, state));
+        if (!mainWeaponPickaxe.isEmpty()) {
+            return this.equipTemporaryPickaxe(mainWeaponPickaxe);
+        }
+
+        ItemStack offWeaponPickaxe = this.playerNpc.takeOffWeaponItem(stack -> this.isUsablePickaxeFor(stack, state));
+        if (!offWeaponPickaxe.isEmpty()) {
+            return this.equipTemporaryPickaxe(offWeaponPickaxe);
+        }
+
+        return false;
+    }
+
+    private boolean equipTemporaryPickaxe(ItemStack pickaxe) {
         if (pickaxe.isEmpty()) {
             return false;
         }
-
         ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
         if (!this.usingTemporaryPickaxe) {
             this.previousMainHand = currentMainHand;
@@ -953,7 +1268,7 @@ public class ExploreCaveOreGoal extends Goal {
     }
 
     private void tickTorchPlacement(ServerLevel serverLevel) {
-        if (this.mineTicks > 0) {
+        if (this.breakingBlockAi.isRunning() || this.clearBlockAi.isRunning()) {
             return;
         }
 
@@ -967,7 +1282,7 @@ public class ExploreCaveOreGoal extends Goal {
         }
 
         if (!InventoryUtils.hasItem(this.playerNpc, Items.TORCH)
-                && !PlayerNpcCraftingUtil.tryCraftTorches(this.playerNpc.getInventory(), this.playerNpc.getRawLogReserveTarget())) {
+                && !PlayerNpcCraftingUtil.tryCraftTorches(this.playerNpc.getInventory(), this.torchCraftRawLogReserve())) {
             return;
         }
 
@@ -983,6 +1298,12 @@ public class ExploreCaveOreGoal extends Goal {
 
         this.placingBlockAi.placeBlock(serverLevel, torchPos, Blocks.TORCH.defaultBlockState());
         this.playerNpc.getLookControl().setLookAt(torchPos.getX() + 0.5D, torchPos.getY() + 0.5D, torchPos.getZ() + 0.5D, 40.0F, 40.0F);
+    }
+
+    private int torchCraftRawLogReserve() {
+        return this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                ? this.playerNpc.getRawLogReserveTarget()
+                : 0;
     }
 
     private BlockPos findTorchPlacement(ServerLevel serverLevel) {
@@ -1041,6 +1362,14 @@ public class ExploreCaveOreGoal extends Goal {
     }
 
     private void updateTaskDetail(ServerLevel serverLevel) {
+        if (this.clearBlockAi.isRunning()) {
+            this.playerNpc.setCurrentAiDetail(this.clearBlockAi.detail());
+            return;
+        }
+        if (this.breakingBlockAi.isRunning()) {
+            this.playerNpc.setCurrentAiDetail(this.breakingBlockAi.detail());
+            return;
+        }
         if (this.targetPos == null) {
             this.playerNpc.setCurrentAiDetail("");
             return;
@@ -1066,25 +1395,6 @@ public class ExploreCaveOreGoal extends Goal {
         ));
     }
 
-    private void updatePathObstructionDetail(ServerLevel serverLevel, BlockState state, int requiredMineTicks) {
-        if (this.pathObstructionPos == null) {
-            return;
-        }
-
-        ResourceLocation blockId = ForgeRegistries.BLOCKS.getKey(state.getBlock());
-        String blockName = blockId == null ? state.getBlock().getDescriptionId() : blockId.toString();
-        this.playerNpc.setCurrentAiDetail(String.format(
-                Locale.ROOT,
-                "clearing ore path %s @ %d %d %d %d/%dt",
-                blockName,
-                this.pathObstructionPos.getX(),
-                this.pathObstructionPos.getY(),
-                this.pathObstructionPos.getZ(),
-                Math.min(this.pathObstructionMineTicks, requiredMineTicks),
-                requiredMineTicks
-        ));
-    }
-
     private boolean inventoryIsMostlyFull() {
         SimpleContainer inventory = this.playerNpc.getInventory();
         int freeSlots = 0;
@@ -1100,6 +1410,7 @@ public class ExploreCaveOreGoal extends Goal {
         NONE,
         IRON,
         COAL,
+        GOLD,
         COPPER
     }
 

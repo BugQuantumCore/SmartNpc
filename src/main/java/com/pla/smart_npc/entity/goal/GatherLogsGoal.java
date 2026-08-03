@@ -146,7 +146,8 @@ public class GatherLogsGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
-                || this.playerNpc.getGatherCooldown() > 0) {
+                || this.playerNpc.getGatherCooldown() > 0
+                || MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
             return false;
         }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
@@ -177,6 +178,7 @@ public class GatherLogsGoal extends Goal {
                 && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && (this.descendingFromPillar
                 || this.playerNpc.level() instanceof ServerLevel serverLevel
+                && !MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
                 && !this.shouldStayHomeForWeather(serverLevel)
                 && !ReturnHomeGoal.shouldSuppressExplorationForHome(this.playerNpc, serverLevel)
                 && this.needsLogs(serverLevel));
