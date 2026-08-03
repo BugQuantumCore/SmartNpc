@@ -3,6 +3,8 @@ package com.pla.smart_npc.client.gui;
 import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.network.PlayerNpcGoalTracePacket;
+import com.pla.smart_npc.network.PlayerNpcInspectatorCyclePacket;
+import com.pla.smart_npc.network.PlayerNpcInspectatorCycleResultPacket;
 import com.pla.smart_npc.network.PlayerNpcInspectatorModePacket;
 import com.pla.smart_npc.network.PlayerNpcInspectorPacket;
 import com.pla.smart_npc.network.PlayerNpcInspectorRequestPacket;
@@ -76,6 +78,7 @@ public class SmartNpcInspectorOverlay {
     private static CameraType previousCameraType;
     private static Entity previousCameraEntity;
     private static int inspectatorZoomRepeatTicks;
+    private static int pendingInspectatorTargetTicks;
     private static boolean previousInspectatorToggleDown;
     private static boolean previousCycleLeftDown;
     private static boolean previousCycleRightDown;
@@ -110,6 +113,7 @@ public class SmartNpcInspectorOverlay {
             disableTraceIfNeeded();
             stopInspectator(Minecraft.getInstance(), true);
             requirementsVisible = false;
+            pendingInspectatorTargetTicks = 0;
             previousRequirementsToggleDown = false;
             resetRequirementScroll();
             resetRequirementScrollInput();
@@ -126,6 +130,25 @@ public class SmartNpcInspectorOverlay {
         snapshotRequirementsText = packet.requirementsText();
         snapshotTraceEnabled = packet.traceEnabled();
         lastDisplayCacheMillis = Long.MIN_VALUE;
+    }
+
+    public static void handleInspectatorCycleResult(PlayerNpcInspectatorCycleResultPacket packet) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || minecraft.player == null || !inspectatorActive) {
+            return;
+        }
+
+        if (!packet.handledByServer()) {
+            Entity entity = minecraft.level.getEntity(inspectedEntityId);
+            if (entity instanceof PlayerNpcEntity currentNpc && currentNpc.isAlive()) {
+                cycleInspectedNpc(minecraft, currentNpc, packet.direction());
+            }
+            return;
+        }
+
+        if (packet.entityId() >= 0) {
+            acceptServerInspectatorTarget(minecraft, packet.entityId());
+        }
     }
 
     public static boolean isInspectatorActive() {
@@ -258,9 +281,13 @@ public class SmartNpcInspectorOverlay {
 
         Entity entity = minecraft.level.getEntity(inspectedEntityId);
         if (!(entity instanceof PlayerNpcEntity playerNpc) || !playerNpc.isAlive()) {
+            if (isWaitingForInspectatorTarget()) {
+                return;
+            }
             clear();
             return;
         }
+        pendingInspectatorTargetTicks = 0;
 
         requestRefresh(minecraft);
         refreshDisplayCache(minecraft.font, playerNpc);
@@ -786,9 +813,13 @@ public class SmartNpcInspectorOverlay {
 
         Entity entity = minecraft.level.getEntity(inspectedEntityId);
         if (!(entity instanceof PlayerNpcEntity playerNpc) || !playerNpc.isAlive()) {
+            if (tickPendingInspectatorTarget(minecraft)) {
+                return;
+            }
             clear();
             return;
         }
+        pendingInspectatorTargetTicks = 0;
 
         if (chatOpen) {
             resetInspectatorToggle();
@@ -839,6 +870,7 @@ public class SmartNpcInspectorOverlay {
 
         inspectatorActive = true;
         inspectatorEntityId = playerNpc.getId();
+        pendingInspectatorTargetTicks = 0;
         lastDisplayCacheMillis = Long.MIN_VALUE;
         sendToServerIfConnected(new PlayerNpcInspectatorModePacket(true, inspectatorEntityId));
         if (startingFresh) {
@@ -872,6 +904,7 @@ public class SmartNpcInspectorOverlay {
         boolean wasActive = inspectatorActive;
         inspectatorActive = false;
         inspectatorEntityId = -1;
+        pendingInspectatorTargetTicks = 0;
         resetInspectatorToggle();
         previousCycleLeftDown = false;
         previousCycleRightDown = false;
@@ -916,9 +949,9 @@ public class SmartNpcInspectorOverlay {
         boolean rightDown = minecraft.options.keyRight.isDown() || isPhysicalKeyDown(minecraft, GLFW.GLFW_KEY_RIGHT);
 
         if (leftDown && !previousCycleLeftDown) {
-            cycleInspectedNpc(minecraft, currentNpc, -1);
+            requestInspectatorCycle(currentNpc, -1);
         } else if (rightDown && !previousCycleRightDown) {
-            cycleInspectedNpc(minecraft, currentNpc, 1);
+            requestInspectatorCycle(currentNpc, 1);
         }
 
         previousCycleLeftDown = leftDown;
@@ -1033,6 +1066,53 @@ public class SmartNpcInspectorOverlay {
 
     private static boolean isPhysicalKeyDown(Minecraft minecraft, int key) {
         return InputConstants.isKeyDown(minecraft.getWindow().getWindow(), key);
+    }
+
+    private static void requestInspectatorCycle(PlayerNpcEntity currentNpc, int direction) {
+        sendToServerIfConnected(new PlayerNpcInspectatorCyclePacket(currentNpc.getId(), direction, requirementsVisible));
+    }
+
+    private static void acceptServerInspectatorTarget(Minecraft minecraft, int entityId) {
+        boolean startingFresh = !inspectatorActive;
+        if (startingFresh) {
+            previousCameraType = minecraft.options.getCameraType();
+            previousCameraEntity = minecraft.getCameraEntity();
+        }
+        if (inspectatorEntityId != entityId) {
+            snapshotTraceEnabled = false;
+        }
+
+        inspectatorActive = true;
+        inspectatorEntityId = entityId;
+        inspectedEntityId = entityId;
+        snapshot = List.of();
+        resetRequirementScroll();
+        resetRequirementScrollInput();
+        pendingInspectatorTargetTicks = 80;
+        lastRefreshGameTime = Long.MIN_VALUE;
+        lastDisplayCacheMillis = Long.MIN_VALUE;
+        if (startingFresh) {
+            minecraft.options.setCameraType(CameraType.THIRD_PERSON_FRONT);
+            inspectatorCameraDistance = INSPECTATOR_CAMERA_DISTANCE_DEFAULT;
+        }
+        minecraft.setCameraEntity(minecraft.player);
+        if (minecraft.screen == null) {
+            minecraft.mouseHandler.grabMouse();
+        }
+    }
+
+    private static boolean isWaitingForInspectatorTarget() {
+        return inspectatorActive && pendingInspectatorTargetTicks > 0;
+    }
+
+    private static boolean tickPendingInspectatorTarget(Minecraft minecraft) {
+        if (!isWaitingForInspectatorTarget()) {
+            return false;
+        }
+
+        pendingInspectatorTargetTicks--;
+        suppressPlayerInput(minecraft);
+        return true;
     }
 
     private static void cycleInspectedNpc(Minecraft minecraft, PlayerNpcEntity currentNpc, int direction) {
@@ -1173,6 +1253,7 @@ public class SmartNpcInspectorOverlay {
         disableTraceIfNeeded();
         stopInspectator(Minecraft.getInstance(), true);
         inspectedEntityId = -1;
+        pendingInspectatorTargetTicks = 0;
         snapshot = new ArrayList<>();
         snapshotBuildStatusText = "";
         snapshotPerformanceText = "";

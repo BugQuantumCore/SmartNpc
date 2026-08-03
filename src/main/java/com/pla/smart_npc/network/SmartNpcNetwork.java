@@ -6,7 +6,7 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public class SmartNpcNetwork {
-    private static final String PROTOCOL_VERSION = "4";
+    private static final String PROTOCOL_VERSION = "5";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             ResourceLocation.fromNamespaceAndPath(SmartNpc.MODID, "main"),
             () -> PROTOCOL_VERSION,
@@ -37,6 +37,20 @@ public class SmartNpcNetwork {
                 PlayerNpcInspectatorModePacket::encode,
                 PlayerNpcInspectatorModePacket::decode,
                 PlayerNpcInspectatorModePacket::handle
+        );
+        CHANNEL.registerMessage(
+                packetId++,
+                PlayerNpcInspectatorCyclePacket.class,
+                PlayerNpcInspectatorCyclePacket::encode,
+                PlayerNpcInspectatorCyclePacket::decode,
+                PlayerNpcInspectatorCyclePacket::handle
+        );
+        CHANNEL.registerMessage(
+                packetId++,
+                PlayerNpcInspectatorCycleResultPacket.class,
+                PlayerNpcInspectatorCycleResultPacket::encode,
+                PlayerNpcInspectatorCycleResultPacket::decode,
+                PlayerNpcInspectatorCycleResultPacket::handle
         );
         CHANNEL.registerMessage(
                 packetId++,

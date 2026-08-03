@@ -1,17 +1,21 @@
 package com.pla.smart_npc.event;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.pla.smart_npc.SmartNpc;
+import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.init.SmartNpcModEntities;
 import com.pla.smart_npc.clazz.Difficulty;
+import com.pla.smart_npc.util.PlayerNpcForceTickManager;
 import com.pla.smart_npc.util.ProgressionUtil;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.entity.MobSpawnType;
 import net.minecraft.world.phys.Vec2;
@@ -33,6 +37,17 @@ public final class PlayerNpcCommandEvent {
                 .then(Commands.literal("spawn_player")
                         .then(Commands.argument("name", StringArgumentType.word())
                                 .executes(context -> spawnPlayer(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "name")
+                                ))))
+                .then(Commands.literal("tp")
+                        .requires(source -> SmartNpcConfig.isForceTickManageEnabled())
+                        .then(Commands.argument("name", StringArgumentType.greedyString())
+                                .suggests((context, builder) -> PlayerNpcForceTickManager.suggestNpcNames(
+                                        context.getSource().getServer(),
+                                        builder
+                                ))
+                                .executes(context -> teleportToPlayerNpc(
                                         context.getSource(),
                                         StringArgumentType.getString(context, "name")
                                 ))))
@@ -64,6 +79,24 @@ public final class PlayerNpcCommandEvent {
         entity.finalizeSpawn(level, difficulty, MobSpawnType.COMMAND, null, null);
         level.addFreshEntity(entity);
         source.sendSuccess(() -> Component.literal("Spawned player NPC " + entity.getName().getString()), true);
+        return 1;
+    }
+
+    private static int teleportToPlayerNpc(CommandSourceStack source, String name) throws CommandSyntaxException {
+        if (!SmartNpcConfig.isForceTickManageEnabled()) {
+            source.sendFailure(Component.literal("Player NPC force-tick management is disabled"));
+            return 0;
+        }
+
+        ServerPlayer player = source.getPlayerOrException();
+        PlayerNpcEntity npc = PlayerNpcForceTickManager.chooseRandomByName(source.getServer(), name).orElse(null);
+        if (npc == null || !(npc.level() instanceof ServerLevel targetLevel)) {
+            source.sendFailure(Component.literal("No tracked player NPC named " + name));
+            return 0;
+        }
+
+        player.teleportTo(targetLevel, npc.getX(), npc.getY(), npc.getZ(), npc.getYRot(), npc.getXRot());
+        source.sendSuccess(() -> Component.literal("Teleported to player NPC " + npc.getName().getString()), true);
         return 1;
     }
 

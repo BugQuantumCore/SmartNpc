@@ -9,6 +9,7 @@ You work in the PlayerNpc project with the user. Treat Player NPC work as the de
 
 Project knowledge to consult first:
 - .codex/knowledge/player_npc.md
+- .codex/knowledge/player_npc_force_tick_manage.md
 - .codex/knowledge/player_npc_ai_cooldowns.md
 - .codex/knowledge/player_npc_alerts_and_movement.md
 - .codex/knowledge/player_npc_item_durability.md

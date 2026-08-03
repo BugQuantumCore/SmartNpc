@@ -4,6 +4,7 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.GameType;
@@ -81,7 +82,18 @@ public class PlayerNpcInspectatorModePacket {
         return entity != null && entity.getPersistentData().getBoolean(ACTIVE_KEY);
     }
 
-    private static void beginInspectator(ServerPlayer player, PlayerNpcEntity playerNpc) {
+    public static void beginInspectator(ServerPlayer player, PlayerNpcEntity playerNpc) {
+        beginInspectator(player, playerNpc, false);
+    }
+
+    public static void beginInspectator(ServerPlayer player, PlayerNpcEntity playerNpc, boolean teleportToNpc) {
+        if (teleportToNpc && playerNpc.level() instanceof ServerLevel serverLevel) {
+            if (player.getVehicle() != null && player.getVehicle() != playerNpc) {
+                player.stopRiding();
+            }
+            player.teleportTo(serverLevel, playerNpc.getX(), playerNpc.getY(), playerNpc.getZ(), playerNpc.getYRot(), playerNpc.getXRot());
+        }
+
         PlayerNpcGoalTraceLogger.stopIfTracingDifferentNpc(player, playerNpc);
 
         CompoundTag data = player.getPersistentData();

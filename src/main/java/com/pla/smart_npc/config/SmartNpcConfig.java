@@ -12,6 +12,7 @@ public class SmartNpcConfig {
     private static final SpawnConfig DEFAULT_PLAYER_NPC_SPAWN = new SpawnConfig(5, 1, 3);
 
     public static ForgeConfigSpec.ConfigValue<Boolean> TURN_ON_NPC_CHAT;
+    public static ForgeConfigSpec.ConfigValue<Boolean> FORCE_TICK_MANAGE;
     public static ForgeConfigSpec.ConfigValue<List<? extends Number>> PLAYER_NPC_SPAWN;
     public static ForgeConfigSpec.ConfigValue<List<? extends String>> BLACKLIST_COMPAT_MOD_WEAPON;
     public static ForgeConfigSpec.ConfigValue<Boolean> PERFORMANCE_MONITOR_ENABLED;
@@ -24,6 +25,10 @@ public class SmartNpcConfig {
         TURN_ON_NPC_CHAT = BUILDER.comment(
                         "Turn on all chatting for NPC")
                 .define("turnOnNpcChat", true);
+
+        FORCE_TICK_MANAGE = BUILDER.comment(
+                        "Force-tick a 3x3 chunk area around each loaded Player NPC and expose tracked Player NPCs in helper features")
+                .define("forceTickManage", true);
 
         PLAYER_NPC_SPAWN = BUILDER.comment(
                         "Spawn config for Player NPC. Format: [weight, minCount, maxCount]. Weight is added to the spawn pool in each overworld biome. 0 disables spawning")
@@ -64,6 +69,10 @@ public class SmartNpcConfig {
 
     public static boolean isCompatWeaponBlacklisted(String modId) {
         return BLACKLIST_COMPAT_MOD_WEAPON.get().stream().anyMatch(entry -> entry.equalsIgnoreCase(modId));
+    }
+
+    public static boolean isForceTickManageEnabled() {
+        return FORCE_TICK_MANAGE.get();
     }
 
     private static SpawnConfig parseSpawnConfigOrDefault(List<? extends Number> rawValues, SpawnConfig defaultConfig) {
