@@ -1,7 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
-import com.pla.smart_npc.compat.epicfight.EpicFight;
+import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
@@ -32,7 +32,6 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.fml.ModList;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -720,21 +719,15 @@ public class TerraformBuildSiteGoal extends Goal {
     }
 
     private void keepEpicFightDiggingAnimation() {
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.keepDiggingState(this.playerNpc);
-        }
+        EpicFightCompat.keepDiggingState(this.playerNpc);
     }
 
     private void playEpicFightDiggingAnimation() {
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.playDiggingAnimation(this.playerNpc);
-        }
+        EpicFightCompat.playDiggingAnimation(this.playerNpc);
     }
 
     private void stopEpicFightDiggingAnimation() {
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.stopDiggingAnimation(this.playerNpc);
-        }
+        EpicFightCompat.stopDiggingAnimation(this.playerNpc);
     }
 
     private void clearScaffoldPlacement() {

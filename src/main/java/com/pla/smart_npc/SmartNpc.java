@@ -2,7 +2,7 @@ package com.pla.smart_npc;
 
 import com.mojang.serialization.Codec;
 import com.pla.smart_npc.client.gui.InventoryViewerScreen;
-import com.pla.smart_npc.compat.epicfight.EpicFight;
+import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.event.NpcGearLoadEvent;
 import com.pla.smart_npc.init.SmartNpcModCreativeTabs;
@@ -17,7 +17,6 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.common.world.BiomeModifier;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
@@ -28,7 +27,6 @@ import net.minecraftforge.registries.DeferredRegister;
 import net.minecraftforge.registries.ForgeRegistries;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import yesman.epicfight.gameasset.Armatures;
 
 @Mod(SmartNpc.MODID)
 public class SmartNpc {
@@ -51,6 +49,7 @@ public class SmartNpc {
 
         MinecraftForge.EVENT_BUS.register(new NpcGearLoadEvent());
         context.registerConfig(ModConfig.Type.COMMON, SmartNpcConfig.SPEC, "smart_npc-server.toml");
+        EpicFightCompat.registerModEventHandlers(modEventBus);
 
         if (FMLEnvironment.dist.isClient()) {
             modEventBus.addListener(this::clientSetup);
@@ -59,9 +58,7 @@ public class SmartNpc {
     }
 
     private void commonSetup(final FMLCommonSetupEvent event) {
-        if (ModList.get().isLoaded("epicfight")) {
-            event.enqueueWork(EpicFight::registerArmatures);
-        }
+        EpicFightCompat.enqueueRegisterArmatures(event);
     }
 
     private void clientSetup(final FMLClientSetupEvent event) {

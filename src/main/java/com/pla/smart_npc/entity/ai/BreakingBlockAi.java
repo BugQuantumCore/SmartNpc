@@ -1,6 +1,6 @@
 package com.pla.smart_npc.entity.ai;
 
-import com.pla.smart_npc.compat.epicfight.EpicFight;
+import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -9,7 +9,6 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraftforge.fml.ModList;
 
 import java.util.function.Predicate;
 
@@ -106,9 +105,7 @@ public final class BreakingBlockAi {
         this.sneakingAi.tickHeldSneak();
         this.breakTicks++;
 
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.keepDiggingState(this.playerNpc);
-        }
+        EpicFightCompat.keepDiggingState(this.playerNpc);
         this.tickMiningSwing();
         this.playerNpc.showBlockBreakProgress(targetPos, this.breakTicks, this.requiredTicks);
         if (this.breakTicks % HIT_SOUND_INTERVAL_TICKS == 0) {
@@ -161,9 +158,7 @@ public final class BreakingBlockAi {
         this.requiredTicks = 0;
         this.detail = "breaking block";
         this.toolDetail = "";
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.stopDiggingAnimation(this.playerNpc);
-        }
+        EpicFightCompat.stopDiggingAnimation(this.playerNpc);
     }
 
     public String detail() {
@@ -219,8 +214,6 @@ public final class BreakingBlockAi {
         this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
         this.playerNpc.triggerMainHandAttackAnimation();
 
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.playDiggingAnimation(this.playerNpc);
-        }
+        EpicFightCompat.playDiggingAnimation(this.playerNpc);
     }
 }

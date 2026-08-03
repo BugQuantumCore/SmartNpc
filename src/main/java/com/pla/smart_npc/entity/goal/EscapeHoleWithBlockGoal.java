@@ -1,6 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
-import com.pla.smart_npc.compat.epicfight.EpicFight;
+import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
@@ -32,7 +32,6 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
-import net.minecraftforge.fml.ModList;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -126,15 +125,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void setEscapeMode(EscapeMode inputMode) {
-        if (ModList.get().isLoaded("epicfight")) {
-            if ((this.mode == EscapeMode.GATHER_BLOCKS || this.mode == EscapeMode.CLEAR_EXIT)
-                    && (inputMode != EscapeMode.GATHER_BLOCKS && inputMode != EscapeMode.CLEAR_EXIT)) {
-                EpicFight.stopDiggingAnimation(this.playerNpc);
-            }
-            if ((this.mode != EscapeMode.GATHER_BLOCKS && this.mode != EscapeMode.CLEAR_EXIT)
-                    && (inputMode == EscapeMode.GATHER_BLOCKS || inputMode == EscapeMode.CLEAR_EXIT)) {
-//                EpicFight.playDiggingAnimation(this.playerNpc);
-            }
+        if ((this.mode == EscapeMode.GATHER_BLOCKS || this.mode == EscapeMode.CLEAR_EXIT)
+                && (inputMode != EscapeMode.GATHER_BLOCKS && inputMode != EscapeMode.CLEAR_EXIT)) {
+            EpicFightCompat.stopDiggingAnimation(this.playerNpc);
         }
         this.mode = inputMode;
     }
@@ -437,9 +430,6 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void tickGatherBlocks(ServerLevel serverLevel) {
-        if (ModList.get().isLoaded("epicfight")) {
-//            EpicFight.playDiggingAnimation(this.playerNpc);
-        }
         if (this.countEscapeBlocks() >= this.requiredEscapeBlocks) {
             this.switchToPillar(serverLevel);
             return;
