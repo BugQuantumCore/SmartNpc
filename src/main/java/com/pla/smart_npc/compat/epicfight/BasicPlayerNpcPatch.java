@@ -22,6 +22,7 @@ public class BasicPlayerNpcPatch<T extends PathfinderMob> extends ZombiePatch<T>
         animator.addLivingAnimation(LivingMotions.WALK, Animations.BIPED_WALK);
         animator.addLivingAnimation(LivingMotions.CHASE, Animations.BIPED_RUN);
         animator.addLivingAnimation(LivingMotions.SNEAK, Animations.BIPED_SNEAK);
+        animator.addLivingAnimation(LivingMotions.KNEEL, Animations.BIPED_KNEEL);
         animator.addLivingAnimation(LivingMotions.FALL, Animations.BIPED_FALL);
         animator.addLivingAnimation(LivingMotions.MOUNT, Animations.BIPED_MOUNT);
         animator.addLivingAnimation(LivingMotions.DEATH, Animations.BIPED_DEATH);
@@ -33,10 +34,26 @@ public class BasicPlayerNpcPatch<T extends PathfinderMob> extends ZombiePatch<T>
     @Override
     public void updateMotion(boolean considerInaction) {
         super.updateMotion(considerInaction);
-        if (this.getOriginal() instanceof PlayerNpcEntity playerNpc && playerNpc.isEpicFightDigging()) {
-            this.currentLivingMotion = LivingMotions.DIGGING;
-            this.currentCompositeMotion = LivingMotions.DIGGING;
+        if (this.getOriginal() instanceof PlayerNpcEntity playerNpc) {
+            if (playerNpc.isEpicFightDigging()) {
+                this.currentLivingMotion = LivingMotions.DIGGING;
+                this.currentCompositeMotion = LivingMotions.DIGGING;
+            } else if ((playerNpc.isShiftKeyDown() || playerNpc.isCrouching()) && canApplyCrouchMotion()) {
+                this.currentLivingMotion = isMovingMotion() ? LivingMotions.SNEAK : LivingMotions.KNEEL;
+                this.currentCompositeMotion = this.currentLivingMotion;
+            }
         }
+    }
+
+    private boolean canApplyCrouchMotion() {
+        return this.currentLivingMotion == LivingMotions.IDLE
+                || this.currentLivingMotion == LivingMotions.WALK
+                || this.currentLivingMotion == LivingMotions.CHASE;
+    }
+
+    private boolean isMovingMotion() {
+        return this.currentLivingMotion == LivingMotions.WALK
+                || this.currentLivingMotion == LivingMotions.CHASE;
     }
 
     @Override
