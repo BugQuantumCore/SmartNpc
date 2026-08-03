@@ -14,6 +14,13 @@ Chunk tickets:
 - The ticket type is `smart_npc:player_npc_force_tick`; ticket values include the NPC UUID and chunk long so overlapping NPCs release independently.
 - Old chunks are released whenever the NPC changes chunk, dies, leaves the level, the server stops, or the config is turned off.
 
+Restart persistence:
+- Runtime chunk tickets do not survive a server stop. `PlayerNpcForceTickData` persists each tracked NPC UUID, dimension, and last center chunk in overworld `SavedData`.
+- On server start/login/feature enable, `PlayerNpcForceTickManager` restores 3x3 tickets from this saved registry before nearby-player chunk loading is relevant.
+- `EntityLeaveLevelEvent` only releases runtime tickets/tab rows; it does not delete the saved registry entry because chunk unloads and server stop also fire leave events.
+- `LivingDeathEvent` removes both runtime tracking and the saved registry entry. If a restored entry cannot resolve an entity after the center chunk has loaded and the grace window expires, it is treated as stale and pruned.
+- Live `PlayerNpcEntity` ticks refresh the saved center chunk whenever the NPC moves between chunks.
+
 Tab list:
 - Tracked NPCs are added to the multiplayer tab list only while `forceTickManage` is enabled.
 - The manager sends 1.20.1 `ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(...)` for a Forge fake player whose UUID matches the NPC entity UUID.

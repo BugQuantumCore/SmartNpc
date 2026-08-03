@@ -25,6 +25,7 @@ import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -47,6 +48,7 @@ import java.util.concurrent.CompletableFuture;
 public final class PlayerNpcForceTickManager {
     private static final int FORCE_TICK_RADIUS_CHUNKS = 1;
     private static final int FORCE_TICK_DISTANCE = 2;
+    private static final int RESTORED_ENTITY_LOAD_GRACE_TICKS = 20 * 30;
     private static final String NPC_TAB_PREFIX = "[NPC] ";
     private static final int TAB_PROFILE_NAME_LENGTH = 16;
     private static final TicketType<TicketKey> PLAYER_NPC_TICKET = TicketType.create(
@@ -76,14 +78,14 @@ public final class PlayerNpcForceTickManager {
     public static void onEntityLeaveLevel(EntityLeaveLevelEvent event) {
         if (event.getEntity() instanceof PlayerNpcEntity playerNpc
                 && event.getLevel() instanceof ServerLevel) {
-            release(playerNpc);
+            release(playerNpc, false);
         }
     }
 
     @SubscribeEvent
     public static void onLivingDeath(LivingDeathEvent event) {
         if (event.getEntity() instanceof PlayerNpcEntity playerNpc) {
-            release(playerNpc);
+            release(playerNpc, true);
         }
     }
 
@@ -98,6 +100,7 @@ public final class PlayerNpcForceTickManager {
             return;
         }
 
+        restorePersistentTickets(server);
         reconcileLoadedNpcs(server);
         for (ManagedNpc managedNpc : new ArrayList<>(MANAGED_NPCS.values())) {
             PlayerNpcEntity npc = managedNpc.resolve(server);
@@ -125,11 +128,21 @@ public final class PlayerNpcForceTickManager {
         }
 
         if (!Boolean.TRUE.equals(lastEnabled)) {
+            restorePersistentTickets(server);
             reconcileLoadedNpcs(server);
             lastEnabled = true;
         }
 
         updateTrackedNpcs(server);
+    }
+
+    @SubscribeEvent
+    public static void onServerStarted(ServerStartedEvent event) {
+        if (isEnabled()) {
+            restorePersistentTickets(event.getServer());
+            reconcileLoadedNpcs(event.getServer());
+            lastEnabled = true;
+        }
     }
 
     @SubscribeEvent
@@ -161,13 +174,17 @@ public final class PlayerNpcForceTickManager {
     }
 
     public static void release(PlayerNpcEntity npc) {
+        release(npc, false);
+    }
+
+    private static void release(PlayerNpcEntity npc, boolean removePersistentEntry) {
         if (npc == null || npc.level().isClientSide()) {
             return;
         }
 
         MinecraftServer server = npc.level().getServer();
         if (server != null) {
-            release(npc.getUUID(), server);
+            release(npc.getUUID(), server, removePersistentEntry);
         }
     }
 
@@ -287,7 +304,9 @@ public final class PlayerNpcForceTickManager {
         for (ManagedNpc managedNpc : new ArrayList<>(MANAGED_NPCS.values())) {
             PlayerNpcEntity npc = managedNpc.resolve(server);
             if (npc == null || !npc.isAlive() || npc.isRemoved()) {
-                release(managedNpc.npcId, server);
+                if (!managedNpc.shouldKeepWaitingForEntity(server)) {
+                    release(managedNpc.npcId, server, true);
+                }
             } else {
                 managedNpc.updateFrom(server, npc);
             }
@@ -307,14 +326,32 @@ public final class PlayerNpcForceTickManager {
         }
     }
 
-    private static void release(UUID npcId, MinecraftServer server) {
-        ManagedNpc managedNpc = MANAGED_NPCS.remove(npcId);
-        if (managedNpc == null) {
+    private static void restorePersistentTickets(MinecraftServer server) {
+        if (!isEnabled()) {
             return;
         }
 
-        managedNpc.releaseTickets(server);
-        managedNpc.broadcastTabRemove(server);
+        for (PlayerNpcForceTickData.Entry entry : PlayerNpcForceTickData.get(server).entries()) {
+            ServerLevel level = server.getLevel(entry.levelKey());
+            if (level == null) {
+                continue;
+            }
+
+            ManagedNpc managedNpc = MANAGED_NPCS.computeIfAbsent(entry.npcId(), ManagedNpc::new);
+            managedNpc.restoreFromData(server, level, entry.centerChunk());
+        }
+    }
+
+    private static void release(UUID npcId, MinecraftServer server, boolean removePersistentEntry) {
+        ManagedNpc managedNpc = MANAGED_NPCS.remove(npcId);
+        if (managedNpc != null) {
+            managedNpc.releaseTickets(server);
+            managedNpc.broadcastTabRemove(server);
+        }
+
+        if (removePersistentEntry) {
+            PlayerNpcForceTickData.get(server).remove(npcId);
+        }
     }
 
     private static void releaseAll(MinecraftServer server) {
@@ -400,6 +437,7 @@ public final class PlayerNpcForceTickManager {
         private int entityId = -1;
         private String displayName = "";
         private String profileSignature = "";
+        private int unresolvedTicks;
         private boolean tabListed;
 
         private ManagedNpc(UUID npcId) {
@@ -423,8 +461,10 @@ public final class PlayerNpcForceTickManager {
             String nextProfileSignature = profilePropertiesSignature(npc.getProfile());
             boolean profileChanged = !Objects.equals(this.profileSignature, nextProfileSignature);
             this.profileSignature = nextProfileSignature;
+            this.unresolvedTicks = 0;
 
             this.updateForceTickets(level, npc.chunkPosition());
+            PlayerNpcForceTickData.get(server).put(this.npcId, currentLevelKey, npc.chunkPosition());
             this.updateTabList(server, level, npc, displayNameChanged, profileChanged);
         }
 
@@ -446,8 +486,43 @@ public final class PlayerNpcForceTickManager {
             return null;
         }
 
+        private void restoreFromData(MinecraftServer server, ServerLevel level, ChunkPos savedCenterChunk) {
+            net.minecraft.resources.ResourceKey<Level> savedLevelKey = level.dimension();
+            if (this.levelKey != null && !this.levelKey.equals(savedLevelKey)) {
+                this.releaseTickets(server);
+            }
+
+            this.levelKey = savedLevelKey;
+            this.entityId = -1;
+            this.unresolvedTicks = 0;
+            this.updateForceTickets(level, savedCenterChunk);
+        }
+
+        private boolean shouldKeepWaitingForEntity(MinecraftServer server) {
+            if (this.levelKey == null || this.centerChunk == null) {
+                return false;
+            }
+
+            ServerLevel level = server.getLevel(this.levelKey);
+            if (level == null) {
+                return false;
+            }
+
+            if (this.forcedChunks.isEmpty()) {
+                this.updateForceTickets(level, this.centerChunk);
+            }
+
+            this.unresolvedTicks++;
+            return this.unresolvedTicks <= RESTORED_ENTITY_LOAD_GRACE_TICKS
+                    || !level.hasChunk(this.centerChunk.x, this.centerChunk.z);
+        }
+
         private void updateForceTickets(ServerLevel level, ChunkPos nextCenterChunk) {
             if (this.centerChunk != null && this.centerChunk.equals(nextCenterChunk)) {
+                if (this.forcedChunks.isEmpty()) {
+                    this.centerChunk = null;
+                    this.updateForceTickets(level, nextCenterChunk);
+                }
                 return;
             }
 
