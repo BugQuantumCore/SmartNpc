@@ -38,6 +38,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
+import java.util.function.Predicate;
 
 public class GatherLogsGoal extends Goal {
     private static final int TREE_SEARCH_RADIUS = 32;
@@ -103,12 +104,21 @@ public class GatherLogsGoal extends Goal {
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
+    public boolean hasNearbyUsableLogTarget(ServerLevel serverLevel) {
+        return hasNearbyLogTarget(this.playerNpc, serverLevel, this::isIgnoredLogTarget);
+    }
+
     public static boolean hasNearbyLogTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return hasNearbyLogTarget(playerNpc, serverLevel, pos -> false);
+    }
+
+    private static boolean hasNearbyLogTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel, Predicate<BlockPos> ignoredLogPos) {
         Optional<Tree> tree = TreeAi.findNearest(
                 serverLevel,
                 playerNpc.blockPosition(),
                 TREE_SEARCH_RADIUS,
                 pos -> !isProtectedHomeLogTarget(playerNpc, pos)
+                        && !ignoredLogPos.test(pos)
         );
         if (tree.isEmpty()) {
             return false;
@@ -117,7 +127,8 @@ public class GatherLogsGoal extends Goal {
         int pathChecks = 0;
         for (BlockPos candidate : tree.get().logsNearestFirst(playerNpc.blockPosition())) {
             if (!serverLevel.getBlockState(candidate).is(BlockTags.LOGS)
-                    || isProtectedHomeLogTarget(playerNpc, candidate)) {
+                    || isProtectedHomeLogTarget(playerNpc, candidate)
+                    || ignoredLogPos.test(candidate)) {
                 continue;
             }
             if (canMineFromCurrentPosition(playerNpc, candidate)) {
@@ -234,9 +245,7 @@ public class GatherLogsGoal extends Goal {
         if (this.targetPos == null || !this.isValidTarget(serverLevel, this.targetPos)) {
             this.playerNpc.clearBlockBreakProgress(this.targetPos);
             this.breakingBlockAi.stop();
-            if (!this.selectNextTarget(serverLevel)) {
-                this.targetPos = null;
-            }
+            this.selectNextTargetOrDescendFromPillar(serverLevel);
             return;
         }
 
@@ -268,9 +277,7 @@ public class GatherLogsGoal extends Goal {
                         this.updateDetail();
                         return;
                     }
-                    if (!this.selectNextTarget(serverLevel)) {
-                        this.targetPos = null;
-                    }
+                    this.selectNextTargetOrDescendFromPillar(serverLevel);
                 }
                 this.repathTicks = REPATH_INTERVAL_TICKS;
             }
@@ -405,6 +412,7 @@ public class GatherLogsGoal extends Goal {
                 this.playerNpc.blockPosition(),
                 TREE_SEARCH_RADIUS,
                 pos -> !this.isProtectedHomeLogTarget(pos)
+                        && !this.isIgnoredLogTarget(pos)
         );
         tree.ifPresent(value -> this.logQueue.addAll(value.logsNearestFirst(this.playerNpc.blockPosition())));
     }
@@ -808,7 +816,18 @@ public class GatherLogsGoal extends Goal {
                 && this.isValidLog(serverLevel, this.targetPos)) {
             this.ignoreLogTarget(this.targetPos);
         }
-        this.selectNextTarget(serverLevel);
+        this.selectNextTargetOrDescendFromPillar(serverLevel);
+    }
+
+    private boolean selectNextTargetOrDescendFromPillar(ServerLevel serverLevel) {
+        if (this.selectNextTarget(serverLevel)) {
+            return true;
+        }
+        if (this.tryStartPillarDescent(serverLevel)) {
+            return true;
+        }
+        this.targetPos = null;
+        return false;
     }
 
     private boolean needsLogs(ServerLevel serverLevel) {

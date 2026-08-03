@@ -149,6 +149,10 @@ public final class PillarUpAi {
             return TickResult.RUNNING;
         }
 
+        if (this.tryAcceptOccupiedPillarSupport(serverLevel)) {
+            return TickResult.PLACED;
+        }
+
         this.placeWaitTicks++;
         if (this.placeWaitTicks > MAX_PLACE_WAIT_TICKS) {
             BlockPos blocker = this.findCurrentCollisionBlocker(serverLevel);
@@ -165,6 +169,9 @@ public final class PillarUpAi {
         }
 
         if (!serverLevel.getBlockState(this.placePos).canBeReplaced()) {
+            if (this.tryAcceptOccupiedPillarSupport(serverLevel)) {
+                return TickResult.PLACED;
+            }
             return this.fail("pillar base no longer replaceable", this.placePos);
         }
         if (!this.toolAi.equipItem(this.blockItem)) {
@@ -182,6 +189,7 @@ public final class PillarUpAi {
             return this.fail("failed to set pillar block", this.placePos);
         }
 
+        this.playerNpc.markTemporaryPillarSupport(this.placePos);
         this.snapAbovePillarIfNeeded(this.placePos);
         this.lastPlacedPos = this.placePos.immutable();
         this.clear();
@@ -332,6 +340,41 @@ public final class PillarUpAi {
         AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
         return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
                 && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox);
+    }
+
+    private boolean tryAcceptOccupiedPillarSupport(ServerLevel serverLevel) {
+        if (this.placePos == null) {
+            return false;
+        }
+
+        BlockState state = serverLevel.getBlockState(this.placePos);
+        if (state.canBeReplaced()
+                || state.getCollisionShape(serverLevel, this.placePos).isEmpty()
+                || !state.getFluidState().isEmpty()
+                || serverLevel.getBlockEntity(this.placePos) != null) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (feet.getX() != this.placePos.getX() || feet.getZ() != this.placePos.getZ()) {
+            return false;
+        }
+
+        double snapUp = this.placePos.getY() + 1.0D - this.playerNpc.getBoundingBox().minY;
+        if (snapUp < -0.05D || snapUp > 1.25D) {
+            return false;
+        }
+
+        AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
+        if (!PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox)) {
+            return false;
+        }
+
+        this.playerNpc.markTemporaryPillarSupport(this.placePos);
+        this.snapAbovePillarIfNeeded(this.placePos);
+        this.lastPlacedPos = this.placePos.immutable();
+        this.clear();
+        return true;
     }
 
     private boolean centerOnPillarBase(ServerLevel serverLevel, BlockPos pos) {

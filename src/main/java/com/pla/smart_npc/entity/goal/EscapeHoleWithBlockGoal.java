@@ -135,8 +135,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
                     && (inputMode == EscapeMode.GATHER_BLOCKS || inputMode == EscapeMode.CLEAR_EXIT)) {
 //                EpicFight.playDiggingAnimation(this.playerNpc);
             }
-            this.mode = inputMode;
         }
+        this.mode = inputMode;
     }
 
     @Override
@@ -204,7 +204,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return true;
         }
 
-        if (routeNeedsClimb && !trapped && this.hasReachedOpenSky(serverLevel, feet) && !forceRequestedClimb) {
+        if (routeNeedsClimb
+                && !trapped
+                && this.hasReachedOpenSky(serverLevel, feet)
+                && !forceRequestedClimb
+                && !this.isRequestedSurfaceRoute(serverLevel, feet, routeTarget)) {
             return false;
         }
 
@@ -644,6 +648,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         this.placeWaitTicks++;
+        if (this.tryAcceptOccupiedPillarSupport(serverLevel)) {
+            return;
+        }
+
         if (this.placeWaitTicks > MAX_PLACE_WAIT_TICKS) {
             BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, this.playerNpc.blockPosition());
             if (obstruction != null) {
@@ -677,6 +685,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         if (!serverLevel.getBlockState(this.placePos).canBeReplaced()) {
+            if (this.tryAcceptOccupiedPillarSupport(serverLevel)) {
+                return;
+            }
             this.placePos = null;
             return;
         }
@@ -710,6 +721,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.finished = true;
             return;
         }
+        this.playerNpc.markTemporaryPillarSupport(this.placePos);
         this.snapAbovePillarIfNeeded(this.placePos);
         this.pillarsPlaced++;
         this.failedPillarPlaceAttempts = 0;
@@ -873,6 +885,55 @@ public class EscapeHoleWithBlockGoal extends Goal {
         AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
         return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
                 && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox);
+    }
+
+    private boolean tryAcceptOccupiedPillarSupport(ServerLevel serverLevel) {
+        if (this.placePos == null) {
+            return false;
+        }
+
+        BlockState state = serverLevel.getBlockState(this.placePos);
+        if (state.canBeReplaced()
+                || state.getCollisionShape(serverLevel, this.placePos).isEmpty()
+                || !state.getFluidState().isEmpty()
+                || serverLevel.getBlockEntity(this.placePos) != null) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (feet.getX() != this.placePos.getX() || feet.getZ() != this.placePos.getZ()) {
+            return false;
+        }
+
+        double snapUp = this.placePos.getY() + 1.0D - this.playerNpc.getBoundingBox().minY;
+        if (snapUp < -0.05D || snapUp > 1.25D) {
+            return false;
+        }
+
+        AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
+        if (!PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox)) {
+            BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, feet);
+            if (obstruction != null) {
+                this.startPillarClearance(serverLevel, obstruction);
+                return true;
+            }
+            return false;
+        }
+
+        this.playerNpc.markTemporaryPillarSupport(this.placePos);
+        this.snapAbovePillarIfNeeded(this.placePos);
+        this.pillarsPlaced++;
+        this.failedPillarPlaceAttempts = 0;
+        this.placePos = null;
+        this.placeDelayTicks = 0;
+        this.placeWaitTicks = 0;
+        this.resetPillarStuckWatch();
+        this.playerNpc.getNavigation().stop();
+        if (this.shouldContinuePillaring(serverLevel) && this.playerNpc.onGround()) {
+            this.playerNpc.shortPillarJump();
+        }
+        this.updatePillarRecoveryDetail("continuing from fallen support");
+        return true;
     }
 
     private boolean tryContinueRequestedRoutePillar(ServerLevel serverLevel) {
@@ -1087,6 +1148,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         this.playerNpc.setPos(this.playerNpc.getX(), topY, this.playerNpc.getZ());
         this.playerNpc.setDeltaMovement(this.playerNpc.getDeltaMovement().x, Math.max(0.0D, this.playerNpc.getDeltaMovement().y), this.playerNpc.getDeltaMovement().z);
+        this.playerNpc.fallDistance = 0.0F;
     }
 
     private boolean hasPillarPlacementClearance() {
@@ -1252,7 +1314,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         boolean forcedRequestedRoute = this.isForcedRequestedRoute(routeTarget);
         boolean requestedSurfaceRoute = !forcedRequestedRoute
                 && this.isRequestedSurfaceRoute(serverLevel, this.playerNpc.blockPosition(), routeTarget);
-        int requestedSurfaceY = requestedSurfaceRoute ? this.nearbySurfaceY(serverLevel, base) : base.getY() + 1;
+        int requestedSurfaceY = requestedSurfaceRoute ? this.nearbySurfaceY(serverLevel, routeTarget) : base.getY() + 1;
         int scanTop = Math.min(serverLevel.getMaxBuildHeight() - 3, base.getY() + PILLAR_SURFACE_SCAN_UP);
         for (int y = base.getY(); y <= scanTop; y++) {
             BlockPos feetAtY = new BlockPos(base.getX(), y, base.getZ());
@@ -1710,11 +1772,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean hasReachedRequestedSurfaceExit(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
-        int nearbySurfaceY = this.nearbySurfaceY(serverLevel, feet);
-        if (feet.getY() < nearbySurfaceY - 1) {
+        int requestedSurfaceY = this.nearbySurfaceY(serverLevel, routeTarget);
+        if (feet.getY() < requestedSurfaceY - 1) {
             return false;
         }
-        return feet.getY() >= nearbySurfaceY
+        return feet.getY() >= requestedSurfaceY
                 || this.hasStepExitToward(serverLevel, feet, routeTarget);
     }
 

@@ -443,6 +443,7 @@ public class TerraformBuildSiteGoal extends Goal {
             return;
         }
 
+        this.playerNpc.markTemporaryPillarSupport(pos);
         this.supportFillFailures = 0;
         this.lastSupportFillFailurePos = null;
         this.supportClearanceMoveTicks = 0;

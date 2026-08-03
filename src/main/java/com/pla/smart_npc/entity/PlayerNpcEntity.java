@@ -76,6 +76,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
@@ -98,6 +99,7 @@ import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ServerLevelAccessor;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkHooks;
@@ -107,7 +109,10 @@ import org.jetbrains.annotations.NotNull;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
@@ -129,6 +134,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int EXPLORATION_RETURN_ESCAPE_MAX_PILLAR_BLOCKS = 24;
     private static final int STARTUP_IDLE_WAKE_TICKS = 20 * 4;
     private static final int TASKLESS_IDLE_WAKE_TICKS = 20;
+    private static final int TEMPORARY_PILLAR_SUPPORT_MEMORY_TICKS = 20 * 45;
     private static final long DAY_LENGTH_TICKS = 24000L;
     private static final long DAILY_JOB_ROLL_TIME = 1L;
     private static final long DAILY_JOB_FALLBACK_ROLL_END_TIME = 12000L;
@@ -253,6 +259,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int animalLootPriorityTicks = 0;
     @Nullable
     private BlockPos animalLootPriorityPos;
+    private final Map<BlockPos, Integer> temporaryPillarSupportTicks = new HashMap<>();
 
     public int getPlayingIdleCooldown() {
         return playingIdleCooldown;
@@ -661,6 +668,25 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public void markStoneAccessClearing(int ticks) {
         this.stoneAccessClearCooldown = Math.max(this.stoneAccessClearCooldown, normalizeCooldown(ticks));
+    }
+
+    public void markTemporaryPillarSupport(@Nullable BlockPos pos) {
+        this.markTemporaryPillarSupport(pos, TEMPORARY_PILLAR_SUPPORT_MEMORY_TICKS);
+    }
+
+    public void markTemporaryPillarSupport(@Nullable BlockPos pos, int ticks) {
+        if (pos == null || ticks <= 0) {
+            return;
+        }
+        BlockPos key = pos.immutable();
+        this.temporaryPillarSupportTicks.put(
+                key,
+                Math.max(this.temporaryPillarSupportTicks.getOrDefault(key, 0), normalizeCooldown(ticks))
+        );
+    }
+
+    public boolean isTemporaryPillarSupport(@Nullable BlockPos pos) {
+        return pos != null && this.temporaryPillarSupportTicks.containsKey(pos.immutable());
     }
 
     public void setBiomeExploreCooldown(int ticks) {
@@ -1412,6 +1438,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     protected void registerGoals() {
+        GatherLogsGoal gatherLogsGoal = new GatherLogsGoal(this, 1.0D);
         this.goalSelector.addGoal(0, new FloatGoal(this));
         this.goalSelector.addGoal(0, new EscapeWaterCurrentGoal(this));
         this.registerVanillaCombatReplacementGoals();
@@ -1446,7 +1473,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(5, this.gated(new BoatStockpileGoal(this), PlayerNpcInterest.FISHING, PlayerNpcInterest.EXPLORING));
         this.goalSelector.addGoal(5, this.gated(new PlantSaplingGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new UseSpyglassGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.CAUTIOUS));
-        this.goalSelector.addGoal(6, this.gated(new GatherLogsGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(6, this.gated(gatherLogsGoal, PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
@@ -1459,11 +1486,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(level, this))
                         && this.getGatherCooldown() <= 0
                         && !GatherStoneGoal.isStoneSupplyPhaseActive(this, level)
-                        && !(this.shouldPrioritizeLogGathering()
-                        && !level.canSeeSky(this.blockPosition().above()))
+                        && this.canExploreForLogSupply(level)
                         && !this.shouldStayHomeForWeather(level)
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
-                level -> GatherLogsGoal.hasNearbyLogTarget(this, level)
+                gatherLogsGoal::hasNearbyUsableLogTarget
         ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
@@ -1523,6 +1549,27 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private boolean shouldStayHomeForWeather(ServerLevel serverLevel) {
         return PlayerNpcHomeUtil.getHome(this).isPresent()
                 && (serverLevel.isNight() || serverLevel.isThundering());
+    }
+
+    private boolean canExploreForLogSupply(ServerLevel serverLevel) {
+        if (!this.shouldPrioritizeLogGathering() || serverLevel.canSeeSky(this.blockPosition().above())) {
+            return true;
+        }
+        return this.hasNearbyTreeCover(serverLevel);
+    }
+
+    private boolean hasNearbyTreeCover(ServerLevel serverLevel) {
+        BlockPos feet = this.blockPosition();
+        for (BlockPos pos : BlockPos.betweenClosed(feet.offset(-1, -1, -1), feet.offset(1, 3, 1))) {
+            if (!serverLevel.isInWorldBounds(pos)) {
+                continue;
+            }
+            BlockState state = serverLevel.getBlockState(pos);
+            if (state.is(BlockTags.LEAVES) || state.is(BlockTags.LOGS)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void registerVanillaCombatReplacementGoals() {
@@ -2158,6 +2205,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.farmCooldown = tickCooldown(this.farmCooldown);
         this.gatherCooldown = tickCooldown(this.gatherCooldown);
         this.stoneAccessClearCooldown = tickCooldown(this.stoneAccessClearCooldown);
+        this.tickTemporaryPillarSupports();
         this.biomeExploreCooldown = tickCooldown(this.biomeExploreCooldown);
         this.huntSheepCooldown = tickCooldown(this.huntSheepCooldown);
         this.ironGolemTrollCooldown = tickCooldown(this.ironGolemTrollCooldown);
@@ -2197,6 +2245,30 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.upwardEscapeMaxPillarBlocks = 0;
             this.forcedUpwardEscape = false;
         }
+    }
+
+    private void tickTemporaryPillarSupports() {
+        Iterator<Map.Entry<BlockPos, Integer>> iterator = this.temporaryPillarSupportTicks.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<BlockPos, Integer> entry = iterator.next();
+            int ticks = tickCooldown(entry.getValue());
+            if (ticks <= 0 || this.isTemporaryPillarSupportGone(entry.getKey())) {
+                iterator.remove();
+            } else {
+                entry.setValue(ticks);
+            }
+        }
+    }
+
+    private boolean isTemporaryPillarSupportGone(BlockPos pos) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (!serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+            return true;
+        }
+        BlockState state = serverLevel.getBlockState(pos);
+        return state.isAir() || state.getCollisionShape(serverLevel, pos).isEmpty();
     }
 
     private void tickDailySupplyGoalReroll(ServerLevel serverLevel) {

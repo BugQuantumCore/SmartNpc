@@ -166,6 +166,7 @@ public class DescendHighColumnGoal extends Goal {
                 && serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
                 && !this.isProtectedHomeBlock(pos)
+                && !this.playerNpc.isTemporaryPillarSupport(pos)
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && state.getFluidState().isEmpty()
                 && serverLevel.getBlockEntity(pos) == null

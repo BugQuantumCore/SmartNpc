@@ -40,6 +40,7 @@ public final class ClearBlockAi {
     private static final int APPROACH_REPATH_INTERVAL_TICKS = 10;
     private static final int MAX_APPROACH_TICKS = 20 * 8;
     private static final int MAX_CLEAR_TARGET_TICKS = 20 * 15;
+    private static final int MAX_CENTERED_BLOCKED_STAND_TICKS = 20;
 
     private final PlayerNpcEntity playerNpc;
     private final BreakingBlockAi breakingBlockAi;
@@ -53,6 +54,7 @@ public final class ClearBlockAi {
     private int approachRepathTicks;
     private int approachTicks;
     private int clearTargetTicks;
+    private int centeredBlockedStandTicks;
 
     public ClearBlockAi(PlayerNpcEntity playerNpc, BreakingBlockAi breakingBlockAi) {
         this.playerNpc = playerNpc;
@@ -229,6 +231,7 @@ public final class ClearBlockAi {
         this.approachRepathTicks = 0;
         this.approachTicks = 0;
         this.clearTargetTicks = 0;
+        this.centeredBlockedStandTicks = 0;
     }
 
     public String detail() {
@@ -418,6 +421,7 @@ public final class ClearBlockAi {
 
         if (canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos)) {
             this.approachTicks = 0;
+            this.centeredBlockedStandTicks = 0;
             return true;
         }
         if (++this.approachTicks > MAX_APPROACH_TICKS) {
@@ -442,9 +446,15 @@ public final class ClearBlockAi {
 
         if (isAtBreakStand(this.playerNpc, this.standPos)) {
             this.playerNpc.getNavigation().stop();
+            if (this.isCenteredOnBreakStand() && ++this.centeredBlockedStandTicks > MAX_CENTERED_BLOCKED_STAND_TICKS) {
+                this.standPos = null;
+                this.centeredBlockedStandTicks = 0;
+                return false;
+            }
             this.nudgeTowardBreakStandCenter();
             return true;
         }
+        this.centeredBlockedStandTicks = 0;
         if (this.approachRepathTicks > 0
                 && !this.playerNpc.getNavigation().isDone()
                 && !this.playerNpc.getNavigation().isStuck()) {
