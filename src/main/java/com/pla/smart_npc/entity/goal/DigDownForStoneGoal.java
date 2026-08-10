@@ -583,6 +583,7 @@ public class DigDownForStoneGoal extends Goal {
         this.skippedClearTargets.clear();
         this.stairSteps++;
         this.moveTo(serverLevel, this.digOrigin);
+        this.updateWalkDetail();
     }
 
     private boolean originChanged(BlockPos previousOrigin) {
@@ -742,7 +743,8 @@ public class DigDownForStoneGoal extends Goal {
                 this::isClearablePathState,
                 this.prospectingOre ? "clearing ore prospect path" : "clearing dig path",
                 CLEAR_OBSTRUCTION_TICKS,
-                CLEAR_OBSTRUCTION_DISTANCE_SQR
+                CLEAR_OBSTRUCTION_DISTANCE_SQR,
+                true
         );
     }
 
@@ -825,8 +827,15 @@ public class DigDownForStoneGoal extends Goal {
     }
 
     private boolean hasBlockingBodyColumn(ServerLevel serverLevel, BlockPos feet) {
-        return !serverLevel.getBlockState(feet).getCollisionShape(serverLevel, feet).isEmpty()
-                || !serverLevel.getBlockState(feet.above()).getCollisionShape(serverLevel, feet.above()).isEmpty();
+        return this.hasBreakableBodySpaceBlocker(serverLevel, feet)
+                || this.hasBreakableBodySpaceBlocker(serverLevel, feet.above());
+    }
+
+    private boolean hasBreakableBodySpaceBlocker(ServerLevel serverLevel, BlockPos pos) {
+        BlockState state = serverLevel.getBlockState(pos);
+        return !this.isProtectedHomeBlock(pos)
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
+                && ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, state, true);
     }
 
     private boolean hasLocalProspectingMovementStalled() {
@@ -909,7 +918,8 @@ public class DigDownForStoneGoal extends Goal {
 
         BlockPos feet = this.playerNpc.blockPosition();
         if (feet.distSqr(this.digOrigin) > LOCAL_STEP_DISTANCE_SQR
-                || !this.isValidLocalProspectingOrigin(serverLevel, feet)) {
+                || !this.isValidLocalProspectingOrigin(serverLevel, feet)
+                || this.hasBlockingBodyColumn(serverLevel, feet)) {
             return false;
         }
 

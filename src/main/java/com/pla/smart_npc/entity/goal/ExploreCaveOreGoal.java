@@ -735,7 +735,7 @@ public class ExploreCaveOreGoal extends Goal {
 
     private boolean canClearBodySpace(ServerLevel serverLevel, BlockPos pos) {
         BlockState state = serverLevel.getBlockState(pos);
-        if (state.getCollisionShape(serverLevel, pos).isEmpty()) {
+        if (state.isAir()) {
             return serverLevel.getFluidState(pos).isEmpty();
         }
 
@@ -961,7 +961,8 @@ public class ExploreCaveOreGoal extends Goal {
                 targetState -> this.isPathObstructionBlock(serverLevel, immutable, targetState),
                 detail,
                 CLEAR_OBSTRUCTION_TICKS,
-                PATH_OBSTRUCTION_BREAK_DISTANCE_SQR
+                PATH_OBSTRUCTION_BREAK_DISTANCE_SQR,
+                true
         )) {
             return true;
         }
@@ -1142,13 +1143,9 @@ public class ExploreCaveOreGoal extends Goal {
     }
 
     private boolean isPathObstructionBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        return !state.isAir()
-                && state.getDestroySpeed(serverLevel, pos) >= 0.0F
-                && !state.getCollisionShape(serverLevel, pos).isEmpty()
-                && state.getFluidState().isEmpty()
+        return ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, state, true)
                 && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
                 && !this.isProtectedHomeBlock(pos)
-                && serverLevel.getBlockEntity(pos) == null
                 && (!state.requiresCorrectToolForDrops() || this.hasUsablePickaxeFor(state));
     }
 

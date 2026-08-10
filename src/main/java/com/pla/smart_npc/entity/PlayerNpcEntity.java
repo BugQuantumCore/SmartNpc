@@ -154,6 +154,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int EXPLORATION_CLIMB_CLEAR_TICKS = 24;
     private static final double EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR = 5.0D * 5.0D;
     private static final int EXPLORATION_CLIMB_CLEAR_RANDOM_POOL = 8;
+    private static final double EXPERIENCE_PICKUP_RADIUS = 3.0D;
     private static final long DAY_LENGTH_TICKS = 24000L;
     private static final long DAILY_JOB_ROLL_TIME = 1L;
     private static final long DAILY_JOB_FALLBACK_ROLL_END_TIME = 12000L;
@@ -291,6 +292,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int animalLootPriorityTicks = 0;
     @Nullable
     private BlockPos animalLootPriorityPos;
+    private int storedExperience = 0;
     private final Map<BlockPos, Integer> temporaryPillarSupportTicks = new HashMap<>();
 
     public int getPlayingIdleCooldown() {
@@ -787,6 +789,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     private void requestExplorationReturnEscape(int ticks) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return;
+        }
+
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this);
         if (home.isEmpty()) {
             return;
@@ -795,6 +801,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
         BlockPos homeCenter = homeArea.origin().offset(homeArea.width() / 2, 1, homeArea.depth() / 2);
         int climbBlocks = homeCenter.getY() - this.blockPosition().getY();
+        if (climbBlocks <= 1 && serverLevel.canSeeSky(this.blockPosition().above())) {
+            return;
+        }
+
         int maxPillarBlocks = Math.max(
                 EXPLORATION_RETURN_ESCAPE_MIN_PILLAR_BLOCKS,
                 Math.min(
@@ -1205,6 +1215,25 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.setCanPickUpLoot(true);
     }
 
+    public int getStoredExperience() {
+        return this.storedExperience;
+    }
+
+    public void awardStoredExperience(int amount) {
+        if (amount <= 0 || this.level().isClientSide()) {
+            return;
+        }
+
+        long updated = (long) this.storedExperience + amount;
+        this.storedExperience = updated > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) updated;
+    }
+
+    @Override
+    public int getExperienceReward() {
+        long reward = (long) super.getExperienceReward() + this.storedExperience;
+        return reward > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) Math.max(0L, reward);
+    }
+
     @Override
     protected void defineSynchedData() {
         super.defineSynchedData();
@@ -1255,6 +1284,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         tag.putInt("CombatFishingCooldown", this.combatFishingCooldown);
         tag.putInt("ShieldCraftCooldown", this.shieldCraftCooldown);
         tag.putInt("ShieldGuardCooldown", this.shieldGuardCooldown);
+        tag.putInt("StoredExperience", this.storedExperience);
         tag.putBoolean("BoatCollector", this.boatCollector);
         tag.putInt("DesiredBoatCount", this.desiredBoatCount);
         tag.putInt("RawLogReserveTarget", this.rawLogReserveTarget);
@@ -1328,6 +1358,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.combatFishingCooldown = tag.getInt("CombatFishingCooldown");
         this.shieldCraftCooldown = tag.getInt("ShieldCraftCooldown");
         this.shieldGuardCooldown = tag.getInt("ShieldGuardCooldown");
+        if (tag.contains("StoredExperience", Tag.TAG_INT)) {
+            this.storedExperience = Math.max(0, tag.getInt("StoredExperience"));
+        }
         if (tag.contains("BoatCollector", Tag.TAG_BYTE)) {
             this.boatCollector = tag.getBoolean("BoatCollector");
         }
@@ -2169,6 +2202,30 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.equipBetterGearFromInventory();
     }
 
+    private void pickupNearbyExperienceOrbs() {
+        if (!isAlive() || isRemoved() || this.isDeadOrDying()) {
+            return;
+        }
+
+        AABB box = this.getBoundingBox().inflate(EXPERIENCE_PICKUP_RADIUS);
+        List<ExperienceOrb> orbs = this.level().getEntitiesOfClass(
+                ExperienceOrb.class,
+                box,
+                orb -> orb.isAlive() && !orb.isRemoved() && orb.getValue() > 0
+        );
+        if (orbs.isEmpty()) {
+            return;
+        }
+
+        long pickedUp = 0L;
+        for (ExperienceOrb orb : orbs) {
+            pickedUp += orb.getValue();
+            orb.discard();
+        }
+        this.awardStoredExperience(pickedUp > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) pickedUp);
+        this.playExperiencePickupSound();
+    }
+
     public boolean tryPickupItemEntity(ItemEntity itemEntity) {
         if (this.level().isClientSide
                 || itemEntity == null
@@ -2240,6 +2297,21 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return true;
     }
 
+    public void playExperiencePickupSound() {
+        if (this.level().isClientSide) {
+            return;
+        }
+
+        this.level().playSound(
+                null,
+                this.blockPosition(),
+                SoundEvents.EXPERIENCE_ORB_PICKUP,
+                SoundSource.HOSTILE,
+                0.2F,
+                0.5F * ((this.getRandom().nextFloat() - this.getRandom().nextFloat()) * 0.7F + 1.8F)
+        );
+    }
+
     public void playInventoryPickupSound() {
         if (this.level().isClientSide) {
             return;
@@ -2273,6 +2345,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.cleanupStaleCombatState();
         this.tickTasklessActivityWatchdog();
         this.tickExplorationClimbFallback(serverLevel);
+
+        if ((tickCount + getId()) % 10 == 0) {
+            this.pickupNearbyExperienceOrbs();
+        }
 
         if ((tickCount + getId()) % 20 != 0) {
             return;
@@ -3129,6 +3205,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     @Override
     public void awardKillScore(@NotNull Entity entity, int i, @NotNull DamageSource damageSource) {
         super.awardKillScore(entity, i, damageSource);
+        if (entity instanceof LivingEntity livingEntity) {
+            this.awardStoredExperience(livingEntity.getExperienceReward());
+        }
         if (ChatUtil.shouldPlayerNpcTauntKill(this, entity)) {
             ChatUtil.scheduleKillerTaunt(this, entity);
         }

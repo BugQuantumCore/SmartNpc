@@ -4,7 +4,9 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -392,13 +394,25 @@ public final class ClearBlockAi {
         }
 
         return !state.getCollisionShape(serverLevel, pos).isEmpty()
-                || allowSoftCover && isSoftCoverState(state);
+                || allowSoftCover && isSoftPathObstructionState(state);
     }
 
     private static boolean isSoftCoverState(BlockState state) {
         return state != null
                 && !state.isAir()
                 && state.canBeReplaced();
+    }
+
+    private static boolean isSoftPathObstructionState(BlockState state) {
+        return isSoftCoverState(state)
+                || state.is(Blocks.TORCH)
+                || state.is(Blocks.WALL_TORCH)
+                || state.is(Blocks.SOUL_TORCH)
+                || state.is(Blocks.SOUL_WALL_TORCH)
+                || state.is(Blocks.REDSTONE_TORCH)
+                || state.is(Blocks.REDSTONE_WALL_TORCH)
+                || state.is(BlockTags.FLOWERS)
+                || state.is(BlockTags.SAPLINGS);
     }
 
     private static boolean isClearable(ServerLevel serverLevel, BlockPos pos, Predicate<BlockState> targetPredicate) {

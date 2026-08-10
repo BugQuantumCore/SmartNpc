@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.entity.ai.WeaponAi;
@@ -24,8 +25,11 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.level.pathfinder.Path;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.WeakHashMap;
@@ -37,25 +41,41 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     private static final int MAX_GATHER_TICKS = 20 * 45;
     private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int SHEEP_ATTACK_INTERVAL_TICKS = 14;
+    private static final int SHEEP_ROUTE_CLEAR_TICKS = 28;
+    private static final int SHEEP_ROUTE_FAILURES_BEFORE_CLEAR = 2;
+    private static final int SHEEP_ROUTE_FAILURES_BEFORE_ESCAPE = 4;
+    private static final int SHEEP_UNREACHABLE_COOLDOWN_TICKS = 20 * 45;
+    private static final int SHEEP_ESCAPE_REQUEST_TICKS = 20 * 8;
+    private static final int SHEEP_ESCAPE_EXTRA_BLOCKS = 3;
+    private static final int SHEEP_ESCAPE_MAX_BLOCKS = 10;
+    private static final int SHEEP_APPROACH_SAFE_DROP_BLOCKS = 5;
+    private static final int SHEEP_LOCAL_ROUTE_HORIZONTAL_RADIUS = 8;
+    private static final int SHEEP_LOCAL_ROUTE_VERTICAL_DOWN = 5;
+    private static final int SHEEP_LOCAL_ROUTE_VERTICAL_UP = 6;
     private static final double BREAK_DISTANCE_SQR = 4.5D * 4.5D;
     private static final double STAND_REACHED_DISTANCE_SQR = 1.4D * 1.4D;
     private static final double SHEEP_ATTACK_DISTANCE_SQR = 2.4D * 2.4D;
+    private static final double SHEEP_ROUTE_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
     private static final Map<PlayerNpcEntity, TargetScanCache> TARGET_SCAN_CACHE = new WeakHashMap<>();
+    private static final Map<PlayerNpcEntity, Map<Integer, Integer>> UNREACHABLE_SHEEP_CACHE = new WeakHashMap<>();
 
     private final PlayerNpcEntity playerNpc;
     private final double speed;
     private final ToolAi toolAi;
     private final WeaponAi weaponAi;
     private final BreakingBlockAi breakingBlockAi;
+    private final ClearBlockAi clearBlockAi;
     private final PathNavigationAi pathNavigationAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private MissingBuildMaterialNeed need;
     private BlockPos targetPos;
     private BlockPos standPos;
+    private BlockPos sheepApproachPos;
     private Sheep sheepTarget;
     private int gatherTicks;
     private int repathTicks;
     private int attackTicks;
+    private int sheepRouteFailures;
 
     public GatherMissingBuildMaterialGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -63,6 +83,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         this.toolAi = new ToolAi(playerNpc);
         this.weaponAi = new WeaponAi(playerNpc);
         this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
+        this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
@@ -119,7 +140,9 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         this.need = missing.get();
         this.targetPos = null;
         this.standPos = null;
+        this.sheepApproachPos = null;
         this.sheepTarget = null;
+        this.sheepRouteFailures = 0;
         if (this.need.kind() == MissingBuildMaterialKind.BED) {
             return this.selectBedGatherTarget(serverLevel);
         }
@@ -172,7 +195,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
 
         this.gatherTicks++;
         if (this.sheepTarget != null) {
-            this.tickSheepTarget();
+            this.tickSheepTarget(serverLevel);
             this.updateDetail();
             return;
         }
@@ -231,24 +254,50 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         this.need = null;
         this.targetPos = null;
         this.standPos = null;
+        this.sheepApproachPos = null;
         this.sheepTarget = null;
         this.gatherTicks = 0;
         this.repathTicks = 0;
         this.attackTicks = 0;
+        this.sheepRouteFailures = 0;
+        this.clearBlockAi.stop();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
     }
 
-    private void tickSheepTarget() {
+    private void tickSheepTarget(ServerLevel serverLevel) {
         if (this.sheepTarget == null || !this.sheepTarget.isAlive()) {
             this.finishGathering();
+            return;
+        }
+
+        if (this.tickSheepRouteClear(serverLevel)) {
             return;
         }
 
         this.playerNpc.getLookControl().setLookAt(this.sheepTarget, 35.0F, 35.0F);
         if (this.playerNpc.distanceToSqr(this.sheepTarget) > SHEEP_ATTACK_DISTANCE_SQR) {
             if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
-                this.playerNpc.getNavigation().moveTo(this.sheepTarget, this.speed);
+                if (this.moveTowardSheep(serverLevel)) {
+                    this.repathTicks = REPATH_INTERVAL_TICKS;
+                    return;
+                }
+                this.sheepRouteFailures++;
+                if (this.sheepRouteFailures >= SHEEP_ROUTE_FAILURES_BEFORE_CLEAR
+                        && this.startClearingSheepRoute(serverLevel)) {
+                    this.repathTicks = REPATH_INTERVAL_TICKS;
+                    return;
+                }
+                if (this.sheepRouteFailures >= SHEEP_ROUTE_FAILURES_BEFORE_ESCAPE
+                        && this.requestSheepApproachEscape(serverLevel)) {
+                    this.finishGathering();
+                    return;
+                }
+                if (this.sheepRouteFailures > SHEEP_ROUTE_FAILURES_BEFORE_ESCAPE) {
+                    this.markSheepUnreachable(this.sheepTarget);
+                    this.finishGathering(SHEEP_UNREACHABLE_COOLDOWN_TICKS);
+                    return;
+                }
                 this.repathTicks = REPATH_INTERVAL_TICKS;
             }
             return;
@@ -260,6 +309,124 @@ public class GatherMissingBuildMaterialGoal extends Goal {
             this.playerNpc.triggerMainHandAttackAnimation();
             this.playerNpc.doHurtTarget(this.sheepTarget);
         }
+    }
+
+    private boolean tickSheepRouteClear(ServerLevel serverLevel) {
+        if (!this.clearBlockAi.isRunning()) {
+            return false;
+        }
+
+        ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            return true;
+        }
+        if (result == ClearBlockAi.TickResult.DONE) {
+            this.sheepRouteFailures = 0;
+            this.repathTicks = 0;
+            return true;
+        }
+
+        this.sheepRouteFailures++;
+        this.repathTicks = 0;
+        return false;
+    }
+
+    private boolean moveTowardSheep(ServerLevel serverLevel) {
+        this.sheepApproachPos = this.findSheepApproachPos(serverLevel, this.sheepTarget).orElse(null);
+        boolean moved = this.sheepApproachPos != null
+                && this.pathNavigationAi.moveToWithLocalFallback(
+                serverLevel,
+                this.sheepApproachPos,
+                this.speed,
+                SHEEP_APPROACH_SAFE_DROP_BLOCKS,
+                SHEEP_LOCAL_ROUTE_HORIZONTAL_RADIUS,
+                SHEEP_LOCAL_ROUTE_VERTICAL_DOWN,
+                SHEEP_LOCAL_ROUTE_VERTICAL_UP);
+        if (!moved) {
+            moved = this.playerNpc.getNavigation().moveTo(this.sheepTarget, this.speed);
+        }
+        if (moved) {
+            this.sheepRouteFailures = 0;
+        }
+        return moved;
+    }
+
+    private Optional<BlockPos> findSheepApproachPos(ServerLevel serverLevel, Sheep sheep) {
+        if (sheep == null) {
+            return Optional.empty();
+        }
+
+        BlockPos sheepFeet = sheep.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                if (dx * dx + dz * dz > 4) {
+                    continue;
+                }
+                for (int dy = -2; dy <= 2; dy++) {
+                    BlockPos candidate = sheepFeet.offset(dx, dy, dz);
+                    if (PathNavigationAi.canStandAt(serverLevel, candidate)) {
+                        candidates.add(candidate.immutable());
+                    }
+                }
+            }
+        }
+
+        return candidates.stream()
+                .min(Comparator
+                        .comparingDouble((BlockPos pos) -> this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D))
+                        .thenComparingDouble(pos -> blockDistanceSqr(pos, sheepFeet)));
+    }
+
+    private boolean startClearingSheepRoute(ServerLevel serverLevel) {
+        if (this.sheepTarget == null) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos target = this.sheepApproachPos == null ? this.sheepTarget.blockPosition() : this.sheepApproachPos;
+        List<BlockPos> candidates = new ArrayList<>(ClearBlockAi.gatherObstructionCandidates(feet, target, target));
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos step = feet.relative(direction);
+            candidates.add(step);
+            candidates.add(step.above());
+            candidates.add(step.above(2));
+            candidates.add(step.below());
+        }
+        candidates.removeIf(pos -> pos == null || isProtectedHomeBlock(this.playerNpc, pos));
+
+        return this.clearBlockAi.startNearest(
+                serverLevel,
+                candidates,
+                this::isClearableRouteBlock,
+                "clearing sheep path",
+                SHEEP_ROUTE_CLEAR_TICKS,
+                SHEEP_ROUTE_CLEAR_DISTANCE_SQR,
+                true
+        );
+    }
+
+    private boolean requestSheepApproachEscape(ServerLevel serverLevel) {
+        if (this.sheepTarget == null) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos target = this.sheepTarget.blockPosition();
+        if (target.getY() <= feet.getY() + 1 || serverLevel.canSeeSky(feet.above())) {
+            return false;
+        }
+
+        int maxPillarBlocks = Math.min(
+                SHEEP_ESCAPE_MAX_BLOCKS,
+                Math.max(1, target.getY() - feet.getY() + SHEEP_ESCAPE_EXTRA_BLOCKS)
+        );
+        this.playerNpc.requestExplorationUpwardEscapeTo(target, SHEEP_ESCAPE_REQUEST_TICKS, maxPillarBlocks);
+        return true;
+    }
+
+    private boolean isClearableRouteBlock(BlockState state) {
+        return state != null && !state.isAir();
     }
 
     private boolean selectBedGatherTarget(ServerLevel serverLevel) {
@@ -280,6 +447,8 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         }
         if (nearbySheep != null) {
             this.sheepTarget = nearbySheep;
+            this.sheepRouteFailures = 0;
+            this.sheepApproachPos = null;
             return true;
         }
         if (canGatherBed) {
@@ -291,10 +460,27 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     }
 
     private void finishGathering() {
-        this.playerNpc.setGatherCooldown(20 + this.playerNpc.getRandom().nextInt(20));
+        this.finishGathering(20 + this.playerNpc.getRandom().nextInt(20));
+    }
+
+    private void finishGathering(int cooldownTicks) {
+        this.playerNpc.setGatherCooldown(cooldownTicks);
         this.targetPos = null;
         this.standPos = null;
+        this.sheepApproachPos = null;
         this.sheepTarget = null;
+        this.sheepRouteFailures = 0;
+        this.clearBlockAi.stop();
+    }
+
+    private void markSheepUnreachable(Sheep sheep) {
+        if (sheep == null) {
+            return;
+        }
+        UNREACHABLE_SHEEP_CACHE
+                .computeIfAbsent(this.playerNpc, ignored -> new HashMap<>())
+                .put(sheep.getId(), this.playerNpc.tickCount + SHEEP_UNREACHABLE_COOLDOWN_TICKS);
+        this.playerNpc.setHuntSheepCooldown(Math.max(this.playerNpc.getHuntSheepCooldown(), SHEEP_UNREACHABLE_COOLDOWN_TICKS));
     }
 
     private Optional<BlockPos> findStandPos(ServerLevel serverLevel, BlockPos target) {
@@ -343,6 +529,10 @@ public class GatherMissingBuildMaterialGoal extends Goal {
 
     private void updateDetail() {
         if (this.need == null) {
+            return;
+        }
+        if (this.clearBlockAi.isRunning()) {
+            this.playerNpc.setCurrentAiDetail(this.clearBlockAi.detail());
             return;
         }
         if (this.sheepTarget != null) {
@@ -438,12 +628,32 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     }
 
     private static Optional<Sheep> findNearestSheep(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        pruneUnreachableSheep(playerNpc);
         return serverLevel.getEntitiesOfClass(
                         Sheep.class,
                         playerNpc.getBoundingBox().inflate(SEARCH_RADIUS),
-                        sheep -> sheep.isAlive() && !sheep.isBaby())
+                        sheep -> sheep.isAlive() && !sheep.isBaby() && !isUnreachableSheep(playerNpc, sheep))
                 .stream()
                 .min(Comparator.comparingDouble(playerNpc::distanceToSqr));
+    }
+
+    private static boolean isUnreachableSheep(PlayerNpcEntity playerNpc, Sheep sheep) {
+        Map<Integer, Integer> skipped = UNREACHABLE_SHEEP_CACHE.get(playerNpc);
+        if (skipped == null) {
+            return false;
+        }
+        return skipped.getOrDefault(sheep.getId(), 0) > playerNpc.tickCount;
+    }
+
+    private static void pruneUnreachableSheep(PlayerNpcEntity playerNpc) {
+        Map<Integer, Integer> skipped = UNREACHABLE_SHEEP_CACHE.get(playerNpc);
+        if (skipped == null) {
+            return;
+        }
+        skipped.entrySet().removeIf(entry -> entry.getValue() <= playerNpc.tickCount);
+        if (skipped.isEmpty()) {
+            UNREACHABLE_SHEEP_CACHE.remove(playerNpc);
+        }
     }
 
     private static boolean isProtectedHomeBlock(PlayerNpcEntity playerNpc, BlockPos pos) {

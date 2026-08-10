@@ -2,11 +2,14 @@ package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Predicate;
@@ -28,6 +31,12 @@ public final class ReturnPositionAi {
     private static final int FAILED_LOCAL_ROUTE_COOLDOWN_TICKS = 20 * 3;
     private static final int CLEAR_ATTEMPTS_BEFORE_BREAKING = 2;
     private static final int CLEAR_ATTEMPTS_BEFORE_ESCAPE = 4;
+    private static final int FAILED_ROUTE_RELOCATE_RADIUS = 6;
+    private static final int FAILED_ROUTE_RELOCATE_VERTICAL_DOWN = 6;
+    private static final int FAILED_ROUTE_RELOCATE_VERTICAL_UP = 2;
+    private static final int FAILED_ROUTE_RELOCATE_RANDOM_POOL = 12;
+    private static final int FAILED_ROUTE_RELOCATE_PATH_CHECKS = 24;
+    private static final int FAILED_ROUTE_RELOCATE_COOLDOWN_TICKS = 20 * 4;
     private static final double CLEAR_ROUTE_DISTANCE_SQR = 6.25D;
 
     private final PlayerNpcEntity playerNpc;
@@ -43,6 +52,7 @@ public final class ReturnPositionAi {
     private int routeAttempts;
     private int directPillarsPlaced;
     private int failedLocalRouteCooldownTicks;
+    private int failedRouteRelocateCooldownTicks;
     private String detail = "";
     private String lastRouteDebug = "";
     private String lastClearDebug = "";
@@ -64,6 +74,7 @@ public final class ReturnPositionAi {
         this.routeAttempts = 0;
         this.directPillarsPlaced = 0;
         this.failedLocalRouteCooldownTicks = 0;
+        this.failedRouteRelocateCooldownTicks = 0;
         this.detail = "";
         this.lastRouteDebug = "";
         this.lastClearDebug = "";
@@ -81,6 +92,9 @@ public final class ReturnPositionAi {
         }
         if (this.failedLocalRouteCooldownTicks > 0) {
             this.failedLocalRouteCooldownTicks--;
+        }
+        if (this.failedRouteRelocateCooldownTicks > 0) {
+            this.failedRouteRelocateCooldownTicks--;
         }
 
         if (this.clearBlockAi.isRunning()) {
@@ -174,25 +188,25 @@ public final class ReturnPositionAi {
             return;
         }
 
-        if (this.tryStartDirectPillar(
-                serverLevel,
-                target,
-                protectedBlock,
-                "clearing return pillar space",
-                this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_BREAKING)) {
-            this.detail = this.pillarUpAi.detail();
-            return;
-        }
-
         if (verticalEscapeNeeded && this.startClearingRoute(serverLevel, protectedBlock, clearDetail)) {
             this.detail = this.clearBlockAi.detail();
             return;
         }
 
-        if (this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_ESCAPE || verticalEscapeNeeded) {
+        if (verticalEscapeNeeded && this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_ESCAPE) {
             this.playerNpc.requestForcedUpwardEscapeTo(target, UPWARD_ESCAPE_REQUEST_TICKS, MAX_RETURN_PILLAR_BLOCKS);
             this.detail = moveDetail + " (escaping upward)";
             this.routeAttempts = 0;
+            return;
+        }
+
+        if (!verticalEscapeNeeded && this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_ESCAPE) {
+            if (this.tryMoveToFailedRouteRelocation(serverLevel, target, moveDetail)) {
+                return;
+            }
+            this.detail = moveDetail + " (moving around after blocked return; " + this.debugText("searching route") + ")";
+            this.repathTicks = REPATH_DELAY_TICKS;
+            this.routeAttempts = CLEAR_ATTEMPTS_BEFORE_BREAKING;
             return;
         }
 
@@ -213,6 +227,7 @@ public final class ReturnPositionAi {
         this.routeAttempts = 0;
         this.directPillarsPlaced = 0;
         this.failedLocalRouteCooldownTicks = 0;
+        this.failedRouteRelocateCooldownTicks = 0;
         this.detail = "";
         this.lastRouteDebug = "";
         this.lastClearDebug = "";
@@ -325,6 +340,90 @@ public final class ReturnPositionAi {
     private boolean needsVerticalEscape(ServerLevel serverLevel, BlockPos target) {
         BlockPos current = this.playerNpc.blockPosition();
         return target.getY() > current.getY() + 1 && !serverLevel.canSeeSky(current.above());
+    }
+
+    private boolean tryMoveToFailedRouteRelocation(ServerLevel serverLevel, BlockPos target, String moveDetail) {
+        if (this.failedRouteRelocateCooldownTicks > 0) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        int radius = FAILED_ROUTE_RELOCATE_RADIUS;
+        int radiusSqr = radius * radius;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                int horizontalSqr = dx * dx + dz * dz;
+                if (horizontalSqr < 4 || horizontalSqr > radiusSqr) {
+                    continue;
+                }
+                for (int dy = -FAILED_ROUTE_RELOCATE_VERTICAL_DOWN; dy <= FAILED_ROUTE_RELOCATE_VERTICAL_UP; dy++) {
+                    BlockPos candidate = feet.offset(dx, dy, dz);
+                    if (PathNavigationAi.canStandAt(serverLevel, candidate)) {
+                        candidates.add(candidate.immutable());
+                    }
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            this.lastRouteDebug = this.lastRouteDebug + " relocateCandidates=0";
+            return false;
+        }
+
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> this.relocationScore(serverLevel, feet, target, pos))
+                .thenComparingDouble(pos -> pos.distSqr(feet)));
+        Optional<BlockPos> relocation = this.pathNavigationAi.findReachableRandomizedCandidate(
+                serverLevel,
+                candidates,
+                FAILED_ROUTE_RELOCATE_RANDOM_POOL,
+                FAILED_ROUTE_RELOCATE_PATH_CHECKS,
+                MAX_SAFE_DROP_BLOCKS
+        );
+        if (relocation.isEmpty()) {
+            this.lastRouteDebug = this.lastRouteDebug + " relocate=none";
+            return false;
+        }
+
+        BlockPos stand = relocation.get();
+        if (!this.pathNavigationAi.moveTo(serverLevel, stand, this.speed, MAX_SAFE_DROP_BLOCKS)) {
+            this.lastRouteDebug = this.lastRouteDebug + " relocateMoveFailed @ " + posText(stand);
+            return false;
+        }
+
+        this.failedRouteRelocateCooldownTicks = FAILED_ROUTE_RELOCATE_COOLDOWN_TICKS;
+        this.repathTicks = REPATH_DELAY_TICKS;
+        this.routeAttempts = 0;
+        this.detail = moveDetail + " (moving around @ " + posText(stand) + ")";
+        return true;
+    }
+
+    private double relocationScore(ServerLevel serverLevel, BlockPos feet, BlockPos target, BlockPos candidate) {
+        double score = candidate.distSqr(target) * 0.35D + candidate.distSqr(feet);
+        if (serverLevel.canSeeSky(candidate.above())) {
+            score -= 24.0D;
+        }
+        if (candidate.getY() < feet.getY()) {
+            score -= Math.min(18.0D, (feet.getY() - candidate.getY()) * 3.0D);
+        }
+        Direction directionToTarget = directionToward(feet, target);
+        if (directionToTarget != null) {
+            BlockPos forward = feet.relative(directionToTarget);
+            score += Math.max(0.0D, 8.0D - candidate.distSqr(forward));
+        }
+        return score;
+    }
+
+    private static Direction directionToward(BlockPos from, BlockPos to) {
+        int dx = to.getX() - from.getX();
+        int dz = to.getZ() - from.getZ();
+        if (Math.abs(dx) >= Math.abs(dz) && dx != 0) {
+            return dx > 0 ? Direction.EAST : Direction.WEST;
+        }
+        if (dz != 0) {
+            return dz > 0 ? Direction.SOUTH : Direction.NORTH;
+        }
+        return null;
     }
 
     private static String posText(BlockPos pos) {
