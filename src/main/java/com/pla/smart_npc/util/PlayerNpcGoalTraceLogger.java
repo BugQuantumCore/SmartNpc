@@ -6,17 +6,21 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.FurnaceAi;
 import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.entity.goal.BuildHouseGoal;
+import com.pla.smart_npc.entity.goal.GatherMissingBuildMaterialGoal;
+import com.pla.smart_npc.entity.goal.GatherStoneGoal;
 import com.pla.smart_npc.entity.goal.InterestGatedGoal;
 import com.pla.smart_npc.entity.goal.TerraformBuildSiteGoal;
 import com.pla.smart_npc.network.PlayerNpcInspectatorModePacket;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.ai.goal.WrappedGoal;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraftforge.event.TickEvent;
@@ -24,8 +28,11 @@ import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.StringJoiner;
 import java.util.UUID;
 import java.util.WeakHashMap;
@@ -46,6 +53,9 @@ public final class PlayerNpcGoalTraceLogger {
     private static final double MAX_NON_INSPECTATOR_TRACE_DISTANCE_SQR = 64.0D * 64.0D;
     private static final String PASSIVE_HOME_STATE = "ai.player_npc.being_at_home";
     private static final Map<PlayerNpcEntity, BuildingTextCache> BUILDING_TEXT_CACHE = new WeakHashMap<>();
+    private static final Map<UUID, AllTraceSnapshot> ALL_TRACE_SNAPSHOTS = new HashMap<>();
+    private static boolean allTraceEnabled;
+    private static String allTraceViewer = "server";
 
     private PlayerNpcGoalTraceLogger() {
     }
@@ -57,6 +67,7 @@ public final class PlayerNpcGoalTraceLogger {
         }
 
         long serverTick = event.getServer().getTickCount();
+        tickAllNpcTrace(event.getServer(), serverTick);
         for (ServerPlayer player : event.getServer().getPlayerList().getPlayers()) {
             CompoundTag data = player.getPersistentData();
             if (!data.getBoolean(ACTIVE_KEY)) {
@@ -71,7 +82,7 @@ public final class PlayerNpcGoalTraceLogger {
             }
 
             String state = sanitize(tracedNpc.getCurrentAiState());
-            String detail = sanitize(tracedNpc.getCurrentAiDetail());
+            String detail = effectiveTraceDetail(tracedNpc, state, sanitize(tracedNpc.getCurrentAiDetail()));
             String previousState = sanitize(data.getString(LAST_STATE_KEY));
             String previousDetail = sanitize(data.getString(LAST_DETAIL_KEY));
             boolean changed = !previousState.equals(state) || !previousDetail.equals(detail);
@@ -86,7 +97,7 @@ public final class PlayerNpcGoalTraceLogger {
             }
 
             data.putLong(LAST_LOG_TICK_KEY, serverTick);
-            logTraceLine(player, tracedNpc, serverTick, state, detail, previousState);
+            logTraceLine(player.getGameProfile().getName(), tracedNpc, serverTick, state, detail, previousState);
             data.putString(LAST_STATE_KEY, state);
             data.putString(LAST_DETAIL_KEY, detail);
         }
@@ -122,6 +133,10 @@ public final class PlayerNpcGoalTraceLogger {
         return tracing;
     }
 
+    public static boolean isEffectivelyTracing(ServerPlayer player, PlayerNpcEntity playerNpc) {
+        return allTraceEnabled || isTracing(player, playerNpc);
+    }
+
     public static void setTraceEnabled(ServerPlayer player, PlayerNpcEntity playerNpc, boolean enabled) {
         if (player == null) {
             return;
@@ -142,8 +157,9 @@ public final class PlayerNpcGoalTraceLogger {
         data.putUUID(ENTITY_UUID_KEY, playerNpc.getUUID());
         data.putInt(ENTITY_ID_KEY, playerNpc.getId());
         data.putLong(LAST_LOG_TICK_KEY, 0L);
-        data.putString(LAST_STATE_KEY, sanitize(playerNpc.getCurrentAiState()));
-        data.putString(LAST_DETAIL_KEY, sanitize(playerNpc.getCurrentAiDetail()));
+        String state = sanitize(playerNpc.getCurrentAiState());
+        data.putString(LAST_STATE_KEY, state);
+        data.putString(LAST_DETAIL_KEY, effectiveTraceDetail(playerNpc, state, sanitize(playerNpc.getCurrentAiDetail())));
 
         SmartNpc.LOGGER.info(
                 "Smart NPC goal trace enabled: viewer={} npc={}#{} dim={} pos={}",
@@ -193,15 +209,80 @@ public final class PlayerNpcGoalTraceLogger {
         }
     }
 
-    private static void logTraceLine(ServerPlayer viewer, PlayerNpcEntity playerNpc, long serverTick, String state, String detail, String previousState) {
+    public static boolean isAllTraceEnabled() {
+        return allTraceEnabled;
+    }
+
+    public static void setAllTraceEnabled(boolean enabled, String viewerName) {
+        allTraceEnabled = enabled;
+        allTraceViewer = sanitize(viewerName).isBlank() ? "server" : sanitize(viewerName);
+        ALL_TRACE_SNAPSHOTS.clear();
+
+        SmartNpc.LOGGER.info(
+                "Smart NPC goal trace all {}: viewer={}",
+                enabled ? "enabled" : "disabled",
+                allTraceViewer
+        );
+    }
+
+    public static int countLoadedPlayerNpcs(MinecraftServer server) {
+        int count = 0;
+        if (server == null) {
+            return 0;
+        }
+        for (ServerLevel level : server.getAllLevels()) {
+            for (var entity : level.getAllEntities()) {
+                if (entity instanceof PlayerNpcEntity playerNpc && playerNpc.isAlive() && !playerNpc.isRemoved()) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    private static void tickAllNpcTrace(MinecraftServer server, long serverTick) {
+        if (!allTraceEnabled || server == null) {
+            return;
+        }
+
+        Set<UUID> seen = new HashSet<>();
+        String viewerName = allTraceViewer + "[all]";
+        for (ServerLevel level : server.getAllLevels()) {
+            for (var entity : level.getAllEntities()) {
+                if (!(entity instanceof PlayerNpcEntity playerNpc) || !playerNpc.isAlive() || playerNpc.isRemoved()) {
+                    continue;
+                }
+
+                UUID npcId = playerNpc.getUUID();
+                seen.add(npcId);
+                String state = sanitize(playerNpc.getCurrentAiState());
+                String detail = effectiveTraceDetail(playerNpc, state, sanitize(playerNpc.getCurrentAiDetail()));
+                AllTraceSnapshot previous = ALL_TRACE_SNAPSHOTS.get(npcId);
+                String previousState = previous == null ? "" : previous.state();
+                String previousDetail = previous == null ? "" : previous.detail();
+                boolean changed = previous == null || !previousState.equals(state) || !previousDetail.equals(detail);
+                long lastLogTick = previous == null ? 0L : previous.lastLogTick();
+                int interval = changed ? TRACE_INTERVAL_TICKS : unchangedTraceInterval(state);
+                if (lastLogTick > 0L && serverTick - lastLogTick < interval) {
+                    continue;
+                }
+
+                logTraceLine(viewerName, playerNpc, serverTick, state, detail, previousState);
+                ALL_TRACE_SNAPSHOTS.put(npcId, new AllTraceSnapshot(serverTick, state, detail));
+            }
+        }
+        ALL_TRACE_SNAPSHOTS.keySet().removeIf(uuid -> !seen.contains(uuid));
+    }
+
+    private static void logTraceLine(String viewerName, PlayerNpcEntity playerNpc, long serverTick, String state, String detail, String previousState) {
         String stateChange = previousState.isBlank() || previousState.equals(state)
                 ? "none"
                 : previousState + "->" + state;
 
         String result = traceResult(playerNpc, state);
         SmartNpc.LOGGER.info(
-                "Smart NPC goal trace: viewer={} tick={} npc={}#{} dim={} pos={} health={}/{} flags={} state={} stateChange={} detail=\"{}\" result={} target={} navigation={} cooldowns={} building={} runningGoals={} runningTargetGoals={}",
-                viewer.getGameProfile().getName(),
+                "Smart NPC goal trace: viewer={} tick={} npc={}#{} dim={} pos={} health={}/{} flags={} state={} stateChange={} detail=\"{}\" detailBlock={} result={} target={} navigation={} cooldowns={} vertical={} building={} runningGoals={} runningTargetGoals={}",
+                sanitize(viewerName),
                 serverTick,
                 sanitize(playerNpc.getDisplayName().getString()),
                 playerNpc.getId(),
@@ -213,14 +294,79 @@ public final class PlayerNpcGoalTraceLogger {
                 state.isBlank() ? "none" : state,
                 stateChange,
                 detail.isBlank() ? "none" : detail,
+                detailBlockText(playerNpc, detail),
                 result,
                 targetText(playerNpc.getTarget()),
                 navigationText(playerNpc.getNavigation()),
                 cooldownsText(playerNpc),
+                verticalText(playerNpc),
                 buildingText(playerNpc),
                 runningGoalsText(playerNpc.goalSelector.getRunningGoals().collect(Collectors.toList())),
                 runningGoalsText(playerNpc.targetSelector.getRunningGoals().collect(Collectors.toList()))
         );
+    }
+
+    private static String effectiveTraceDetail(PlayerNpcEntity playerNpc, String state, String detail) {
+        if (detail != null && !detail.isBlank()) {
+            return detail;
+        }
+        if (PlayerNpcEntity.AI_IDLE.equals(state)) {
+            return sanitize(playerNpc.getIdleTraceDetail());
+        }
+        return "";
+    }
+
+    private static String detailBlockText(PlayerNpcEntity playerNpc, String detail) {
+        BlockPos pos = parseDetailBlockPos(detail);
+        if (pos == null) {
+            return "none";
+        }
+        if (!(playerNpc.level() instanceof ServerLevel serverLevel)
+                || !serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+            return "pos=" + posText(pos) + ",outOfBounds=true";
+        }
+
+        BlockState state = serverLevel.getBlockState(pos);
+        String blockId = String.valueOf(net.minecraftforge.registries.ForgeRegistries.BLOCKS.getKey(state.getBlock()));
+        boolean insideHome = PlayerNpcHomeUtil.getHome(playerNpc)
+                .map(home -> PlayerNpcHomeUtil.isInside(home, pos))
+                .orElse(false);
+        return "pos=" + posText(pos)
+                + ",block=" + blockId
+                + ",air=" + state.isAir()
+                + ",fluid=" + !state.getFluidState().isEmpty()
+                + ",hardness=" + format(state.getDestroySpeed(serverLevel, pos))
+                + ",collisionEmpty=" + state.getCollisionShape(serverLevel, pos).isEmpty()
+                + ",blockEntity=" + (serverLevel.getBlockEntity(pos) != null)
+                + ",insideHome=" + insideHome
+                + ",insideBuildFootprint=" + PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos);
+    }
+
+    private static BlockPos parseDetailBlockPos(String detail) {
+        if (detail == null) {
+            return null;
+        }
+
+        int marker = detail.indexOf("@ ");
+        if (marker < 0) {
+            return null;
+        }
+
+        String[] parts = detail.substring(marker + 2).trim().split("\\s+");
+        if (parts.length < 3) {
+            return null;
+        }
+
+        try {
+            return new BlockPos(
+                    Integer.parseInt(parts[0]),
+                    Integer.parseInt(parts[1]),
+                    Integer.parseInt(parts[2])
+            );
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private static int unchangedTraceInterval(String state) {
@@ -353,6 +499,21 @@ public final class PlayerNpcGoalTraceLogger {
         return joiner.toString();
     }
 
+    private static String verticalText(PlayerNpcEntity playerNpc) {
+        StringJoiner joiner = new StringJoiner(",");
+        BlockPos upwardTarget = playerNpc.getUpwardEscapeTarget();
+        if (upwardTarget != null) {
+            joiner.add("target=" + posText(upwardTarget));
+            joiner.add("forced=" + playerNpc.isForcedUpwardEscape());
+            joiner.add("max=" + playerNpc.getUpwardEscapeMaxPillarBlocks());
+        }
+        if (playerNpc.isStoneAccessClearing()) {
+            joiner.add("stoneAccess=" + playerNpc.getStoneAccessClearCooldown());
+        }
+        String text = joiner.toString();
+        return text.isBlank() ? "none" : text;
+    }
+
     private static String buildingText(PlayerNpcEntity playerNpc) {
         if (!(playerNpc.level() instanceof ServerLevel serverLevel)
                 || !playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
@@ -378,11 +539,15 @@ public final class PlayerNpcGoalTraceLogger {
         FurnaceAi furnaceAi = new FurnaceAi(playerNpc);
         String text = "logs=" + logs + "/" + playerNpc.getLogSupplyGoal()
                 + ",stone=" + stone + "/" + playerNpc.getStoneSupplyGoal()
+                + ",needLogSupply=" + playerNpc.shouldPrioritizeLogGathering()
+                + ",needCobbleSupply=" + playerNpc.shouldPrioritizeCobblestoneGathering()
+                + ",stonePhase=" + GatherStoneGoal.isStoneSupplyPhaseActive(playerNpc, serverLevel)
                 + ",prep=" + TerraformBuildSiteGoal.hasActionablePrepWork(playerNpc, serverLevel)
                 + ",prepNeedsShovel=" + TerraformBuildSiteGoal.needsShovelForPrep(playerNpc, serverLevel)
                 + ",build=" + BuildHouseGoal.hasReadyHomeBuildWork(playerNpc, serverLevel)
                 + ",needLogs=" + PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, playerNpc)
                 + ",needStone=" + PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, playerNpc)
+                + ",missingNonPrimary=" + GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(playerNpc, serverLevel)
                 + ",torchCharcoal=" + PlayerNpcBuildMaterialUtil.needsTorchCharcoalSmelting(serverLevel, playerNpc)
                 + ",furnaceInput=" + furnaceAi.hasInputForWork(serverLevel)
                 + ",furnaceFuel=" + furnaceAi.hasFuel()
@@ -500,5 +665,8 @@ public final class PlayerNpcGoalTraceLogger {
                     && this.logGoal == currentLogGoal
                     && this.stoneGoal == currentStoneGoal;
         }
+    }
+
+    private record AllTraceSnapshot(long lastLogTick, String state, String detail) {
     }
 }

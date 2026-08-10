@@ -1,6 +1,7 @@
 package com.pla.smart_npc;
 
 import com.mojang.serialization.Codec;
+import com.pla.smart_npc.client.SmartNpcClientItemProperties;
 import com.pla.smart_npc.client.gui.InventoryViewerScreen;
 import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.config.SmartNpcConfig;
@@ -62,7 +63,10 @@ public class SmartNpc {
     }
 
     private void clientSetup(final FMLClientSetupEvent event) {
-        event.enqueueWork(() -> MenuScreens.register(SmartNpcModMenus.INVENTORY_VIEWER.get(), InventoryViewerScreen::new));
+        event.enqueueWork(() -> {
+            MenuScreens.register(SmartNpcModMenus.INVENTORY_VIEWER.get(), InventoryViewerScreen::new);
+            SmartNpcClientItemProperties.register();
+        });
     }
 
     @Mod.EventBusSubscriber(modid = MODID, bus = Mod.EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)

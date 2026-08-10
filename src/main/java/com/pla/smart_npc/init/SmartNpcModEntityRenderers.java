@@ -13,5 +13,6 @@ public class SmartNpcModEntityRenderers {
     @SubscribeEvent
     public static void registerEntityRenderers(RegisterRenderers registerrenderers) {
         registerrenderers.registerEntityRenderer(SmartNpcModEntities.PLAYER_NPC.get(), FakePlayerRenderer::new);
+        registerrenderers.registerEntityRenderer(SmartNpcModEntities.PLAYER_NPC_FISHING_BOBBER.get(), PlayerNpcFishingBobberRenderer::new);
     }
 }

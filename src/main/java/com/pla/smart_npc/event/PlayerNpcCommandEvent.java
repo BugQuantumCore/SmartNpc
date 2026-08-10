@@ -9,6 +9,7 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.init.SmartNpcModEntities;
 import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.util.PlayerNpcForceTickManager;
+import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
 import com.pla.smart_npc.util.ProgressionUtil;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -60,7 +61,15 @@ public final class PlayerNpcCommandEvent {
                                         .executes(context -> setDifficulty(
                                                 context.getSource(),
                                                 StringArgumentType.getString(context, "difficulty")
-                                        ))))));
+                                        )))))
+                .then(Commands.literal("trace")
+                        .then(Commands.literal("all")
+                                .then(Commands.literal("on")
+                                        .executes(context -> setTraceAll(context.getSource(), true)))
+                                .then(Commands.literal("off")
+                                        .executes(context -> setTraceAll(context.getSource(), false)))
+                                .then(Commands.literal("status")
+                                        .executes(context -> getTraceAllStatus(context.getSource()))))));
     }
 
     private static int spawnPlayer(CommandSourceStack source, String name) {
@@ -118,5 +127,30 @@ public final class PlayerNpcCommandEvent {
                 + (changed ? "changed to " : "is already ")
                 + difficulty.id()), true);
         return changed ? 1 : 0;
+    }
+
+    private static int setTraceAll(CommandSourceStack source, boolean enabled) {
+        PlayerNpcGoalTraceLogger.setAllTraceEnabled(enabled, sourceName(source));
+        int loadedCount = PlayerNpcGoalTraceLogger.countLoadedPlayerNpcs(source.getServer());
+        source.sendSuccess(() -> Component.literal("Player NPC all trace "
+                + (enabled ? "enabled" : "disabled")
+                + " for "
+                + loadedCount
+                + " loaded NPC(s)"), true);
+        return 1;
+    }
+
+    private static int getTraceAllStatus(CommandSourceStack source) {
+        int loadedCount = PlayerNpcGoalTraceLogger.countLoadedPlayerNpcs(source.getServer());
+        source.sendSuccess(() -> Component.literal("Player NPC all trace is "
+                + (PlayerNpcGoalTraceLogger.isAllTraceEnabled() ? "enabled" : "disabled")
+                + " with "
+                + loadedCount
+                + " loaded NPC(s)"), false);
+        return 1;
+    }
+
+    private static String sourceName(CommandSourceStack source) {
+        return source.getDisplayName().getString();
     }
 }

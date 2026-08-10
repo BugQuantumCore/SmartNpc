@@ -90,7 +90,7 @@ public final class ClearBlockAi {
         return this.start(serverLevel, targetPos, targetPredicate, detail, requiredTicks, clearDistanceSqr, false);
     }
 
-    private boolean start(
+    public boolean start(
             ServerLevel serverLevel,
             BlockPos targetPos,
             Predicate<BlockState> targetPredicate,

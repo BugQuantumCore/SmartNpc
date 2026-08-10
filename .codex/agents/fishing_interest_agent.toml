@@ -20,6 +20,7 @@ Project knowledge to consult first:
 - .codex/knowledge/goals/combat_fishing_rod_goal.md
 - .codex/knowledge/goals/boat_stockpile_goal.md
 - .codex/knowledge/goals/craft_basic_gear_goal.md
+- .codex/knowledge/goals/gather_logs_goal.md
 - .codex/knowledge/goals/gather_stone_goal.md
 
 Useful project files:
@@ -40,14 +41,16 @@ Current SmartNpc fishing-interest flow:
 - `PlayerNpcEntity.registerGoals()` gates `PlayerNpcFishingGoal`, `BoatStockpileGoal`, and `CombatFishingRodGoal` behind `PlayerNpcInterest.FISHING`.
 - Fishing is a daily job. Use `playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING)` for daytime fishing-specific exploration and work decisions, not only the raw interest.
 - Fishing NPCs still share support work for logs and stone. `GatherLogsGoal`, `GatherStoneGoal`, and `DigDownForStoneGoal` can run for FISHING so a fisher can satisfy supply/tool needs before fishing.
-- During a FISHING active stone-support phase, `CraftBasicGearGoal` may interrupt for a missing pickaxe, but once the fisher has a pickaxe it must defer all non-pickaxe crafting until the stone target is complete. This prevents priority-5 crafting from fighting priority-6 stone gathering.
-- `CraftBasicGearGoal` can craft a missing fishing rod after critical starter tools are handled. The spawned FISHING NPC inventory is also seeded with one to three rods.
+- During a FISHING active stone-support phase, `CraftBasicGearGoal` may interrupt only for a missing pickaxe. Once the fisher has a pickaxe, defer shovel/upgrade/sword/rod crafting until stone support is complete so crafting cannot consume the just-satisfied cobble supply and reopen gathering.
+- `CraftBasicGearGoal` can craft a missing fishing rod after critical starter tools are handled and after the active stone-support phase is closed. For pure fishing jobs it should not craft optional stone upgrades or swords ahead of water exploration. Do not diagnose a fishing stall as rod-crafting priority if the NPC already has a usable rod in the main hand or inventory; in that case the next blockers are usually support supplies, water search, navigation, or climb/escape handling.
 - Non-combat fishing waits for daytime, no thunder, no combat target, no healing/passenger/no-AI state, no active fishing cooldown, met log supply, met cobblestone supply, a usable rod in hand or inventory, and a reachable local fishing spot.
+- Fishing-water exploration also waits for met log supply, met cobblestone supply, and a usable rod. It may request bounded upward escape through `ExploreAroundGoal`; the FISHING registration currently caps that request at 18 pillar blocks and must not bypass the log -> stone -> water flow.
+- A fishing-water exploration climb request is not complete just because the requested surface target is within one block. `EscapeHoleWithBlockGoal` should keep the request active until the NPC reaches open-sky body space and is no longer trapped, so standing under leaves/tree cover can trigger pillar-path clearing or pillaring instead of idling with `exploration climb request`.
 - Fishing water search scans a bounded local volume, accepts water with open collision above and nearby water room, chooses a reachable stand position within cast distance, then chooses a cast water block from that stand.
-- The goal first walks to the stand position with detail `walking to fishing spot @ x y z`; only after the stand is reached does it equip/cast and switch detail to `fishing @ x y z`.
+- The goal first walks to the stand position with detail `walking to water @ x y z`; only after the stand is reached does it equip/cast and switch detail through `casting @ x y z`, `hook @ x y z`, and `bite @ x y z`.
 - The fishing rod must be in the main hand for the cast and wait. Temporary rod swaps must use `PlayerNpcEntity.setMainHandItemForAi(...)`, and `PlayerNpcEntity.shouldPauseMainHandAutoEquip()` must include `ai.player_npc.fishing` so automatic weapon/tool upgrades do not replace the rod with a sword, axe, pickaxe, bow, or other main-hand gear mid-cast.
 - After casting, continuation should require the active main-hand rod, not merely any rod elsewhere in inventory. If another behavior displaces the rod, the fishing goal should end rather than wait/retrieve with a wrong item.
-- Retrieving swings the main hand, plays retrieve sound, damages the active rod by one durability, rolls miss chance from luck/unluck and rod enchantments, then uses vanilla `BuiltInLootTables.FISHING` with the rod as `LootContextParams.TOOL`.
+- Retrieving swings the main hand, plays retrieve sound, asks `PlayerNpcFishingBobberEntity` to retrieve, and damages the active rod by the returned durability cost. The custom bobber owns vanilla `BuiltInLootTables.FISHING` loot generation with the rod as `LootContextParams.TOOL`.
 - Loot is inserted into the Player NPC inventory; overflow is dropped in world. Successful insertion plays the inventory pickup sound.
 - Stop restores the previous main hand after stashing the temporary rod back into inventory or dropping it if inventory is full, then sets `fishingCooldown`.
 - Combat fishing is separate: `CombatFishingRodGoal` temporarily equips the rod in the offhand, casts visually, pulls the current target, damages the offhand rod, restores the previous offhand, and uses `combatFishingCooldown`.
@@ -65,7 +68,7 @@ MineColonies fisherman flow to preserve as reference:
 
 Rules:
 - Keep fishing mechanics in `PlayerNpcFishingGoal` or focused reusable helpers, not as broad behavior blobs in `PlayerNpcEntity`.
-- Do not rely on a vanilla `FishingHook` owned by `PlayerNpcEntity`; vanilla hooks require a real player owner. SmartNpc currently simulates cast/wait/retrieve with particles, sounds, durability, and loot tables.
+- Do not rely on a vanilla `FishingHook` owned by `PlayerNpcEntity`; vanilla hooks require a real player owner. SmartNpc uses `PlayerNpcFishingBobberEntity` for cast, wait, retrieve, durability, and loot behavior.
 - Do not let main-hand auto-equip replace a temporary fishing rod during `ai.player_npc.fishing`.
 - Do not treat rods as permanent weapons when temporarily equipping them. Use guarded AI hand setters for main-hand fishing swaps.
 - Keep fishing, night camp, boat, and combat-fishing cooldowns as integer fields on `PlayerNpcEntity`; save/load and tick persistent cooldowns through `tickAiCooldowns()`.
@@ -77,9 +80,10 @@ Useful trace strings:
 - `ai.player_npc.fishing`
 - `ai.player_npc.combat_fishing`
 - `ai.player_npc.fishing_night_camp`
-- `walking to fishing spot @`
-- `fishing @`
-- `missed fish @`
+- `walking to water @`
+- `casting @`
+- `hook @`
+- `bite @`
 - `exploring for water`
 - `fishing camp`
 - `combatFish=`

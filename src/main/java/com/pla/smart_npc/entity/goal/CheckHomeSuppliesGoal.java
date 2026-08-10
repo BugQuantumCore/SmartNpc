@@ -84,6 +84,16 @@ public class CheckHomeSuppliesGoal extends Goal {
                 || this.playerNpc.getTarget() != null) {
             return false;
         }
+        if (this.playerNpc.isStoneAccessClearing()) {
+            if (!this.playerNpc.getIdleTraceDetail().startsWith("stone ")) {
+                this.playerNpc.setIdleTraceDetail(
+                        "home supplies blocked: stone access clearing "
+                                + this.playerNpc.getStoneAccessClearCooldown() + "t",
+                        20 * 4
+                );
+            }
+            return false;
+        }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }

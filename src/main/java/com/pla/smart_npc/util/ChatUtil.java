@@ -52,8 +52,8 @@ public class ChatUtil {
         broadcastNpcChat(speaker, randomKey(speaker, "chat.player_npc.broken_bed", BROKEN_BED_MESSAGES), breaker.getDisplayName());
     }
 
-    public static void broadcastDeathSummary(PlayerNpcEntity victim, Entity killer) {
-        broadcastSystemMessage(victim, Component.translatable("chat.player_npc.death_summary", victim.getDisplayName(), killer.getDisplayName()));
+    public static void broadcastDeathSummary(PlayerNpcEntity victim, Component deathMessage) {
+        broadcastSystemMessage(victim, deathMessage);
     }
 
     public static void scheduleKillerTaunt(PlayerNpcEntity killer, Entity victim) {
@@ -91,8 +91,8 @@ public class ChatUtil {
         return killer != null && isPlayerLikeThreat(victim);
     }
 
-    public static boolean shouldReportPlayerNpcDeath(PlayerNpcEntity victim, Entity killer) {
-        return victim != null && isPlayerLikeThreat(killer);
+    public static boolean shouldReportPlayerNpcDeath(PlayerNpcEntity victim) {
+        return victim != null;
     }
 
     private static void joinGame(Entity entity, Component name) {

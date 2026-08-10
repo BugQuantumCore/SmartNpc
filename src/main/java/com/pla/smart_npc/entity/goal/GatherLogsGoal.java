@@ -131,10 +131,11 @@ public class GatherLogsGoal extends Goal {
                     || ignoredLogPos.test(candidate)) {
                 continue;
             }
-            if (canMineFromCurrentPosition(playerNpc, candidate)) {
+            boolean currentStandProtected = isProtectedHomeStandPos(playerNpc, playerNpc.blockPosition());
+            if (!currentStandProtected && canMineFromCurrentPosition(playerNpc, candidate)) {
                 return true;
             }
-            if (canPillarTowardFrom(playerNpc.blockPosition(), candidate)) {
+            if (!currentStandProtected && canPillarTowardFrom(playerNpc.blockPosition(), candidate)) {
                 return true;
             }
             if (pathChecks++ >= MAX_LOG_PATH_CHECKS) {
@@ -168,7 +169,7 @@ public class GatherLogsGoal extends Goal {
                 || ReturnHomeGoal.shouldSuppressExplorationForHome(this.playerNpc, serverLevel)
                 || GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
                 || !this.needsLogs(serverLevel)
-                || !this.isMiningOnlyLogSupply()
+                || !this.isSupplyLogJob()
                 && (TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
                 || BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel))) {
             return false;
@@ -258,6 +259,18 @@ public class GatherLogsGoal extends Goal {
         );
 
         if (!this.gatheringDirt && this.tryStartClearBlock(serverLevel)) {
+            this.updateDetail();
+            return;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (!this.gatheringDirt
+                && this.targetPos != null
+                && this.isValidLog(serverLevel, this.targetPos)
+                && isProtectedHomeStandPos(this.playerNpc, feet)
+                && distanceFromStandToTargetSqr(feet, this.targetPos) > BREAK_DISTANCE_SQR
+                && canPillarTowardFrom(feet, this.targetPos)
+                && this.tryRecoverProtectedLogStand(serverLevel, feet)) {
             this.updateDetail();
             return;
         }
@@ -442,8 +455,10 @@ public class GatherLogsGoal extends Goal {
                 }
 
                 Optional<BlockPos> stand = this.findStandPos(serverLevel, candidate);
-                boolean canMineHere = canMineFromCurrentPosition(this.playerNpc, candidate);
-                boolean canPillarHere = canPillarTowardFrom(this.playerNpc.blockPosition(), candidate);
+                BlockPos feet = this.playerNpc.blockPosition();
+                boolean currentStandProtected = isProtectedHomeStandPos(this.playerNpc, feet);
+                boolean canMineHere = !currentStandProtected && canMineFromCurrentPosition(this.playerNpc, candidate);
+                boolean canPillarHere = !currentStandProtected && canPillarTowardFrom(feet, candidate);
                 if (stand.isEmpty() && !canMineHere && !canPillarHere) {
                     continue;
                 }
@@ -582,10 +597,16 @@ public class GatherLogsGoal extends Goal {
 
         BlockPos feet = this.playerNpc.blockPosition();
         return distanceFromStandToTargetSqr(feet, this.targetPos) > BREAK_DISTANCE_SQR
-                && canPillarTowardFrom(feet, this.targetPos);
+                && canPillarTowardFrom(feet, this.targetPos)
+                && !isProtectedHomeStandPos(this.playerNpc, feet);
     }
 
     private boolean tryPillarStep(ServerLevel serverLevel) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.tryRecoverProtectedLogStand(serverLevel, feet)) {
+            return true;
+        }
+
         int dirtCount = ResourceAi.countDirt(this.playerNpc);
         int dirtNeeded = this.requiredDirtForCurrentPillarPlan();
         if (dirtCount < dirtNeeded) {
@@ -622,7 +643,6 @@ public class GatherLogsGoal extends Goal {
         }
 
         this.searchingDirtForPillar = false;
-        BlockPos feet = this.playerNpc.blockPosition();
         if (!this.playerNpc.onGround()) {
             this.pillarTraceDetail = "pillar waiting for ground @ " + posText(feet);
             this.lookDownAt(feet);
@@ -653,6 +673,30 @@ public class GatherLogsGoal extends Goal {
             return true;
         }
         this.pillarTraceDetail = "";
+        return true;
+    }
+
+    private boolean tryRecoverProtectedLogStand(ServerLevel serverLevel, BlockPos feet) {
+        if (!isProtectedHomeStandPos(this.playerNpc, feet)) {
+            return false;
+        }
+        if (this.tryMoveToBetterPillarBase(serverLevel, feet, "protected home pillar base")) {
+            return true;
+        }
+        if (this.targetPos != null) {
+            BlockPos skippedTarget = this.targetPos.immutable();
+            this.ignoreLogTarget(skippedTarget);
+            this.breakingBlockAi.stop();
+            this.clearBlockAi.stop();
+            this.pillarUpAi.clear();
+            this.targetPos = null;
+            this.standPos = null;
+            this.pillarTraceDetail = "skipping protected home log stand @ "
+                    + posText(feet)
+                    + " for log @ "
+                    + posText(skippedTarget);
+            this.selectNextTargetOrDescendFromPillar(serverLevel);
+        }
         return true;
     }
 
@@ -766,18 +810,25 @@ public class GatherLogsGoal extends Goal {
             }
         }
 
-        return candidates.stream()
+        List<BlockPos> betterBases = candidates.stream()
                 .map(BlockPos::immutable)
                 .distinct()
                 .filter(pos -> !pos.equals(blockedFeet))
+                .filter(pos -> !isProtectedHomeStandPos(this.playerNpc, pos))
                 .filter(pos -> distanceFromStandToTargetSqr(pos, this.targetPos) > BREAK_DISTANCE_SQR)
                 .filter(pos -> canPillarTowardFrom(pos, this.targetPos))
                 .filter(pos -> canStandAt(serverLevel, pos))
                 .filter(pos -> canReachOrAlreadyAt(this.playerNpc, pos))
                 .filter(pos -> this.pillarUpAi.startBlocker(serverLevel, pos).isBlank())
-                .min(Comparator
+                .sorted(Comparator
                         .comparingDouble((BlockPos pos) -> horizontalDistanceToTargetColumnSqr(pos, this.targetPos))
-                        .thenComparingDouble(pos -> pos.distSqr(this.playerNpc.blockPosition())));
+                        .thenComparingDouble(pos -> pos.distSqr(this.playerNpc.blockPosition())))
+                .limit(4)
+                .toList();
+        if (betterBases.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(betterBases.get(this.playerNpc.getRandom().nextInt(betterBases.size())));
     }
 
     private void lookDownAt(BlockPos pos) {
@@ -831,8 +882,9 @@ public class GatherLogsGoal extends Goal {
     }
 
     private boolean needsLogs(ServerLevel serverLevel) {
-        if (this.isMiningOnlyLogSupply()) {
-            return this.playerNpc.shouldPrioritizeLogGathering();
+        if (this.isSupplyLogJob()) {
+            return this.playerNpc.shouldPrioritizeLogGathering()
+                    || CraftBasicGearGoal.needsFishingRodCraftingLogs(this.playerNpc, serverLevel);
         }
         if (!this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
             return false;
@@ -844,6 +896,11 @@ public class GatherLogsGoal extends Goal {
     private boolean isMiningOnlyLogSupply() {
         return this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
                 && !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING);
+    }
+
+    private boolean isSupplyLogJob() {
+        return this.isMiningOnlyLogSupply()
+                || this.playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING);
     }
 
     private boolean tryStartPillarDescent(ServerLevel serverLevel) {
@@ -1079,6 +1136,7 @@ public class GatherLogsGoal extends Goal {
         addNearbySurfaceStandCandidates(serverLevel, candidates, target);
 
         return candidates.stream()
+                .filter(pos -> !isProtectedHomeStandPos(playerNpc, pos))
                 .filter(pos -> canStandAt(serverLevel, pos))
                 .filter(pos -> canReachOrAlreadyAt(playerNpc, pos))
                 .filter(pos -> canMineFromStandPosition(pos, target) || canPillarTowardFrom(pos, target))
@@ -1168,6 +1226,21 @@ public class GatherLogsGoal extends Goal {
 
     private boolean isProtectedHomeLogTarget(BlockPos pos) {
         return isProtectedHomeLogTarget(this.playerNpc, pos);
+    }
+
+    private static boolean isProtectedHomeStandPos(PlayerNpcEntity playerNpc, BlockPos pos) {
+        if (playerNpc == null || pos == null) {
+            return false;
+        }
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        if (home.isEmpty()) {
+            return false;
+        }
+
+        return PlayerNpcHomeUtil.isInside(home.get(), pos)
+                || PlayerNpcHomeUtil.isInside(home.get(), pos.below())
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos.below());
     }
 
     private static boolean isProtectedHomeLogTarget(PlayerNpcEntity playerNpc, BlockPos pos) {

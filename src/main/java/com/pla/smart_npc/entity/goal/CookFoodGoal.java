@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.FurnaceAi;
@@ -93,6 +94,9 @@ public class CookFoodGoal extends Goal {
         if (this.shouldDeferForPrimaryStoneSupply(serverLevel)) {
             return false;
         }
+        if (this.shouldDeferForFishingNightCamp()) {
+            return false;
+        }
 
         this.resetPlan();
         this.homeArea = PlayerNpcHomeUtil.getHome(this.playerNpc).orElse(null);
@@ -145,6 +149,10 @@ public class CookFoodGoal extends Goal {
         return !serverLevel.isNight()
                 && !serverLevel.isThundering()
                 && GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel);
+    }
+
+    private boolean shouldDeferForFishingNightCamp() {
+        return this.playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING);
     }
 
     @Override

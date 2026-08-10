@@ -71,6 +71,7 @@ public class ExploreCaveOreGoal extends Goal {
     private static final int TORCH_LOW_LIGHT_LEVEL = 7;
     private static final int SURFACE_ESCAPE_SCAN_UP = 96;
     private static final int UPWARD_ESCAPE_REQUEST_TICKS = 20 * 8;
+    private static final int IDLE_BLOCK_TRACE_TICKS = 20 * 20;
 
     private final PlayerNpcEntity playerNpc;
     private final ToolAi toolAi;
@@ -118,24 +119,62 @@ public class ExploreCaveOreGoal extends Goal {
         return new ExploreCaveOreGoal(playerNpc, 1.0D).findOreTarget(serverLevel) != null;
     }
 
+    public static boolean isOreInventoryBlocked(PlayerNpcEntity playerNpc) {
+        return freeInventorySlots(playerNpc) <= 2 && !InventoryUtils.hasPlaceableBlock(playerNpc);
+    }
+
+    public static int freeInventorySlots(PlayerNpcEntity playerNpc) {
+        if (playerNpc == null) {
+            return 0;
+        }
+        SimpleContainer inventory = playerNpc.getInventory();
+        int freeSlots = 0;
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            if (inventory.getItem(i).isEmpty()) {
+                freeSlots++;
+            }
+        }
+        return freeSlots;
+    }
+
     @Override
     public boolean canUse() {
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
-                || !this.playerNpc.isAlive()
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (!this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
-                || this.playerNpc.getTarget() != null
-                || this.playerNpc.getOreMiningCooldown() > 0
-                || !this.hasAnyPickaxe()
-                || this.inventoryIsMostlyFull()
-                || MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
+                || this.playerNpc.getTarget() != null) {
+            this.traceOreCanUseBlocked("ore goal blocked: basic state");
+            return false;
+        }
+        if (MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
+            this.traceOreCanUseBlocked("ore goal blocked: mining night camp");
             return false;
         }
         if (!this.isReadyForOreMining(serverLevel)) {
             if (this.shouldRequestSurfaceEscapeForLogResupply(serverLevel)) {
                 this.requestSurfaceEscapeIfUnderground(serverLevel);
             }
+            this.traceOreCanUseBlocked("ore goal blocked: not ready logsNeed="
+                    + this.playerNpc.shouldPrioritizeLogGathering()
+                    + " stoneNeed=" + this.playerNpc.shouldPrioritizeCobblestoneGathering());
+            return false;
+        }
+        if (this.playerNpc.getOreMiningCooldown() > 0) {
+            this.traceOreCanUseBlocked("ore goal blocked: oreCooldown=" + this.playerNpc.getOreMiningCooldown());
+            return false;
+        }
+        if (!this.hasAnyPickaxe()) {
+            this.traceOreCanUseBlocked("ore goal blocked: no pickaxe");
+            return false;
+        }
+        if (this.inventoryIsMostlyFull()) {
+            this.traceOreCanUseBlocked("ore goal blocked: inventory free="
+                    + freeInventorySlots(this.playerNpc)
+                    + " placeable=" + InventoryUtils.hasPlaceableBlock(this.playerNpc));
             return false;
         }
         if (this.playerNpc.tickCount < this.nextOreSearchTick) {
@@ -145,6 +184,7 @@ public class ExploreCaveOreGoal extends Goal {
 
         OreTarget target = this.findOreTarget(serverLevel);
         if (target == null) {
+            this.traceOreCanUseBlocked("ore goal blocked: no reachable ore");
             return false;
         }
 
@@ -411,7 +451,7 @@ public class ExploreCaveOreGoal extends Goal {
 
         BlockPos surfaceTarget = this.findSurfaceEscapeTarget(serverLevel, feet);
         if (surfaceTarget != null) {
-            this.playerNpc.requestUpwardEscapeTo(surfaceTarget, UPWARD_ESCAPE_REQUEST_TICKS);
+            this.playerNpc.requestExplorationUpwardEscapeTo(surfaceTarget, UPWARD_ESCAPE_REQUEST_TICKS, 0);
         }
     }
 
@@ -1396,14 +1436,13 @@ public class ExploreCaveOreGoal extends Goal {
     }
 
     private boolean inventoryIsMostlyFull() {
-        SimpleContainer inventory = this.playerNpc.getInventory();
-        int freeSlots = 0;
-        for (int i = 0; i < inventory.getContainerSize(); i++) {
-            if (inventory.getItem(i).isEmpty()) {
-                freeSlots++;
-            }
+        return isOreInventoryBlocked(this.playerNpc);
+    }
+
+    private void traceOreCanUseBlocked(String detail) {
+        if (this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)) {
+            this.playerNpc.setIdleTraceDetail(detail, IDLE_BLOCK_TRACE_TICKS);
         }
-        return freeSlots <= 2;
     }
 
     private enum OreFamily {

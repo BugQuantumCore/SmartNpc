@@ -77,7 +77,7 @@ public class PlayerNpcInspectatorCyclePacket {
                             PlayerNpcInspectorData.createPerformanceText(),
                             PlayerNpcInspectorData.createDailyJobText(target),
                             packet.includeRequirements ? PlayerNpcInspectorData.createBuildRequirementsText(target) : "",
-                            PlayerNpcGoalTraceLogger.isTracing(sender, target)
+                            PlayerNpcGoalTraceLogger.isEffectivelyTracing(sender, target)
                     )
             );
         });

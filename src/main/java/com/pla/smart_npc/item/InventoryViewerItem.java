@@ -4,6 +4,7 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.network.PlayerNpcInspectorData;
 import com.pla.smart_npc.network.PlayerNpcInspectorPacket;
 import com.pla.smart_npc.network.SmartNpcNetwork;
+import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
@@ -51,7 +52,7 @@ public class InventoryViewerItem extends Item {
                             PlayerNpcInspectorData.createPerformanceText(),
                             PlayerNpcInspectorData.createDailyJobText(playerNpcEntity),
                             PlayerNpcInspectorData.createBuildRequirementsText(playerNpcEntity),
-                            false
+                            PlayerNpcGoalTraceLogger.isEffectivelyTracing(serverPlayer, playerNpcEntity)
                     )
             );
         }

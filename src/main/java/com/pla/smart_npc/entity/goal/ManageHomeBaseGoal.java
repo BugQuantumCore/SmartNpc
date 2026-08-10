@@ -65,6 +65,7 @@ public class ManageHomeBaseGoal extends Goal {
     private boolean depositChestOpen;
     private boolean depositFinished;
     private boolean depositMovedAny;
+    private String planDetail = "";
 
     public ManageHomeBaseGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -85,6 +86,16 @@ public class ManageHomeBaseGoal extends Goal {
                 || this.playerNpc.getManageHomeCooldown() > 0) {
             return false;
         }
+        if (this.playerNpc.isStoneAccessClearing()) {
+            if (!this.playerNpc.getIdleTraceDetail().startsWith("stone ")) {
+                this.playerNpc.setIdleTraceDetail(
+                        "manage home blocked: stone access clearing "
+                                + this.playerNpc.getStoneAccessClearCooldown() + "t",
+                        20 * 4
+                );
+            }
+            return false;
+        }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
@@ -92,6 +103,7 @@ public class ManageHomeBaseGoal extends Goal {
         Optional<PlayerNpcHomeUtil.HomeArea> savedHome = PlayerNpcHomeUtil.getHome(this.playerNpc);
         this.homeArea = savedHome.orElse(null);
         if (this.canRecoverTemporaryCraftingTable(serverLevel)) {
+            this.planDetail = "recovering temporary crafting table";
             return true;
         }
         if (this.homeArea == null) {
@@ -112,6 +124,9 @@ public class ManageHomeBaseGoal extends Goal {
         boolean needsBed = this.needsBed(serverLevel);
         boolean needsChest = this.needsChest(serverLevel);
         if (needsCraftingTable || needsBed || needsChest) {
+            this.planDetail = "home supply placement craftingTable=" + needsCraftingTable
+                    + ",bed=" + needsBed
+                    + ",chest=" + needsChest;
             return true;
         }
         if (TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
@@ -119,7 +134,11 @@ public class ManageHomeBaseGoal extends Goal {
             return false;
         }
 
-        return this.shouldDepositToChest(serverLevel);
+        boolean deposit = this.shouldDepositToChest(serverLevel);
+        if (deposit) {
+            this.planDetail = "depositing inventory to home chest";
+        }
+        return deposit;
     }
 
     @Override
@@ -147,6 +166,9 @@ public class ManageHomeBaseGoal extends Goal {
 
         this.playerNpc.getNavigation().stop();
         this.playerNpc.setCurrentAiState("ai.player_npc.managing_home");
+        if (!this.planDetail.isBlank()) {
+            this.playerNpc.setCurrentAiDetail(this.planDetail);
+        }
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
         this.recoveryTablePos = null;
@@ -282,6 +304,7 @@ public class ManageHomeBaseGoal extends Goal {
         this.depositChestOpen = false;
         this.depositFinished = false;
         this.depositMovedAny = false;
+        this.planDetail = "";
         this.playerNpc.setCurrentAiDetail("");
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }

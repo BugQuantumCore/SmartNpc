@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
@@ -39,6 +40,7 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 
@@ -60,7 +62,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int PILLAR_PLAN_RETRY_TICKS = 20;
     private static final int PILLAR_SURFACE_SCAN_UP = 96;
     private static final double PILLAR_BASE_REACHED_SQR = 1.2D * 1.2D;
-    private static final int PILLAR_STUCK_MIN_TICKS = 20 * 2;
+    private static final int PILLAR_STUCK_MIN_TICKS = 20 * 5;
     private static final int PILLAR_STUCK_RECHECK_TICKS = 20 * 5;
     private static final double PILLAR_CENTER_EPSILON = 0.05D;
     private static final double PILLAR_COLLISION_BLOCKER_PADDING = 0.08D;
@@ -75,11 +77,15 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int ROUTE_NAV_MIN_UPWARD_GAIN = 2;
     private static final int ROUTE_NAV_MAX_PATH_CHECKS = 10;
     private static final double ROUTE_NAV_REACHED_SQR = 2.0D * 2.0D;
+    private static final int EXPLORATION_CLIMB_CLEAR_TICKS = 24;
+    private static final int EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS = 20 * 20;
+    private static final double EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
     private final ToolAi toolAi;
     private final BreakingBlockAi breakingBlockAi;
+    private final ClearBlockAi clearBlockAi;
     private EscapeMode mode = EscapeMode.NONE;
     private BlockPos placePos;
     private BlockPos minePos;
@@ -116,6 +122,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.toolAi = new ToolAi(playerNpc);
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
+        this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.JUMP, Flag.LOOK));
     }
 
@@ -125,8 +132,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void setEscapeMode(EscapeMode inputMode) {
-        if ((this.mode == EscapeMode.GATHER_BLOCKS || this.mode == EscapeMode.CLEAR_EXIT)
-                && (inputMode != EscapeMode.GATHER_BLOCKS && inputMode != EscapeMode.CLEAR_EXIT)) {
+        if ((this.mode == EscapeMode.GATHER_BLOCKS || this.mode == EscapeMode.CLEAR_EXIT || this.mode == EscapeMode.CLEAR_ROUTE)
+                && (inputMode != EscapeMode.GATHER_BLOCKS && inputMode != EscapeMode.CLEAR_EXIT && inputMode != EscapeMode.CLEAR_ROUTE)) {
             EpicFightCompat.stopDiggingAnimation(this.playerNpc);
         }
         this.mode = inputMode;
@@ -153,16 +160,20 @@ public class EscapeHoleWithBlockGoal extends Goal {
         boolean forceRequestedClimb = this.playerNpc.isForcedUpwardEscape()
                 && hasRequestedEscape
                 && requestedTarget.getY() > feet.getY() + 1;
+        boolean explorationRequestedClimb = this.playerNpc.isExplorationUpwardEscapeRequested()
+                && hasRequestedEscape
+                && requestedTarget.getY() > feet.getY();
+        boolean requestedClimb = forceRequestedClimb || explorationRequestedClimb;
         boolean trapped = this.hasOpenBodySpace(serverLevel, feet)
                 && this.isWalkableFloor(serverLevel, feet.below())
                 && this.isActuallyTrapped(serverLevel, feet);
         BlockPos routeTarget = this.getUpwardRouteTarget(serverLevel, feet);
         boolean hasUpwardRouteTarget = routeTarget != null && this.isUsableUpwardRouteTarget(serverLevel, feet, routeTarget);
-        if (forceRequestedClimb && !hasUpwardRouteTarget) {
+        if (requestedClimb && !hasUpwardRouteTarget) {
             routeTarget = requestedTarget.immutable();
             hasUpwardRouteTarget = true;
         }
-        if (!trapped && !hasUpwardRouteTarget && this.hasReachedOpenSky(serverLevel, feet) && !forceRequestedClimb) {
+        if (!trapped && !hasUpwardRouteTarget && this.hasReachedOpenSky(serverLevel, feet) && !requestedClimb) {
             if (requestedTarget != null) {
                 this.playerNpc.clearUpwardEscapeTarget();
             }
@@ -176,11 +187,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
 
-        if (this.playerNpc.tickCount < this.nextPillarPlanTick && !forceRequestedClimb) {
+        if (this.playerNpc.tickCount < this.nextPillarPlanTick && !requestedClimb) {
             return false;
         }
 
-        boolean routeNeedsClimb = forceRequestedClimb || hasUpwardRouteTarget && this.routeNeedsClimb(serverLevel, feet, routeTarget);
+        boolean routeNeedsClimb = requestedClimb || hasUpwardRouteTarget && this.routeNeedsClimb(serverLevel, feet, routeTarget);
 
         if (!trapped && !routeNeedsClimb) {
             return false;
@@ -200,17 +211,25 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (routeNeedsClimb
                 && !trapped
                 && this.hasReachedOpenSky(serverLevel, feet)
-                && !forceRequestedClimb
+                && !requestedClimb
                 && !this.isRequestedSurfaceRoute(serverLevel, feet, routeTarget)) {
             return false;
         }
 
         PillarPlan pillarPlan = this.findPillarPlan(serverLevel, feet, routeNeedsClimb ? routeTarget : null);
         if (pillarPlan == null) {
+            if (routeNeedsClimb && explorationRequestedClimb) {
+                if (this.tryStartExplorationClimbClear(serverLevel, feet, routeTarget, null)) {
+                    return true;
+                }
+            }
             this.nextPillarPlanTick = this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
             return false;
         }
         if (routeNeedsClimb && this.exceedsRequestedRouteMax(pillarPlan)) {
+            if (explorationRequestedClimb && this.tryStartExplorationClimbClear(serverLevel, feet, routeTarget, pillarPlan)) {
+                return true;
+            }
             this.playerNpc.clearUpwardEscapeTarget();
             this.nextPillarPlanTick = this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
             return false;
@@ -266,6 +285,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
         if (this.mode == EscapeMode.CLEAR_EXIT) {
             return this.exitClearPos != null || this.findExitClearTarget(serverLevel, this.playerNpc.blockPosition(), this.climbTargetPos) != null;
+        }
+        if (this.mode == EscapeMode.CLEAR_ROUTE) {
+            return this.clearBlockAi.isRunning();
         }
 
         if (this.mode == EscapeMode.PILLAR && this.pillarClearPos != null) {
@@ -330,6 +352,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
             if (this.exitClearPos != null) {
                 this.updateExitClearDetail(serverLevel.getBlockState(this.exitClearPos));
             }
+        } else if (this.mode == EscapeMode.CLEAR_ROUTE) {
+            this.playerNpc.getNavigation().stop();
         }
     }
 
@@ -346,6 +370,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.tickGatherBlocks(serverLevel);
         } else if (this.mode == EscapeMode.CLEAR_EXIT) {
             this.tickClearExit(serverLevel);
+        } else if (this.mode == EscapeMode.CLEAR_ROUTE) {
+            this.tickExplorationClimbClear(serverLevel);
         } else if (this.mode == EscapeMode.PILLAR) {
             this.tickPillar(serverLevel);
         }
@@ -356,6 +382,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.playerNpc.clearBlockBreakProgress(this.minePos);
         this.playerNpc.clearBlockBreakProgress(this.pillarClearPos);
         this.playerNpc.clearBlockBreakProgress(this.exitClearPos);
+        this.clearBlockAi.stop();
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
         this.restorePreviousMainHand();
@@ -572,6 +599,21 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.mineTicks = 0;
     }
 
+    private void tickExplorationClimbClear(ServerLevel serverLevel) {
+        if (!this.clearBlockAi.isRunning()) {
+            this.finished = true;
+            return;
+        }
+
+        ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            return;
+        }
+
+        this.nextPillarPlanTick = result == ClearBlockAi.TickResult.DONE ? 0 : this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
+        this.finished = true;
+    }
+
     private void switchToPillar(ServerLevel serverLevel) {
         this.playerNpc.clearBlockBreakProgress(this.minePos);
         this.restorePreviousMainHand();
@@ -765,7 +807,30 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return obstruction;
         }
 
-        return this.findCenteredPillarCollisionBlocker(serverLevel);
+        obstruction = this.findCenteredPillarCollisionBlocker(serverLevel);
+        if (obstruction != null) {
+            return obstruction;
+        }
+
+        return this.findAdjacentPillarRecoveryObstruction(serverLevel, feet);
+    }
+
+    private BlockPos findAdjacentPillarRecoveryObstruction(ServerLevel serverLevel, BlockPos feet) {
+        BlockPos routeTarget = this.climbTargetPos == null ? feet : this.climbTargetPos;
+        for (Direction direction : this.directionsToward(feet, routeTarget)) {
+            BlockPos adjacentFeet = feet.relative(direction);
+            BlockPos[] candidates = {
+                    adjacentFeet,
+                    adjacentFeet.above()
+            };
+            for (BlockPos candidate : candidates) {
+                BlockState state = serverLevel.getBlockState(candidate);
+                if (this.isClearablePillarObstruction(serverLevel, candidate, state)) {
+                    return candidate.immutable();
+                }
+            }
+        }
+        return null;
     }
 
     private boolean tryRecoverPillarPosition(ServerLevel serverLevel, BlockPos feet) {
@@ -1095,7 +1160,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (this.pillarClearPos.getY() <= feet.getY()
                 && this.pillarClearPos.getX() == feet.getX()
                 && this.pillarClearPos.getZ() == feet.getZ()) {
-            return true;
+            return !this.pillarClearPos.equals(feet);
         }
 
         return this.pillarBasePos != null
@@ -1292,7 +1357,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private PillarPlan createPillarPlan(ServerLevel serverLevel, BlockPos base, BlockPos routeTarget) {
-        if (!this.canStandAt(serverLevel, base) || !serverLevel.getBlockState(base).canBeReplaced()) {
+        BlockState baseState = serverLevel.getBlockState(base);
+        if (!this.canStandAt(serverLevel, base) || !this.canUsePillarBaseState(serverLevel, base, baseState)) {
             return null;
         }
         if (routeTarget == null) {
@@ -1348,11 +1414,16 @@ public class EscapeHoleWithBlockGoal extends Goal {
         return true;
     }
 
+    private boolean canUsePillarBaseState(ServerLevel serverLevel, BlockPos base, BlockState state) {
+        return state.canBeReplaced()
+                || this.isClearablePillarObstruction(serverLevel, base, state);
+    }
+
     private BlockPos findPillarObstruction(ServerLevel serverLevel, BlockPos feet) {
         int topY = this.pillarExitY > feet.getY()
                 ? Math.min(this.pillarExitY, feet.getY() + 1)
                 : feet.getY() + 1;
-        for (int y = feet.getY() + 1; y <= topY + 1; y++) {
+        for (int y = feet.getY(); y <= topY + 1; y++) {
             BlockPos pos = new BlockPos(feet.getX(), y, feet.getZ());
             BlockState state = serverLevel.getBlockState(pos);
             if (this.isClearablePillarObstruction(serverLevel, pos, state)) {
@@ -1471,16 +1542,133 @@ public class EscapeHoleWithBlockGoal extends Goal {
         return null;
     }
 
+    private boolean tryStartExplorationClimbClear(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget, PillarPlan pillarPlan) {
+        if (routeTarget == null) {
+            return false;
+        }
+
+        List<BlockPos> candidates = new ArrayList<>(ClearBlockAi.gatherObstructionCandidates(
+                feet,
+                pillarPlan == null ? routeTarget : pillarPlan.basePos(),
+                routeTarget
+        ));
+        this.addRequestedRouteClearCandidates(candidates, feet, routeTarget, pillarPlan);
+
+        List<BlockPos> ordered = candidates.stream()
+                .filter(pos -> pos != null
+                        && !pos.equals(feet.below())
+                        && !this.playerNpc.isTemporaryPillarSupport(pos))
+                .map(BlockPos::immutable)
+                .distinct()
+                .filter(pos -> this.isClearableExplorationClimbObstruction(serverLevel, pos, serverLevel.getBlockState(pos)))
+                .sorted(Comparator
+                        .comparingDouble(feet::distSqr)
+                        .thenComparingDouble(pos -> routeTarget.distSqr(pos)))
+                .toList();
+        Optional<BlockPos> clearTarget = ClearBlockAi.findNearestAccessibleClearable(
+                serverLevel,
+                this.playerNpc,
+                ordered,
+                this::isExplorationClimbObstacleState,
+                EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR,
+                false
+        );
+        if (clearTarget.isEmpty()) {
+            return false;
+        }
+
+        BlockPos target = clearTarget.get();
+        boolean started = this.clearBlockAi.start(
+                serverLevel,
+                target,
+                state -> this.isClearableExplorationClimbObstruction(serverLevel, target, state),
+                "clearing exploration climb path",
+                EXPLORATION_CLIMB_CLEAR_TICKS,
+                EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR,
+                true
+        );
+        if (!started) {
+            return false;
+        }
+
+        this.exitClearPos = null;
+        this.pillarClearPos = null;
+        this.routeNavigationTarget = null;
+        this.mineTicks = 0;
+        this.playerNpc.requestExplorationUpwardEscapeTo(
+                routeTarget,
+                EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS,
+                this.getRequestedRouteMaxPillarBlocks()
+        );
+        setEscapeMode(EscapeMode.CLEAR_ROUTE);
+        return true;
+    }
+
+    private void addRequestedRouteClearCandidates(List<BlockPos> candidates, BlockPos feet, BlockPos routeTarget, PillarPlan pillarPlan) {
+        Set<BlockPos> seen = new HashSet<>();
+        List<BlockPos> initialCandidates = new ArrayList<>(candidates);
+        candidates.clear();
+        for (BlockPos candidate : initialCandidates) {
+            this.addRouteClearCandidate(candidates, seen, candidate);
+        }
+
+        this.addRouteClearCandidate(candidates, seen, feet);
+        this.addRouteClearCandidate(candidates, seen, feet.above());
+        this.addRouteClearCandidate(candidates, seen, feet.above(2));
+
+        for (Direction direction : this.directionsToward(feet, routeTarget)) {
+            BlockPos adjacentFeet = feet.relative(direction);
+            this.addRouteClearCandidate(candidates, seen, adjacentFeet);
+            this.addRouteClearCandidate(candidates, seen, adjacentFeet.above());
+            this.addRouteClearCandidate(candidates, seen, adjacentFeet.above(2));
+
+            BlockPos nextFeet = adjacentFeet.relative(direction);
+            this.addRouteClearCandidate(candidates, seen, nextFeet);
+            this.addRouteClearCandidate(candidates, seen, nextFeet.above());
+            this.addRouteClearCandidate(candidates, seen, nextFeet.above(2));
+        }
+
+        if (pillarPlan != null) {
+            int topY = Math.min(pillarPlan.exitY() + 1, feet.getY() + Math.max(2, this.getRequestedRouteMaxPillarBlocks()) + 2);
+            for (int y = pillarPlan.basePos().getY(); y <= topY; y++) {
+                this.addRouteClearCandidate(candidates, seen, new BlockPos(pillarPlan.basePos().getX(), y, pillarPlan.basePos().getZ()));
+            }
+        }
+    }
+
+    private void addRouteClearCandidate(List<BlockPos> candidates, Set<BlockPos> seen, BlockPos pos) {
+        if (pos == null) {
+            return;
+        }
+        BlockPos immutable = pos.immutable();
+        if (seen.add(immutable)) {
+            candidates.add(immutable);
+        }
+    }
+
+    private boolean isClearableExplorationClimbObstruction(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        return pos != null
+                && !pos.equals(this.playerNpc.blockPosition().below())
+                && !this.playerNpc.isTemporaryPillarSupport(pos)
+                && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
+                && ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, state, true);
+    }
+
+    private boolean isExplorationClimbObstacleState(BlockState state) {
+        return state != null && !state.isAir();
+    }
+
     private BlockPos findCurrentColumnClearTarget(ServerLevel serverLevel, BlockPos feet) {
         BlockState feetState = serverLevel.getBlockState(feet);
-        if (this.hasBlockingCollision(serverLevel, feet)
+        if (this.blocksPillarSpace(serverLevel, feet, feetState)
                 && this.isClearableExitObstruction(serverLevel, feet, feetState)) {
             return feet.immutable();
         }
 
         BlockPos head = feet.above();
         BlockState headState = serverLevel.getBlockState(head);
-        if (this.hasBlockingCollision(serverLevel, head)
+        if (this.blocksPillarSpace(serverLevel, head, headState)
                 && this.isClearableExitObstruction(serverLevel, head, headState)) {
             return head.immutable();
         }
@@ -1773,6 +1961,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private boolean hasSatisfiedRequestedRoute(ServerLevel serverLevel, BlockPos feet, BlockPos requestedTarget) {
         if (this.isForcedRequestedRoute(requestedTarget)) {
             return this.hasReachedRequestedRoute(serverLevel, feet, requestedTarget);
+        }
+        if (this.playerNpc.isExplorationUpwardEscapeRequested()) {
+            return this.hasReachedRequestedSurfaceExit(serverLevel, feet, requestedTarget)
+                    && this.hasReachedOpenSky(serverLevel, feet)
+                    && !this.isActuallyTrapped(serverLevel, feet);
         }
         if (requestedTarget.getY() > feet.getY() + 1) {
             return this.hasReachedRequestedSurfaceExit(serverLevel, feet, requestedTarget);
@@ -2292,11 +2485,16 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
                 && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
                 && !state.isAir()
-                && !state.getCollisionShape(serverLevel, pos).isEmpty()
+                && this.blocksPillarSpace(serverLevel, pos, state)
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && state.getFluidState().isEmpty()
                 && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
                 && serverLevel.getBlockEntity(pos) == null;
+    }
+
+    private boolean blocksPillarSpace(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        return !state.getCollisionShape(serverLevel, pos).isEmpty()
+                || !state.canBeReplaced();
     }
 
     private boolean isClearableExitObstruction(ServerLevel serverLevel, BlockPos pos, BlockState state) {
@@ -2389,6 +2587,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     private void resetPlan() {
         setEscapeMode(EscapeMode.NONE);
+        this.clearBlockAi.stop();
         this.placePos = null;
         this.minePos = null;
         this.mineStandPos = null;
@@ -2436,6 +2635,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         NAVIGATE_ROUTE,
         GATHER_BLOCKS,
         CLEAR_EXIT,
+        CLEAR_ROUTE,
         PILLAR
     }
 

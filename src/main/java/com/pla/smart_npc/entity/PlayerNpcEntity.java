@@ -4,7 +4,11 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.clazz.FakePlayer;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ResourceAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.entity.goal.BeingAtHomeGoal;
 import com.pla.smart_npc.entity.goal.BuildHouseGoal;
 import com.pla.smart_npc.entity.goal.BreakTargetObstructionGoal;
@@ -64,8 +68,10 @@ import com.pla.smart_npc.entity.goal.WaterEnderPearlEscapeGoal;
 import com.pla.smart_npc.init.SmartNpcModEntities;
 import com.pla.smart_npc.util.*;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.Tag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -109,6 +115,8 @@ import org.jetbrains.annotations.NotNull;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -135,6 +143,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int STARTUP_IDLE_WAKE_TICKS = 20 * 4;
     private static final int TASKLESS_IDLE_WAKE_TICKS = 20;
     private static final int TEMPORARY_PILLAR_SUPPORT_MEMORY_TICKS = 20 * 45;
+    private static final int EXPLORATION_CLIMB_STUCK_TICKS = 20 * 5;
+    private static final int EXPLORATION_CLIMB_SAFE_STAND_MIN_RADIUS = 4;
+    private static final int EXPLORATION_CLIMB_SAFE_STAND_MAX_RADIUS = 5;
+    private static final int EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_DOWN = 2;
+    private static final int EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_UP = 4;
+    private static final int EXPLORATION_CLIMB_SAFE_STAND_RANDOM_POOL = 8;
+    private static final int EXPLORATION_CLIMB_SAFE_STAND_PATH_CHECKS = 18;
+    private static final double EXPLORATION_CLIMB_SAFE_STAND_REACHED_SQR = 1.1D * 1.1D;
+    private static final int EXPLORATION_CLIMB_CLEAR_TICKS = 24;
+    private static final double EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR = 5.0D * 5.0D;
+    private static final int EXPLORATION_CLIMB_CLEAR_RANDOM_POOL = 8;
     private static final long DAY_LENGTH_TICKS = 24000L;
     private static final long DAILY_JOB_ROLL_TIME = 1L;
     private static final long DAILY_JOB_FALLBACK_ROLL_END_TIME = 12000L;
@@ -247,11 +266,24 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int upwardEscapeRequestTicks = 0;
     private int upwardEscapeMaxPillarBlocks = 0;
     private boolean forcedUpwardEscape = false;
+    private boolean explorationUpwardEscape = false;
+    @Nullable
+    private BlockPos explorationClimbWatchPos;
+    @Nullable
+    private BlockPos explorationClimbWatchTarget;
+    @Nullable
+    private BlockPos explorationClimbSafeStandTarget;
+    private int explorationClimbStuckTicks = 0;
+    private final ToolAi explorationClimbToolAi = new ToolAi(this);
+    private final BreakingBlockAi explorationClimbBreakingBlockAi = new BreakingBlockAi(this, this.explorationClimbToolAi);
+    private final ClearBlockAi explorationClimbClearBlockAi = new ClearBlockAi(this, this.explorationClimbBreakingBlockAi);
     private double placeBlockToParryChance;
     private int placeBlockParryCooldown = 0;
     private int stunEscapeCooldown = 0;
     private int playingIdleCooldown = new Random().nextInt(600, 1200);
     private int tasklessIdleTicks = 0;
+    private String idleTraceDetail = "";
+    private int idleTraceDetailTicks = 0;
     private int startupIdleWakeTicks = STARTUP_IDLE_WAKE_TICKS;
     private int staleTargetTicks = 0;
     private int staleTargetEntityId = -1;
@@ -347,6 +379,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public boolean isStoneAccessClearing() {
         return this.stoneAccessClearCooldown > 0;
+    }
+
+    public int getStoneAccessClearCooldown() {
+        return this.stoneAccessClearCooldown;
     }
 
     public int getBiomeExploreCooldown() {
@@ -458,7 +494,22 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.upwardEscapeRequestTicks = Math.max(this.upwardEscapeRequestTicks, normalizeCooldown(ticks));
         this.upwardEscapeMaxPillarBlocks = Math.max(0, maxPillarBlocks);
         this.forcedUpwardEscape = false;
+        this.explorationUpwardEscape = false;
+        this.resetExplorationClimbFallback();
         this.holeEscapeCooldown = 0;
+    }
+
+    public void requestExplorationUpwardEscapeTo(@Nullable BlockPos target, int ticks, int maxPillarBlocks) {
+        if (target == null || ticks <= 0) {
+            return;
+        }
+
+        this.requestUpwardEscapeTo(target, ticks, maxPillarBlocks);
+        this.explorationUpwardEscape = true;
+    }
+
+    public boolean isExplorationUpwardEscapeRequested() {
+        return this.getUpwardEscapeTarget() != null && this.explorationUpwardEscape;
     }
 
     public void requestForcedUpwardEscapeTo(@Nullable BlockPos target, int ticks, int maxPillarBlocks) {
@@ -477,10 +528,16 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public void clearUpwardEscapeTarget() {
+        String detail = this.getCurrentAiDetail();
+        if (detail != null && detail.startsWith("exploration climb request @ ")) {
+            this.setCurrentAiDetail("");
+        }
         this.upwardEscapeTarget = null;
         this.upwardEscapeRequestTicks = 0;
         this.upwardEscapeMaxPillarBlocks = 0;
         this.forcedUpwardEscape = false;
+        this.explorationUpwardEscape = false;
+        this.resetExplorationClimbFallback();
     }
 
     @Nullable
@@ -710,7 +767,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public void setFishingCooldown(int ticks) {
-        this.fishingCooldown = normalizeCooldown(ticks);
+        this.fishingCooldown = Math.min(normalizeCooldown(ticks), PlayerNpcFishingGoal.MAX_SAVED_FISHING_COOLDOWN_TICKS);
     }
 
     public void setReturnHomeCooldown(int ticks) {
@@ -1255,7 +1312,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.ironGolemTrollCooldown = tag.getInt("IronGolemTrollCooldown");
         this.lootChestCooldown = tag.getInt("LootChestCooldown");
         this.manageHomeCooldown = tag.getInt("ManageHomeCooldown");
-        this.fishingCooldown = tag.getInt("FishingCooldown");
+        this.setFishingCooldown(tag.getInt("FishingCooldown"));
         this.returnHomeCooldown = tag.getInt("ReturnHomeCooldown");
         this.explorationReturnHomeRequestTicks = tag.getInt("ExplorationReturnHomeRequestTicks");
         this.sleepCooldown = tag.getInt("SleepCooldown");
@@ -1454,7 +1511,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(5, this.gated(new TerraformBuildSiteGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new MeleeAttackGoal(this, 1.0D, true));
         this.goalSelector.addGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(4, this.gated(new MiningNightCampGoal(this, 1.0D), PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(4, this.gated(new MiningNightCampGoal(this, 1.0D), PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(5, new CookFoodGoal(this));
         this.goalSelector.addGoal(5, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new CraftCropFoodGoal(this), PlayerNpcInterest.FARMING));
@@ -1473,16 +1530,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(5, this.gated(new BoatStockpileGoal(this), PlayerNpcInterest.FISHING, PlayerNpcInterest.EXPLORING));
         this.goalSelector.addGoal(5, this.gated(new PlantSaplingGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new UseSpyglassGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.CAUTIOUS));
-        this.goalSelector.addGoal(6, this.gated(gatherLogsGoal, PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
-        this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(6, this.gated(gatherLogsGoal, PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
+        this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
-        this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(6, new GatherMissingBuildMaterialGoal(this, 1.0D));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for logs",
                 level -> (this.shouldPrioritizeLogGathering()
+                        || CraftBasicGearGoal.needsFishingRodCraftingLogs(this, level)
                         || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(level, this))
                         && this.getGatherCooldown() <= 0
                         && !GatherStoneGoal.isStoneSupplyPhaseActive(this, level)
@@ -1490,7 +1548,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && !this.shouldStayHomeForWeather(level)
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 gatherLogsGoal::hasNearbyUsableLogTarget
-        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
@@ -1501,7 +1559,18 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> GatherStoneGoal.hasNearbyStoneTarget(this, level),
                 false
-        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING));
+        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+                this,
+                1.0D,
+                "exploring for water",
+                level -> PlayerNpcFishingGoal.shouldExploreForFishingWater(this, level)
+                        && !this.shouldStayHomeForWeather(level)
+                        && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
+                level -> PlayerNpcFishingGoal.hasNearbyFishingSpot(this, level),
+                true,
+                true
+        ), PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
@@ -1553,6 +1622,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     private boolean canExploreForLogSupply(ServerLevel serverLevel) {
         if (!this.shouldPrioritizeLogGathering() || serverLevel.canSeeSky(this.blockPosition().above())) {
+            return true;
+        }
+        if (this.isDailyJobActive(PlayerNpcInterest.MINING) && !this.hasInterest(PlayerNpcInterest.BUILDING)) {
             return true;
         }
         return this.hasNearbyTreeCover(serverLevel);
@@ -1796,6 +1868,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || "ai.player_npc.building_house".equals(state)
                 || "ai.player_npc.terraforming_build_site".equals(state)
                 || "ai.player_npc.farming".equals(state)
+                || "ai.player_npc.fishing".equals(state)
                 || "ai.player_npc.planting_sapling".equals(state);
     }
 
@@ -1946,6 +2019,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.entityData.set(AI_STATE, normalizedState);
         if (AI_IDLE.equals(normalizedState)) {
             this.setCurrentAiDetail("");
+        } else {
+            this.clearIdleTraceDetail();
         }
     }
 
@@ -1955,6 +2030,23 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public void setCurrentAiDetail(String detail) {
         this.entityData.set(AI_DETAIL, detail == null ? "" : detail);
+    }
+
+    public void setIdleTraceDetail(String detail, int ticks) {
+        if (detail == null || detail.isBlank() || ticks <= 0) {
+            return;
+        }
+        this.idleTraceDetail = detail;
+        this.idleTraceDetailTicks = normalizeCooldown(ticks);
+    }
+
+    public String getIdleTraceDetail() {
+        return this.idleTraceDetailTicks > 0 ? this.idleTraceDetail : "";
+    }
+
+    public void clearIdleTraceDetail() {
+        this.idleTraceDetail = "";
+        this.idleTraceDetailTicks = 0;
     }
 
     public boolean isDancing() {
@@ -2024,8 +2116,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public void die(@NotNull DamageSource damageSource) {
+        Component deathMessage = this.getCombatTracker().getDeathMessage();
         super.die(damageSource);
-        this.handlePlayerNpcDeathChat(damageSource);
+        this.handlePlayerNpcDeathChat(damageSource, deathMessage);
 
         if (this.level() instanceof ServerLevel serverLevel) {
             if (this.getPersistentData().getBoolean("die_by_possess")) {
@@ -2034,16 +2127,16 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
     }
 
-    private void handlePlayerNpcDeathChat(DamageSource damageSource) {
+    private void handlePlayerNpcDeathChat(DamageSource damageSource, Component deathMessage) {
         Entity killer = damageSource.getEntity();
-        if (!ChatUtil.shouldReportPlayerNpcDeath(this, killer)) {
+        if (!ChatUtil.shouldReportPlayerNpcDeath(this)) {
             return;
         }
 
-        ChatUtil.broadcastDeathSummary(this, killer);
+        ChatUtil.broadcastDeathSummary(this, deathMessage);
         ChatUtil.scheduleDeathReaction(this, killer);
 
-        if (killer instanceof LivingEntity livingKiller) {
+        if (ChatUtil.isPlayerLikeThreat(killer) && killer instanceof LivingEntity livingKiller) {
             PlayerNpcAlertManager.raiseDeathAlert(this, livingKiller);
         }
     }
@@ -2179,6 +2272,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.tickStartupIdleWake();
         this.cleanupStaleCombatState();
         this.tickTasklessActivityWatchdog();
+        this.tickExplorationClimbFallback(serverLevel);
 
         if ((tickCount + getId()) % 20 != 0) {
             return;
@@ -2234,8 +2328,13 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.placeBlockParryCooldown = tickCooldown(this.placeBlockParryCooldown);
         this.stunEscapeCooldown = tickCooldown(this.stunEscapeCooldown);
         this.playingIdleCooldown = tickCooldown(this.playingIdleCooldown);
+        this.idleTraceDetailTicks = tickCooldown(this.idleTraceDetailTicks);
+        if (this.idleTraceDetailTicks <= 0) {
+            this.idleTraceDetail = "";
+        }
         this.upwardEscapeRequestTicks = tickCooldown(this.upwardEscapeRequestTicks);
         if (this.upwardEscapeRequestTicks <= 0) {
+            boolean hasExplorationClimbFallbackDetail = this.hasExplorationClimbFallbackDetail();
             if (this.upwardEscapeTarget != null
                     && AI_IDLE.equals(this.getCurrentAiState())
                     && this.getCurrentAiDetail().startsWith("exploration climb request")) {
@@ -2244,7 +2343,298 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.upwardEscapeTarget = null;
             this.upwardEscapeMaxPillarBlocks = 0;
             this.forcedUpwardEscape = false;
+            this.explorationUpwardEscape = false;
+            if (!hasExplorationClimbFallbackDetail) {
+                this.resetExplorationClimbFallback();
+            }
         }
+    }
+
+    private void tickExplorationClimbFallback(ServerLevel serverLevel) {
+        if (this.explorationClimbClearBlockAi.isRunning()) {
+            if (!this.canRunExplorationClimbFallbackAction()) {
+                this.resetExplorationClimbFallback();
+                return;
+            }
+            this.tickExplorationClimbClearBlock(serverLevel);
+            return;
+        }
+
+        BlockPos activeRequestTarget = this.getUpwardEscapeTarget();
+        BlockPos requestedTarget = activeRequestTarget != null && this.explorationUpwardEscape
+                ? activeRequestTarget
+                : this.parseExplorationClimbRequestDetailTarget(this.getCurrentAiDetail());
+        if (requestedTarget == null && this.hasExplorationClimbFallbackDetail()) {
+            requestedTarget = this.explorationClimbWatchTarget;
+        }
+        if (requestedTarget == null) {
+            this.resetExplorationClimbFallback();
+            return;
+        }
+
+        if (!this.canRunExplorationClimbFallbackAction()) {
+            this.resetExplorationClimbFallback();
+            return;
+        }
+
+        String state = this.getCurrentAiState();
+        boolean idleForFallback = AI_IDLE.equals(state) || "ai.player_npc.looking_for_work".equals(state);
+        if (!idleForFallback || this.hasRunningAiGoals()) {
+            this.explorationClimbStuckTicks = 0;
+            this.explorationClimbSafeStandTarget = null;
+            this.stopExplorationClimbClearBlock();
+            return;
+        }
+
+        if (this.explorationClimbSafeStandTarget != null) {
+            if (this.moveToExplorationClimbSafeStand(serverLevel)) {
+                return;
+            }
+            this.explorationClimbSafeStandTarget = null;
+            this.explorationClimbStuckTicks = EXPLORATION_CLIMB_STUCK_TICKS;
+        }
+
+        BlockPos feet = this.blockPosition();
+        if (this.explorationClimbWatchPos == null
+                || !this.explorationClimbWatchPos.equals(feet)
+                || this.explorationClimbWatchTarget == null
+                || !this.explorationClimbWatchTarget.equals(requestedTarget)) {
+            this.explorationClimbWatchPos = feet.immutable();
+            this.explorationClimbWatchTarget = requestedTarget.immutable();
+            this.explorationClimbStuckTicks = 0;
+            return;
+        }
+
+        if (!this.getNavigation().isDone() && !this.getNavigation().isStuck()) {
+            return;
+        }
+
+        if (++this.explorationClimbStuckTicks < EXPLORATION_CLIMB_STUCK_TICKS) {
+            return;
+        }
+
+        Optional<BlockPos> safeStand = this.findExplorationClimbSafeStand(serverLevel, requestedTarget);
+        if (safeStand.isEmpty()) {
+            if (this.startExplorationClimbClearBlock(serverLevel, requestedTarget)) {
+                this.explorationClimbStuckTicks = 0;
+                return;
+            }
+            if (activeRequestTarget != null) {
+                this.clearUpwardEscapeTarget();
+            }
+            this.setCurrentAiDetail("exploration climb blocked; retrying");
+            this.wakeUpIdleWork();
+            return;
+        }
+
+        this.explorationClimbSafeStandTarget = safeStand.get();
+        this.getNavigation().stop();
+        this.moveToExplorationClimbSafeStand(serverLevel);
+    }
+
+    @Nullable
+    private BlockPos parseExplorationClimbRequestDetailTarget(String detail) {
+        String prefix = "exploration climb request @ ";
+        if (detail == null || !detail.startsWith(prefix)) {
+            return null;
+        }
+
+        String[] parts = detail.substring(prefix.length()).trim().split("\\s+");
+        if (parts.length < 3) {
+            return null;
+        }
+
+        try {
+            return new BlockPos(
+                    Integer.parseInt(parts[0]),
+                    Integer.parseInt(parts[1]),
+                    Integer.parseInt(parts[2])
+            );
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private boolean moveToExplorationClimbSafeStand(ServerLevel serverLevel) {
+        BlockPos safeStand = this.explorationClimbSafeStandTarget;
+        if (safeStand == null) {
+            return false;
+        }
+        if (!PathNavigationAi.canStandAt(serverLevel, safeStand)) {
+            return false;
+        }
+        if (this.distanceToSqr(
+                safeStand.getX() + 0.5D,
+                safeStand.getY(),
+                safeStand.getZ() + 0.5D
+        ) <= EXPLORATION_CLIMB_SAFE_STAND_REACHED_SQR) {
+            this.clearUpwardEscapeTarget();
+            this.setCurrentAiDetail("");
+            this.wakeUpIdleWork();
+            return true;
+        }
+
+        PathNavigationAi navigationAi = new PathNavigationAi(this);
+        if (!navigationAi.moveTo(serverLevel, safeStand, 1.0D, EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_DOWN)) {
+            return false;
+        }
+
+        this.setCurrentAiState(AI_IDLE);
+        this.setCurrentAiDetail("moving to safe stand after climb stuck @ "
+                + safeStand.getX() + " "
+                + safeStand.getY() + " "
+                + safeStand.getZ());
+        return true;
+    }
+
+    private Optional<BlockPos> findExplorationClimbSafeStand(ServerLevel serverLevel, BlockPos requestedTarget) {
+        BlockPos feet = this.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        int minRadiusSqr = EXPLORATION_CLIMB_SAFE_STAND_MIN_RADIUS * EXPLORATION_CLIMB_SAFE_STAND_MIN_RADIUS;
+        int maxRadius = EXPLORATION_CLIMB_SAFE_STAND_MAX_RADIUS;
+        int maxRadiusSqr = maxRadius * maxRadius;
+        for (int dx = -maxRadius; dx <= maxRadius; dx++) {
+            for (int dz = -maxRadius; dz <= maxRadius; dz++) {
+                int distanceSqr = dx * dx + dz * dz;
+                if (distanceSqr < minRadiusSqr || distanceSqr > maxRadiusSqr) {
+                    continue;
+                }
+                for (int dy = -EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_DOWN;
+                     dy <= EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_UP;
+                     dy++) {
+                    BlockPos candidate = feet.offset(dx, dy, dz);
+                    if (PathNavigationAi.canStandAt(serverLevel, candidate)) {
+                        candidates.add(candidate.immutable());
+                    }
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            return Optional.empty();
+        }
+
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> requestedTarget == null ? 0.0D : pos.distSqr(requestedTarget))
+                .thenComparingDouble(pos -> pos.distSqr(feet)));
+        int preferredCount = Math.min(
+                Math.max(1, EXPLORATION_CLIMB_SAFE_STAND_RANDOM_POOL),
+                candidates.size()
+        );
+        if (preferredCount > 1) {
+            Collections.rotate(
+                    candidates.subList(0, preferredCount),
+                    this.getRandom().nextInt(preferredCount)
+            );
+        }
+
+        PathNavigationAi navigationAi = new PathNavigationAi(this);
+        return navigationAi.findReachableRandomizedCandidate(
+                serverLevel,
+                candidates,
+                EXPLORATION_CLIMB_SAFE_STAND_RANDOM_POOL,
+                EXPLORATION_CLIMB_SAFE_STAND_PATH_CHECKS,
+                EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_DOWN
+        );
+    }
+
+    private boolean startExplorationClimbClearBlock(ServerLevel serverLevel, BlockPos requestedTarget) {
+        List<BlockPos> candidates = this.explorationClimbClearCandidates(requestedTarget);
+        if (candidates.isEmpty()) {
+            return false;
+        }
+
+        int preferredCount = Math.min(EXPLORATION_CLIMB_CLEAR_RANDOM_POOL, candidates.size());
+        if (preferredCount > 1) {
+            Collections.rotate(candidates.subList(0, preferredCount), this.getRandom().nextInt(preferredCount));
+        }
+
+        Predicate<BlockState> targetPredicate = state -> state != null && !state.isAir();
+        for (BlockPos candidate : candidates) {
+            if (this.explorationClimbClearBlockAi.start(
+                    serverLevel,
+                    candidate,
+                    targetPredicate,
+                    "clearing exploration climb fallback",
+                    EXPLORATION_CLIMB_CLEAR_TICKS,
+                    EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR
+            )) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<BlockPos> explorationClimbClearCandidates(BlockPos requestedTarget) {
+        BlockPos feet = this.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>(
+                ClearBlockAi.gatherObstructionCandidates(feet, requestedTarget, requestedTarget)
+        );
+        candidates.add(feet.above());
+        candidates.add(feet.above(2));
+
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos side = feet.relative(direction);
+            candidates.add(side);
+            candidates.add(side.above());
+            candidates.add(side.above(2));
+            candidates.add(side.below());
+        }
+
+        candidates.removeIf(pos -> pos == null || PlayerNpcHomeUtil.isInsideBuildFootprint(this, pos));
+        candidates.sort(Comparator.comparingDouble(pos -> pos.distSqr(feet)));
+        return candidates.stream().map(BlockPos::immutable).distinct().collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+    }
+
+    private void tickExplorationClimbClearBlock(ServerLevel serverLevel) {
+        ClearBlockAi.TickResult result = this.explorationClimbClearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            this.setCurrentAiState(AI_IDLE);
+            if (this.getCurrentAiDetail().isBlank()) {
+                this.setCurrentAiDetail(this.explorationClimbClearBlockAi.detail());
+            }
+            return;
+        }
+
+        this.stopExplorationClimbClearBlock();
+        if (result == ClearBlockAi.TickResult.DONE) {
+            this.explorationClimbStuckTicks = 0;
+            this.setCurrentAiDetail("exploration climb clear done; retrying");
+        } else {
+            this.setCurrentAiDetail("exploration climb clear failed; retrying");
+        }
+        this.clearUpwardEscapeTarget();
+        this.wakeUpIdleWork();
+    }
+
+    private boolean canRunExplorationClimbFallbackAction() {
+        return this.isAlive()
+                && !this.isNoAi()
+                && !this.isPassenger()
+                && !this.isHealing()
+                && this.getTarget() == null
+                && !this.isSleeping();
+    }
+
+    private void stopExplorationClimbClearBlock() {
+        this.explorationClimbClearBlockAi.stop();
+        this.explorationClimbToolAi.restoreMainHand();
+    }
+
+    private void resetExplorationClimbFallback() {
+        this.stopExplorationClimbClearBlock();
+        this.explorationClimbWatchPos = null;
+        this.explorationClimbWatchTarget = null;
+        this.explorationClimbSafeStandTarget = null;
+        this.explorationClimbStuckTicks = 0;
+    }
+
+    private boolean hasExplorationClimbFallbackDetail() {
+        String detail = this.getCurrentAiDetail();
+        return detail != null
+                && (detail.startsWith("exploration climb request @ ")
+                || detail.startsWith("moving to safe stand after climb stuck @ ")
+                || detail.startsWith("clearing exploration climb fallback @ ")
+                || detail.startsWith("exploration climb clear"));
     }
 
     private void tickTemporaryPillarSupports() {
@@ -2611,6 +3001,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         Random random = new Random();
         boolean isHard = ProgressionUtil.isAtLeastDifficulty(Difficulty.HARD);
         boolean isMedium = ProgressionUtil.isAtLeastDifficulty(Difficulty.MEDIUM);
+
+        if (this.hasInterest(PlayerNpcInterest.FISHING)) {
+            InventoryUtils.addItem(this.inventory, new ItemStack(Items.STRING, new Random().nextInt(3, 8)));
+        }
 
         int goldenAppleCount = isHard ? random.nextInt(6, 12)
                 : isMedium ? random.nextInt(2, 6)

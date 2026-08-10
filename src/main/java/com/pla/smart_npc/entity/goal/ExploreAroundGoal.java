@@ -132,6 +132,12 @@ public class ExploreAroundGoal extends Goal {
         this.retryWaitTicks = 0;
         this.targetPos = this.findReachableSurfaceTarget(serverLevel);
         if (this.targetPos == null) {
+            if (this.allowUpwardEscapeRequest && this.tryRequestShortUpwardEscape(serverLevel, null)) {
+                this.waitingForRetry = false;
+                this.retryWaitTicks = 0;
+                this.nextSearchTick = this.playerNpc.tickCount + RADIUS_RETRY_COOLDOWN_TICKS;
+                return false;
+            }
             this.scheduleRetry(serverLevel);
             return false;
         }
@@ -350,7 +356,7 @@ public class ExploreAroundGoal extends Goal {
         }
 
         this.playerNpc.getNavigation().stop();
-        this.playerNpc.requestUpwardEscapeTo(escapeTarget, UPWARD_ESCAPE_REQUEST_TICKS, MAX_EXPLORE_PILLAR_BLOCKS);
+        this.playerNpc.requestExplorationUpwardEscapeTo(escapeTarget, UPWARD_ESCAPE_REQUEST_TICKS, MAX_EXPLORE_PILLAR_BLOCKS);
         this.nextEscapeRequestTick = this.playerNpc.tickCount + ESCAPE_REQUEST_COOLDOWN_TICKS;
         this.playerNpc.setCurrentAiDetail("exploration climb request @ "
                 + posText(escapeTarget)
@@ -361,6 +367,7 @@ public class ExploreAroundGoal extends Goal {
 
     private BlockPos findShortSurfaceEscapeTarget(ServerLevel serverLevel, BlockPos feet, BlockPos routeHint) {
         List<BlockPos> candidates = new ArrayList<>();
+        List<BlockPos> relaxedCandidates = new ArrayList<>();
         for (int dx = -LOCAL_SURFACE_ESCAPE_RADIUS; dx <= LOCAL_SURFACE_ESCAPE_RADIUS; dx++) {
             for (int dz = -LOCAL_SURFACE_ESCAPE_RADIUS; dz <= LOCAL_SURFACE_ESCAPE_RADIUS; dz++) {
                 if (dx == 0 && dz == 0) {
@@ -376,16 +383,26 @@ public class ExploreAroundGoal extends Goal {
                 }
 
                 BlockPos candidate = new BlockPos(x, y, z);
-                if (!this.canStandAt(serverLevel, candidate)
-                        || !serverLevel.canSeeSky(candidate.above())
-                        || !this.hasLocalSurfaceRoom(serverLevel, candidate)) {
+                if (!this.canStandAt(serverLevel, candidate)) {
                     continue;
                 }
 
-                candidates.add(candidate.immutable());
+                if (serverLevel.canSeeSky(candidate.above()) && this.hasLocalSurfaceRoom(serverLevel, candidate)) {
+                    candidates.add(candidate.immutable());
+                } else {
+                    relaxedCandidates.add(candidate.immutable());
+                }
             }
         }
 
+        BlockPos strictTarget = this.selectBlockedEscapeTarget(candidates, feet, routeHint);
+        if (strictTarget != null) {
+            return strictTarget;
+        }
+        return this.selectBlockedEscapeTarget(relaxedCandidates, feet, routeHint);
+    }
+
+    private BlockPos selectBlockedEscapeTarget(List<BlockPos> candidates, BlockPos feet, BlockPos routeHint) {
         candidates.sort(Comparator
                 .comparingDouble((BlockPos pos) -> routeHint == null ? 0.0D : horizontalDistanceSqr(pos, routeHint))
                 .thenComparingDouble(pos -> blockDistanceSqr(feet, pos)));

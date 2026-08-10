@@ -58,6 +58,8 @@ Formatted display text is cached for 500 ms. Keep this throttling for FPS-sensit
 
 While the inspector overlay is open, holding E for the configured short hold threshold toggles inspectator view. The hold only triggers the toggle; the player does not need to keep holding E after mode changes. While the inspector overlay is active and E is being held for inspectator, vanilla inventory opening is canceled/drained so the hold can complete.
 
+The trace toggle uses effective trace state. If `/smart_npc trace all on` is active, any inspected or inspectated NPC should render the trace indicator as on. Pressing the per-NPC trace toggle while all-trace is active disables all-trace; pressing it again after that enables only the currently inspected NPC's individual trace.
+
 Entering inspectator view does all of these:
 
 - stores the previous client camera type and camera entity

@@ -29,12 +29,17 @@ public final class WaterEscapeAi {
         FAILED
     }
 
-    private static final int MAX_ESCAPE_TICKS = 20 * 3;
+    private static final int MAX_ESCAPE_TICKS = 20 * 5;
     private static final double MIN_FLOW_STRENGTH_SQR = 0.0004D;
     private static final int PLACE_DELAY_TICKS = 2;
     private static final int MAX_PLACE_WAIT_TICKS = 30;
     private static final double STAND_PLACE_CLEARANCE_Y = 0.92D;
     private static final double FALLBACK_STAND_PLACE_CLEARANCE_Y = 0.68D;
+    private static final int DRY_EXIT_FALLBACK_MIN_RADIUS = 4;
+    private static final int DRY_EXIT_FALLBACK_MAX_RADIUS = 5;
+    private static final int DRY_EXIT_FALLBACK_VERTICAL_DOWN = 2;
+    private static final int DRY_EXIT_FALLBACK_VERTICAL_UP = 2;
+    private static final int DRY_EXIT_FALLBACK_RANDOM_POOL = 8;
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
@@ -492,7 +497,7 @@ public final class WaterEscapeAi {
             }
         }
         if (candidates.isEmpty()) {
-            return null;
+            return this.findNearbyDryStepOut(serverLevel, feet);
         }
 
         Vec3 look = this.playerNpc.getLookAngle();
@@ -500,6 +505,38 @@ public final class WaterEscapeAi {
                 .comparingDouble((BlockPos candidate) -> feet.distSqr(candidate))
                 .thenComparingDouble(candidate -> -directionScore(feet, candidate, look)));
         return candidates.get(0);
+    }
+
+    private BlockPos findNearbyDryStepOut(ServerLevel serverLevel, BlockPos feet) {
+        List<BlockPos> candidates = new ArrayList<>();
+        int minRadiusSqr = DRY_EXIT_FALLBACK_MIN_RADIUS * DRY_EXIT_FALLBACK_MIN_RADIUS;
+        int maxRadius = DRY_EXIT_FALLBACK_MAX_RADIUS;
+        int maxRadiusSqr = maxRadius * maxRadius;
+        for (int dx = -maxRadius; dx <= maxRadius; dx++) {
+            for (int dz = -maxRadius; dz <= maxRadius; dz++) {
+                int distanceSqr = dx * dx + dz * dz;
+                if (distanceSqr < minRadiusSqr || distanceSqr > maxRadiusSqr) {
+                    continue;
+                }
+                for (int dy = -DRY_EXIT_FALLBACK_VERTICAL_DOWN; dy <= DRY_EXIT_FALLBACK_VERTICAL_UP; dy++) {
+                    BlockPos candidate = feet.offset(dx, dy, dz);
+                    if (this.canStandDryAt(serverLevel, candidate)) {
+                        candidates.add(candidate.immutable());
+                    }
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+
+        Vec3 look = this.playerNpc.getLookAngle();
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos candidate) -> feet.distSqr(candidate))
+                .thenComparingDouble(candidate -> -directionScore(feet, candidate, look))
+                .thenComparingInt(BlockPos::getY));
+        int poolSize = Math.min(DRY_EXIT_FALLBACK_RANDOM_POOL, candidates.size());
+        return candidates.get(this.playerNpc.getRandom().nextInt(poolSize));
     }
 
     private boolean canStandDryAt(ServerLevel serverLevel, BlockPos pos) {

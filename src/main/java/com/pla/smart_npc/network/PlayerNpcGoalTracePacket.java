@@ -48,7 +48,12 @@ public class PlayerNpcGoalTracePacket {
                 return;
             }
 
-            PlayerNpcGoalTraceLogger.setTraceEnabled(sender, playerNpc, packet.enabled);
+            if (!packet.enabled && PlayerNpcGoalTraceLogger.isAllTraceEnabled()) {
+                PlayerNpcGoalTraceLogger.setAllTraceEnabled(false, sender.getGameProfile().getName());
+                PlayerNpcGoalTraceLogger.stopTrace(sender, "all trace disabled by viewer");
+            } else {
+                PlayerNpcGoalTraceLogger.setTraceEnabled(sender, playerNpc, packet.enabled);
+            }
             SmartNpcNetwork.CHANNEL.send(
                     PacketDistributor.PLAYER.with(() -> sender),
                     new PlayerNpcInspectorPacket(
@@ -58,7 +63,7 @@ public class PlayerNpcGoalTracePacket {
                             PlayerNpcInspectorData.createPerformanceText(),
                             PlayerNpcInspectorData.createDailyJobText(playerNpc),
                             PlayerNpcInspectorData.createBuildRequirementsText(playerNpc),
-                            PlayerNpcGoalTraceLogger.isTracing(sender, playerNpc)
+                            PlayerNpcGoalTraceLogger.isEffectivelyTracing(sender, playerNpc)
                     )
             );
         });

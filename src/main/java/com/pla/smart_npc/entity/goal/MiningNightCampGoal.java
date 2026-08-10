@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.FurnaceAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
@@ -84,11 +85,22 @@ public class MiningNightCampGoal extends Goal {
     }
 
     public static boolean shouldPauseMiningForNightCamp(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        return playerNpc != null
-                && serverLevel != null
-                && GatherStoneGoal.isMiningJobActive(playerNpc)
+        if (playerNpc == null || serverLevel == null) {
+            return false;
+        }
+
+        boolean miningJob = GatherStoneGoal.isMiningJobActive(playerNpc);
+        boolean fishingJob = isFishingNightCampJob(playerNpc);
+        return miningJob
                 && (serverLevel.isNight() || serverLevel.isThundering())
-                && !serverLevel.canSeeSky(playerNpc.blockPosition().above());
+                && !serverLevel.canSeeSky(playerNpc.blockPosition().above())
+                || fishingJob && serverLevel.isNight();
+    }
+
+    private static boolean isFishingNightCampJob(PlayerNpcEntity playerNpc) {
+        return playerNpc != null
+                && playerNpc.hasInterest(PlayerNpcInterest.FISHING)
+                && playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING);
     }
 
     @Override

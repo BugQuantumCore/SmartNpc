@@ -72,6 +72,43 @@ public class CraftBasicGearGoal extends Goal {
         return probe.needsCriticalStarterTool() || probe.canCraftTool();
     }
 
+    public static boolean shouldPrioritizeGearCrafting(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null
+                || serverLevel == null
+                || !playerNpc.isAlive()
+                || playerNpc.isNoAi()
+                || playerNpc.isPassenger()
+                || playerNpc.isHealing()
+                || playerNpc.getTarget() != null
+                || "ai.player_npc.gathering_materials".equals(playerNpc.getCurrentAiState())) {
+            return false;
+        }
+
+        CraftBasicGearGoal probe = new CraftBasicGearGoal(playerNpc);
+        boolean missingPickaxe = !probe.hasTool(PickaxeItem.class);
+        boolean blockedByVerticalEscape = playerNpc.getUpwardEscapeTarget() != null
+                || playerNpc.getHoleEscapeCooldown() > 0
+                || "ai.player_npc.digging_down_for_stone".equals(playerNpc.getCurrentAiState())
+                || "ai.player_npc.pillaring_up".equals(playerNpc.getCurrentAiState());
+        if (blockedByVerticalEscape && !missingPickaxe) {
+            return false;
+        }
+        if (probe.isMiningProspectingState() && !missingPickaxe) {
+            return false;
+        }
+        return probe.canCraftUsefulGear(serverLevel);
+    }
+
+    public static boolean needsFishingRodCraftingLogs(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (!isFishingRodBootstrapActive(playerNpc) || serverLevel == null) {
+            return false;
+        }
+
+        CraftBasicGearGoal probe = new CraftBasicGearGoal(playerNpc);
+        ToolRecipe recipe = probe.nextFishingRodRecipe();
+        return recipe != null && !probe.canCraftToolWithAvailableStation(serverLevel, recipe);
+    }
+
     public static BlockPos getTemporaryCraftingTablePos(PlayerNpcEntity playerNpc) {
         if (playerNpc == null || !playerNpc.getPersistentData().contains(TEMP_TABLE_X)) {
             return null;
@@ -132,13 +169,15 @@ public class CraftBasicGearGoal extends Goal {
         if (this.isMiningProspectingState() && !missingPickaxe) {
             return false;
         }
-        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
-            return false;
-        }
-
         boolean needsTerraformShovel = this.needsTerraformShovel(serverLevel);
         boolean needsCriticalStarterTool = this.needsCriticalStarterToolForCooldown();
+        boolean priorityCrafting = this.playerNpc.isStoneAccessClearing()
+                && this.canCraftUsefulGear(serverLevel);
+        if (!priorityCrafting && !this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
         if (this.playerNpc.getCraftGearCooldown() > 0
+                && !priorityCrafting
                 && !needsCriticalStarterTool
                 && !needsTerraformShovel) {
             return false;
@@ -250,10 +289,14 @@ public class CraftBasicGearGoal extends Goal {
     @Override
     public void stop() {
         if (!this.playerNpc.level().isClientSide) {
-            int cooldown = this.craftedTool && this.needsCriticalStarterTool() && this.playerNpc.level() instanceof ServerLevel serverLevel && this.canCraftUsefulGear(serverLevel)
+            boolean canStillCraftUsefulGear = this.playerNpc.level() instanceof ServerLevel serverLevel
+                    && this.canCraftUsefulGear(serverLevel);
+            int cooldown = this.craftedTool && this.needsCriticalStarterTool() && canStillCraftUsefulGear
                     ? CRITICAL_TOOL_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(10)
                     : this.craftedTool
                     ? COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 15)
+                    : canStillCraftUsefulGear
+                    ? CRITICAL_TOOL_COOLDOWN_TICKS
                     : 20 + this.playerNpc.getRandom().nextInt(20);
             this.playerNpc.setCraftGearCooldown(cooldown);
         }
@@ -445,6 +488,11 @@ public class CraftBasicGearGoal extends Goal {
             return criticalRecipe;
         }
 
+        ToolRecipe fishingRodRecipe = this.nextFishingRodRecipe();
+        if (fishingRodRecipe != null && this.shouldPrioritizeFishingRod()) {
+            return fishingRodRecipe;
+        }
+
         ToolRecipe terraformRecipe = this.nextTerraformShovelRecipe();
         if (terraformRecipe != null) {
             return terraformRecipe;
@@ -467,11 +515,7 @@ public class CraftBasicGearGoal extends Goal {
         if (!this.hasTool(ShovelItem.class)) {
             return this.bestCraftableToolRecipe(ToolKind.SHOVEL);
         }
-        if (!this.hasTool(FishingRodItem.class)
-                && PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(Items.STRING)) >= 2) {
-            return new ToolRecipe(Items.FISHING_ROD.getDefaultInstance(), null, ToolTier.NONE, 0, 3);
-        }
-        return null;
+        return fishingRodRecipe;
     }
 
     private ToolRecipe nextMiningProspectingGearRecipe() {
@@ -582,6 +626,27 @@ public class CraftBasicGearGoal extends Goal {
         return this.playerNpc.hasCarriedTool(toolClass);
     }
 
+    private boolean shouldPrioritizeFishingRod() {
+        return isFishingRodBootstrapActive(this.playerNpc);
+    }
+
+    private ToolRecipe nextFishingRodRecipe() {
+        if (!this.hasTool(FishingRodItem.class)
+                && PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(Items.STRING)) >= 2) {
+            return new ToolRecipe(Items.FISHING_ROD.getDefaultInstance(), null, ToolTier.NONE, 0, 3);
+        }
+        return null;
+    }
+
+    private static boolean isFishingRodBootstrapActive(PlayerNpcEntity playerNpc) {
+        return playerNpc != null
+                && playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING)
+                && !playerNpc.shouldPrioritizeLogGathering()
+                && !playerNpc.shouldPrioritizeCobblestoneGathering()
+                && !PlayerNpcFishingGoal.hasFishingRod(playerNpc)
+                && PlayerNpcCraftingUtil.countItem(playerNpc.getInventory(), stack -> stack.is(Items.STRING)) >= 2;
+    }
+
     private int countStone() {
         return PlayerNpcCraftingUtil.countItem(this.playerNpc.getInventory(), stack -> stack.is(Items.COBBLESTONE) || stack.is(Items.COBBLED_DEEPSLATE));
     }
@@ -613,6 +678,26 @@ public class CraftBasicGearGoal extends Goal {
         }
 
         return false;
+    }
+
+    private boolean canCraftToolWithAvailableStation(ServerLevel serverLevel, ToolRecipe recipe) {
+        if (recipe == null || !this.canProvideRecipeMaterials(recipe, 0, this.rawLogReserveForRecipe(recipe))) {
+            return false;
+        }
+        return this.hasNearbyCraftingTable(serverLevel)
+                || this.hasReusableTemporaryCraftingTable(serverLevel)
+                || this.canPlaceCraftingTableForRecipe(serverLevel, recipe);
+    }
+
+    private boolean canPlaceCraftingTableForRecipe(ServerLevel serverLevel, ToolRecipe recipe) {
+        int rawLogReserve = this.rawLogReserveForRecipe(recipe);
+        int reservedPlanks = this.hasCarriedCraftingTable() ? 0 : 4;
+        boolean hasOrCanCraftTable = this.hasCarriedCraftingTable()
+                || this.countCarriedCraftingTables() == 0
+                && PlayerNpcCraftingUtil.canCraftCraftingTable(this.playerNpc.getInventory(), rawLogReserve);
+        return hasOrCanCraftTable
+                && this.canProvideRecipeMaterials(recipe, reservedPlanks, rawLogReserve)
+                && this.findCraftingTablePlacement(serverLevel) != null;
     }
 
     private boolean canProvidePlanksAndSticks(int planksNeeded, int sticksNeeded, int reservedPlanks, int rawLogReserve) {

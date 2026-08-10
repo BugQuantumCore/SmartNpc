@@ -44,7 +44,8 @@ public final class ToolAi {
     }
 
     public boolean hasTool(Class<?> toolClass) {
-        return this.playerNpc.hasCarriedTool(toolClass);
+        return this.playerNpc.hasCarriedTool(toolClass)
+                || (this.swappedMainHand && toolClass.isInstance(this.previousMainHand.getItem()));
     }
 
     public static Class<?> preferredToolFor(BlockState state) {

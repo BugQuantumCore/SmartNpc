@@ -3,8 +3,11 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -36,10 +39,12 @@ import net.minecraft.world.phys.Vec3;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public class TerraformBuildSiteGoal extends Goal {
     private static final double WORK_DISTANCE_SQR = 5.5D * 5.5D;
@@ -67,6 +72,12 @@ public class TerraformBuildSiteGoal extends Goal {
     private static final int TERRAFORM_LOCAL_ROUTE_RADIUS = 4;
     private static final int TERRAFORM_LOCAL_ROUTE_DOWN = 6;
     private static final int TERRAFORM_LOCAL_ROUTE_UP = 2;
+    private static final int TERRAFORM_CLEAR_OBSTRUCTION_TICKS = 24;
+    private static final int TERRAFORM_ROUTE_CLEAR_NO_PROGRESS_TICKS = 20 * 5;
+    private static final int TERRAFORM_ROUTE_CLEAR_RETRY_TICKS = 20;
+    private static final double TERRAFORM_ROUTE_PROGRESS_EPSILON_SQR = 1.0D;
+    private static final double TERRAFORM_ROUTE_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
+    private static final int TERRAFORM_ROUTE_CORRIDOR_STEPS = 10;
     private static final List<net.minecraft.world.item.Item> FILL_ITEMS = List.of(
             Items.DIRT,
             Items.COARSE_DIRT,
@@ -85,16 +96,25 @@ public class TerraformBuildSiteGoal extends Goal {
     private final PlayerNpcEntity playerNpc;
     private final PathNavigationAi pathNavigationAi;
     private final PlacingBlockAi placingBlockAi;
+    private final ToolAi routeToolAi;
+    private final BreakingBlockAi routeBreakingBlockAi;
+    private final ClearBlockAi clearBlockAi;
     private final double speed;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private final List<BlockPos> temporaryScaffold = new ArrayList<>();
     private final List<BlockPos> skippedSupportTargets = new ArrayList<>();
+    private final Set<BlockPos> skippedRouteClearTargets = new HashSet<>();
     private TerraformTarget target;
+    private BlockPos approachWorkPos;
+    private BlockPos lastMovementTarget;
     private BlockPos lastSupportFillFailurePos;
     private BlockPos scaffoldPlacePos;
     private ItemStack previousMainHand = ItemStack.EMPTY;
     private int workTicks;
     private int repathTicks;
+    private int routeClearNoProgressTicks;
+    private int routeClearRetryTicks;
+    private double bestApproachDistanceSqr = Double.MAX_VALUE;
     private int supportFillFailures;
     private int supportFillRetryCooldownTicks;
     private int supportClearanceMoveTicks;
@@ -109,6 +129,9 @@ public class TerraformBuildSiteGoal extends Goal {
         this.playerNpc = playerNpc;
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
+        this.routeToolAi = new ToolAi(playerNpc);
+        this.routeBreakingBlockAi = new BreakingBlockAi(playerNpc, this.routeToolAi);
+        this.clearBlockAi = new ClearBlockAi(playerNpc, this.routeBreakingBlockAi);
         this.speed = speed;
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
@@ -181,6 +204,9 @@ public class TerraformBuildSiteGoal extends Goal {
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
+        if (this.shouldYieldToGearCrafting(serverLevel)) {
+            return false;
+        }
 
         Optional<TerraformTarget> nextTarget = findNextTarget(serverLevel, this.playerNpc, true);
         if (nextTarget.isEmpty()) {
@@ -210,7 +236,17 @@ public class TerraformBuildSiteGoal extends Goal {
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isStoneAccessClearing()
                 && !hasActiveVerticalEscape(this.playerNpc)
-                && this.playerNpc.getTarget() == null;
+                && this.playerNpc.getTarget() == null
+                && !this.shouldYieldToGearCrafting();
+    }
+
+    private boolean shouldYieldToGearCrafting() {
+        return this.playerNpc.level() instanceof ServerLevel serverLevel
+                && this.shouldYieldToGearCrafting(serverLevel);
+    }
+
+    private boolean shouldYieldToGearCrafting(ServerLevel serverLevel) {
+        return CraftBasicGearGoal.shouldPrioritizeGearCrafting(this.playerNpc, serverLevel);
     }
 
     @Override
@@ -227,8 +263,10 @@ public class TerraformBuildSiteGoal extends Goal {
         this.lastSupportFillFailurePos = null;
         this.temporaryScaffold.clear();
         this.skippedSupportTargets.clear();
+        this.skippedRouteClearTargets.clear();
         this.previousMainHand = ItemStack.EMPTY;
         this.usingTemporaryMainHand = false;
+        this.resetRouteClearProgress();
         this.playerNpc.setCurrentAiState("ai.player_npc.terraforming_build_site");
         this.updateTaskDetail();
         if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
@@ -246,6 +284,9 @@ public class TerraformBuildSiteGoal extends Goal {
         }
         if (this.supportClearanceJumpCooldownTicks > 0) {
             this.supportClearanceJumpCooldownTicks--;
+        }
+        if (this.routeClearRetryTicks > 0) {
+            this.routeClearRetryTicks--;
         }
 
         if (this.target == null) {
@@ -266,10 +307,17 @@ public class TerraformBuildSiteGoal extends Goal {
             if (!this.temporaryScaffold.isEmpty()) {
                 this.target = null;
                 this.restorePreviousMainHand();
+                this.clearBlockAi.stop();
+                this.routeBreakingBlockAi.stop();
+                this.routeToolAi.restoreMainHand();
+                this.resetRouteClearProgress();
+                this.skippedRouteClearTargets.clear();
                 this.updateTaskDetail();
                 return;
             }
             this.target = this.findNextTarget(serverLevel, true).orElse(null);
+            this.resetRouteClearProgress();
+            this.skippedRouteClearTargets.clear();
             this.updateTaskDetail();
             if (this.target == null) {
                 this.targetSearchRetryCooldownTicks = TARGET_SEARCH_RETRY_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(10);
@@ -281,6 +329,12 @@ public class TerraformBuildSiteGoal extends Goal {
             this.stopEpicFightDiggingAnimation();
             this.target = null;
             this.workTicks = 0;
+            this.resetRouteClearProgress();
+            this.skippedRouteClearTargets.clear();
+            return;
+        }
+
+        if (this.tickRouteClearBlock(serverLevel)) {
             return;
         }
 
@@ -308,13 +362,20 @@ public class TerraformBuildSiteGoal extends Goal {
         if (!this.isWithinDirectClearReach(pos)) {
             this.playerNpc.clearBlockBreakProgress(pos);
             this.stopEpicFightDiggingAnimation();
-            if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            this.trackRouteClearProgress(pos);
+            boolean navigationProblem = this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck();
+            if (this.shouldStartRouteClear(navigationProblem)
+                    && this.startClearingRoute(serverLevel, pos)) {
+                return;
+            }
+            if (this.repathTicks-- <= 0 || navigationProblem) {
                 this.repathTicks = 20;
                 this.moveToTarget(serverLevel);
             }
             return;
         }
 
+        this.resetRouteClearProgress();
         this.playerNpc.getNavigation().stop();
         switch (this.target.phase()) {
             case CLEAR, CLEAR_WATER -> this.tickClear(serverLevel);
@@ -335,14 +396,19 @@ public class TerraformBuildSiteGoal extends Goal {
             this.playerNpc.clearBlockBreakProgress(this.temporaryScaffold.get(this.temporaryScaffold.size() - 1));
         }
         this.restorePreviousMainHand();
+        this.clearBlockAi.stop();
+        this.routeBreakingBlockAi.stop();
+        this.routeToolAi.restoreMainHand();
         this.playerNpc.getNavigation().stop();
         this.target = null;
         this.scaffoldPlacePos = null;
         this.temporaryScaffold.clear();
         this.skippedSupportTargets.clear();
+        this.skippedRouteClearTargets.clear();
         this.lastSupportFillFailurePos = null;
         this.workTicks = 0;
         this.repathTicks = 0;
+        this.resetRouteClearProgress();
         this.supportFillFailures = 0;
         this.supportClearanceMoveTicks = 0;
         this.supportClearanceJumpCooldownTicks = 0;
@@ -743,6 +809,7 @@ public class TerraformBuildSiteGoal extends Goal {
         }
 
         BlockPos pos = this.findMovementTarget(serverLevel, this.target.pos());
+        this.lastMovementTarget = pos.immutable();
         boolean moved = this.pathNavigationAi.moveToWithLocalFallback(
                 serverLevel,
                 pos,
@@ -757,12 +824,227 @@ public class TerraformBuildSiteGoal extends Goal {
             return;
         }
 
+        if (this.startClearingRoute(serverLevel, this.target.pos())) {
+            return;
+        }
+
         this.updateTaskDetail("terraform path blocked @ "
                 + this.target.pos().getX() + " "
                 + this.target.pos().getY() + " "
                 + this.target.pos().getZ()
                 + " "
                 + this.pathNavigationAi.lastMoveFailureDetail());
+    }
+
+    private boolean tickRouteClearBlock(ServerLevel serverLevel) {
+        if (!this.clearBlockAi.isRunning()) {
+            return false;
+        }
+
+        BlockPos clearTarget = this.clearBlockAi.targetPos();
+        ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            this.updateTaskDetail();
+            return true;
+        }
+
+        this.routeToolAi.restoreMainHand();
+        if (result == ClearBlockAi.TickResult.DONE) {
+            this.skippedRouteClearTargets.clear();
+            this.repathTicks = 0;
+            this.routeClearRetryTicks = 0;
+            this.resetRouteClearProgress();
+            this.moveToTarget(serverLevel);
+            return true;
+        }
+
+        if (result == ClearBlockAi.TickResult.FAILED && clearTarget != null) {
+            this.skippedRouteClearTargets.add(clearTarget.immutable());
+            this.routeClearRetryTicks = TERRAFORM_ROUTE_CLEAR_RETRY_TICKS;
+            this.repathTicks = 0;
+        }
+        return false;
+    }
+
+    private boolean shouldStartRouteClear(boolean navigationProblem) {
+        return this.routeClearRetryTicks <= 0
+                && (navigationProblem
+                || this.routeClearNoProgressTicks >= TERRAFORM_ROUTE_CLEAR_NO_PROGRESS_TICKS);
+    }
+
+    private void trackRouteClearProgress(BlockPos workPos) {
+        if (workPos == null) {
+            this.resetRouteClearProgress();
+            return;
+        }
+
+        double distanceSqr = this.playerNpc.distanceToSqr(
+                workPos.getX() + 0.5D,
+                workPos.getY() + 0.5D,
+                workPos.getZ() + 0.5D
+        );
+        if (!workPos.equals(this.approachWorkPos)) {
+            this.approachWorkPos = workPos.immutable();
+            this.bestApproachDistanceSqr = distanceSqr;
+            this.routeClearNoProgressTicks = 0;
+            return;
+        }
+
+        if (distanceSqr + TERRAFORM_ROUTE_PROGRESS_EPSILON_SQR < this.bestApproachDistanceSqr) {
+            this.bestApproachDistanceSqr = distanceSqr;
+            this.routeClearNoProgressTicks = 0;
+            return;
+        }
+
+        this.routeClearNoProgressTicks++;
+    }
+
+    private void resetRouteClearProgress() {
+        this.approachWorkPos = null;
+        this.lastMovementTarget = null;
+        this.routeClearNoProgressTicks = 0;
+        this.bestApproachDistanceSqr = Double.MAX_VALUE;
+    }
+
+    private boolean startClearingRoute(ServerLevel serverLevel, BlockPos workPos) {
+        if (this.target == null || workPos == null || this.target.phase() != TerraformPhase.CLEAR) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos approachPos = this.lastMovementTarget != null
+                ? this.lastMovementTarget
+                : this.findMovementTarget(serverLevel, workPos);
+        List<BlockPos> candidates = new ArrayList<>(ClearBlockAi.gatherObstructionCandidates(
+                feet,
+                approachPos,
+                workPos
+        ));
+        addTerraformRouteCandidates(candidates, feet, approachPos, workPos);
+
+        List<BlockPos> ordered = candidates.stream()
+                .filter(pos -> pos != null
+                        && !pos.equals(workPos)
+                        && !this.skippedRouteClearTargets.contains(pos)
+                        && !this.temporaryScaffold.contains(pos)
+                        && !this.playerNpc.isTemporaryPillarSupport(pos))
+                .map(BlockPos::immutable)
+                .distinct()
+                .filter(pos -> this.isClearableRouteCandidate(serverLevel, pos))
+                .sorted(Comparator.comparingDouble(pos -> pos.distSqr(feet)))
+                .toList();
+        for (BlockPos candidate : ordered) {
+            if (this.startClearingRouteCandidate(serverLevel, candidate)) {
+                this.playerNpc.clearBlockBreakProgress(workPos);
+                this.stopEpicFightDiggingAnimation();
+                this.repathTicks = 0;
+                return true;
+            }
+        }
+
+        this.routeClearRetryTicks = TERRAFORM_ROUTE_CLEAR_RETRY_TICKS;
+        return false;
+    }
+
+    private boolean startClearingRouteCandidate(ServerLevel serverLevel, BlockPos candidate) {
+        BlockState state = serverLevel.getBlockState(candidate);
+        if (!this.isClearableRouteCandidate(serverLevel, candidate, state)) {
+            return false;
+        }
+
+        this.restorePreviousMainHand();
+        this.routeToolAi.restoreMainHand();
+        return this.clearBlockAi.start(
+                serverLevel,
+                candidate,
+                blockState -> this.isClearableRouteCandidate(serverLevel, candidate, blockState),
+                "clearing terraform path",
+                TERRAFORM_CLEAR_OBSTRUCTION_TICKS,
+                TERRAFORM_ROUTE_CLEAR_DISTANCE_SQR,
+                true
+        );
+    }
+
+    private boolean isClearableRouteCandidate(ServerLevel serverLevel, BlockPos pos) {
+        return this.isClearableRouteCandidate(serverLevel, pos, serverLevel.getBlockState(pos));
+    }
+
+    private boolean isClearableRouteCandidate(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        return canClearForBuild(serverLevel, this.playerNpc, pos, state)
+                && ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, state, true);
+    }
+
+    private static void addTerraformRouteCandidates(
+            List<BlockPos> candidates,
+            BlockPos feet,
+            BlockPos approachPos,
+            BlockPos workPos
+    ) {
+        if (feet == null) {
+            return;
+        }
+
+        addBodyColumn(candidates, feet);
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            addBodyColumn(candidates, feet.relative(direction));
+        }
+
+        BlockPos routeTarget = approachPos == null ? nearestSideTarget(feet, workPos) : approachPos;
+        if (routeTarget != null) {
+            addBodyColumn(candidates, routeTarget);
+            addLineBodyColumns(candidates, feet, routeTarget, TERRAFORM_ROUTE_CORRIDOR_STEPS);
+            addLineBodyColumns(candidates, feet.above(), routeTarget.above(), TERRAFORM_ROUTE_CORRIDOR_STEPS);
+        }
+
+        if (workPos == null) {
+            return;
+        }
+
+        addLineBodyColumns(candidates, feet.above(), workPos.above(), TERRAFORM_ROUTE_CORRIDOR_STEPS);
+        candidates.add(workPos.above());
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            addBodyColumn(candidates, workPos.relative(direction));
+        }
+    }
+
+    private static void addLineBodyColumns(List<BlockPos> candidates, BlockPos from, BlockPos to, int steps) {
+        if (from == null || to == null) {
+            return;
+        }
+
+        int count = Math.max(1, steps);
+        double dx = (to.getX() - from.getX()) / (double) count;
+        double dy = (to.getY() - from.getY()) / (double) count;
+        double dz = (to.getZ() - from.getZ()) / (double) count;
+        for (int step = 1; step <= count; step++) {
+            BlockPos column = new BlockPos(
+                    (int) Math.round(from.getX() + dx * step),
+                    (int) Math.round(from.getY() + dy * step),
+                    (int) Math.round(from.getZ() + dz * step)
+            );
+            addBodyColumn(candidates, column);
+        }
+    }
+
+    private static BlockPos nearestSideTarget(BlockPos feet, BlockPos target) {
+        if (feet == null || target == null) {
+            return target;
+        }
+
+        return Direction.Plane.HORIZONTAL.stream()
+                .map(target::relative)
+                .min(Comparator.comparingDouble(pos -> pos.distSqr(feet)))
+                .orElse(target);
+    }
+
+    private static void addBodyColumn(List<BlockPos> candidates, BlockPos feet) {
+        if (feet == null) {
+            return;
+        }
+
+        candidates.add(feet);
+        candidates.add(feet.above());
+        candidates.add(feet.above(2));
     }
 
     private BlockPos findMovementTarget(ServerLevel serverLevel, BlockPos workPos) {
@@ -885,6 +1167,13 @@ public class TerraformBuildSiteGoal extends Goal {
     private void updateTaskDetail(String override) {
         if (override != null && !override.isBlank()) {
             this.playerNpc.setCurrentAiDetail(override);
+            return;
+        }
+        if (this.clearBlockAi.isRunning()) {
+            String detail = this.clearBlockAi.detail();
+            if (!detail.isBlank()) {
+                this.playerNpc.setCurrentAiDetail(detail);
+            }
             return;
         }
         if (this.scaffoldPlacePos != null) {
