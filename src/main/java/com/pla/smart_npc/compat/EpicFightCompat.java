@@ -23,6 +23,9 @@ public final class EpicFightCompat {
     private static Method keepDiggingStateMethod;
     private static Method playDiggingAnimationMethod;
     private static Method stopDiggingAnimationMethod;
+    private static Method keepSleepingStateMethod;
+    private static Method playSleepingAnimationMethod;
+    private static Method stopSleepingAnimationMethod;
     private static boolean handlersRegistered;
     private static boolean hooksDisabled;
     private static boolean warnedHandlerFailure;
@@ -65,6 +68,18 @@ public final class EpicFightCompat {
 
     public static void stopDiggingAnimation(PlayerNpcEntity playerNpc) {
         invokeEntityHook("stop digging animation", playerNpc, EpicFightCompat::stopDiggingAnimationMethod);
+    }
+
+    public static void keepSleepingState(PlayerNpcEntity playerNpc) {
+        invokeEntityHook("keep sleeping state", playerNpc, EpicFightCompat::keepSleepingStateMethod);
+    }
+
+    public static void playSleepingAnimation(PlayerNpcEntity playerNpc) {
+        invokeEntityHook("play sleeping animation", playerNpc, EpicFightCompat::playSleepingAnimationMethod);
+    }
+
+    public static void stopSleepingAnimation(PlayerNpcEntity playerNpc) {
+        invokeEntityHook("stop sleeping animation", playerNpc, EpicFightCompat::stopSleepingAnimationMethod);
     }
 
     private static void registerArmatures() {
@@ -117,6 +132,27 @@ public final class EpicFightCompat {
             stopDiggingAnimationMethod = entityHookMethod("stopDiggingAnimation");
         }
         return stopDiggingAnimationMethod;
+    }
+
+    private static Method keepSleepingStateMethod() throws ClassNotFoundException, NoSuchMethodException {
+        if (keepSleepingStateMethod == null) {
+            keepSleepingStateMethod = entityHookMethod("keepSleepingState");
+        }
+        return keepSleepingStateMethod;
+    }
+
+    private static Method playSleepingAnimationMethod() throws ClassNotFoundException, NoSuchMethodException {
+        if (playSleepingAnimationMethod == null) {
+            playSleepingAnimationMethod = entityHookMethod("playSleepingAnimation");
+        }
+        return playSleepingAnimationMethod;
+    }
+
+    private static Method stopSleepingAnimationMethod() throws ClassNotFoundException, NoSuchMethodException {
+        if (stopSleepingAnimationMethod == null) {
+            stopSleepingAnimationMethod = entityHookMethod("stopSleepingAnimation");
+        }
+        return stopSleepingAnimationMethod;
     }
 
     private static Method entityHookMethod(String methodName) throws ClassNotFoundException, NoSuchMethodException {

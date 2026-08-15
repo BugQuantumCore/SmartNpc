@@ -238,25 +238,7 @@ public class BeingAtHomeGoal extends Goal {
         if (layout.isEmpty()) {
             return this.hasBasicHomeAmenities(serverLevel, homeArea);
         }
-        if (layout.get().width() != homeArea.width()
-                || layout.get().depth() != homeArea.depth()
-                || TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
-                || BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel)) {
-            return false;
-        }
-
-        for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
-            if (block.optional()
-                    || block.state().isAir()
-                    || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
-                continue;
-            }
-            BlockPos worldPos = block.toWorld(homeArea.origin());
-            if (!PlayerNpcBuildMaterialUtil.matches(serverLevel.getBlockState(worldPos), block.state())) {
-                return false;
-            }
-        }
-        return true;
+        return BuildHouseGoal.isHomeLayoutFinished(this.playerNpc, serverLevel);
     }
 
     private BlockPos findAfkPos(ServerLevel serverLevel, PlayerNpcHomeUtil.HomeArea homeArea) {

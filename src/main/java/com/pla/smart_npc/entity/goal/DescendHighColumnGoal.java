@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
@@ -49,6 +50,7 @@ public class DescendHighColumnGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
+                || this.shouldYieldToMiningSupplyWork()
                 || !this.shouldRunForCurrentState()) {
             return false;
         }
@@ -142,6 +144,13 @@ public class DescendHighColumnGoal extends Goal {
         String state = this.playerNpc.getCurrentAiState();
         return PlayerNpcEntity.AI_IDLE.equals(state)
                 || "ai.player_npc.returning_home".equals(state);
+    }
+
+    private boolean shouldYieldToMiningSupplyWork() {
+        return this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
+                && !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && (this.playerNpc.shouldPrioritizeLogGathering()
+                || this.playerNpc.shouldPrioritizeCobblestoneGathering());
     }
 
     private BlockPos findDescendFloor(ServerLevel serverLevel) {

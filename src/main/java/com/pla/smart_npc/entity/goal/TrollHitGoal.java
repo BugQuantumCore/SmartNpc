@@ -85,6 +85,7 @@ public class TrollHitGoal extends Goal {
         this.runTicks = 0;
         this.pathRecalculateTicks = 0;
         if (this.victim != null) {
+            this.playerNpc.setSprinting(true);
             this.playerNpc.setTarget(this.victim);
             this.playerNpc.setCurrentAiState("ai.player_npc.troll_hit");
             this.playerNpc.setCurrentAiDetail(this.victim.getDisplayName().getString());
@@ -113,6 +114,7 @@ public class TrollHitGoal extends Goal {
 
     @Override
     public void stop() {
+        this.playerNpc.setSprinting(false);
         if (this.victim != null && this.playerNpc.getTarget() == this.victim) {
             this.playerNpc.setTarget(null);
         }

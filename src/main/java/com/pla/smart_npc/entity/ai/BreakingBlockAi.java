@@ -6,8 +6,12 @@ import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.function.Predicate;
@@ -87,7 +91,7 @@ public final class BreakingBlockAi {
 
         this.toolAi.equipBestToolFor(state);
         this.toolDetail = this.toolAi.hasPreferredToolFor(state) ? "" : " without preferred tool";
-        this.requiredTicks = requiredBreakTicks(serverLevel, targetPos, state, this.playerNpc.getMainHandItem());
+        this.requiredTicks = requiredBreakTicks(serverLevel, targetPos, state, this.playerNpc);
         if (!targetPos.equals(this.targetPos)) {
             this.start(targetPos, this.requiredTicks, detail);
         }
@@ -135,6 +139,9 @@ public final class BreakingBlockAi {
         if (hardness < 0.0F) {
             return MAX_REQUIRED_BREAK_TICKS;
         }
+        if (hardness == 0.0F) {
+            return 1;
+        }
 
         ItemStack stack = heldStack == null ? ItemStack.EMPTY : heldStack;
         float toolSpeed = stack.isEmpty() ? 1.0F : stack.getDestroySpeed(state);
@@ -148,6 +155,70 @@ public final class BreakingBlockAi {
             return MAX_REQUIRED_BREAK_TICKS;
         }
         return Math.min(MAX_REQUIRED_BREAK_TICKS, Math.max(1, (int) Math.ceil(1.0F / progressPerTick)));
+    }
+
+    public static int requiredBreakTicks(ServerLevel serverLevel, BlockPos pos, BlockState state, PlayerNpcEntity playerNpc) {
+        if (state == null || playerNpc == null) {
+            return MAX_REQUIRED_BREAK_TICKS;
+        }
+
+        float hardness = state.getDestroySpeed(serverLevel, pos);
+        if (hardness < 0.0F) {
+            return MAX_REQUIRED_BREAK_TICKS;
+        }
+        if (hardness == 0.0F) {
+            return 1;
+        }
+
+        ItemStack stack = playerNpc.getMainHandItem();
+        boolean correctTool = !state.requiresCorrectToolForDrops() || stack.isCorrectToolForDrops(state);
+        float progressPerTick = destroySpeedFor(playerNpc, state) / hardness / (correctTool ? 30.0F : 100.0F);
+        if (progressPerTick <= 0.0F) {
+            return MAX_REQUIRED_BREAK_TICKS;
+        }
+        return Math.min(MAX_REQUIRED_BREAK_TICKS, Math.max(1, (int) Math.ceil(1.0F / progressPerTick)));
+    }
+
+    private static float destroySpeedFor(PlayerNpcEntity playerNpc, BlockState state) {
+        ItemStack stack = playerNpc.getMainHandItem();
+        float speed = stack.isEmpty() ? 1.0F : stack.getDestroySpeed(state);
+        if (speed <= 0.0F) {
+            speed = 1.0F;
+        }
+
+        if (speed > 1.0F && !stack.isEmpty()) {
+            int efficiency = EnchantmentHelper.getBlockEfficiency(playerNpc);
+            if (efficiency > 0) {
+                speed += efficiency * efficiency + 1.0F;
+            }
+        }
+
+        MobEffectInstance haste = playerNpc.getEffect(MobEffects.DIG_SPEED);
+        if (haste != null) {
+            speed *= 1.0F + (float) (haste.getAmplifier() + 1) * 0.2F;
+        }
+
+        MobEffectInstance fatigue = playerNpc.getEffect(MobEffects.DIG_SLOWDOWN);
+        if (fatigue != null) {
+            speed *= miningFatigueMultiplier(fatigue.getAmplifier());
+        }
+
+        if (playerNpc.isEyeInFluid(FluidTags.WATER) && !EnchantmentHelper.hasAquaAffinity(playerNpc)) {
+            speed /= 5.0F;
+        }
+        if (!playerNpc.onGround()) {
+            speed /= 5.0F;
+        }
+        return speed;
+    }
+
+    private static float miningFatigueMultiplier(int amplifier) {
+        return switch (amplifier) {
+            case 0 -> 0.3F;
+            case 1 -> 0.09F;
+            case 2 -> 0.0027F;
+            default -> 8.1E-4F;
+        };
     }
 
     public void stop() {

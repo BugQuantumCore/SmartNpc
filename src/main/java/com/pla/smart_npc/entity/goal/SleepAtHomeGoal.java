@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -87,14 +88,15 @@ public class SleepAtHomeGoal extends Goal {
         if (!this.playerNpc.isSleeping()) {
             this.startSleepingInBed(serverLevel);
         }
+        if (this.playerNpc.isSleeping()) {
+            EpicFightCompat.keepSleepingState(this.playerNpc);
+        }
         this.sleepTicks--;
     }
 
     @Override
     public void stop() {
-        if (this.playerNpc.isSleeping()) {
-            this.playerNpc.stopSleeping();
-        }
+        this.stopSleeping();
         if (!this.playerNpc.level().isClientSide) {
             this.playerNpc.setSleepCooldown(20 * 90 + this.playerNpc.getRandom().nextInt(20 * 120));
         }
@@ -114,9 +116,7 @@ public class SleepAtHomeGoal extends Goal {
     }
 
     private void wakeFromInvalidBed() {
-        if (this.playerNpc.isSleeping()) {
-            this.playerNpc.stopSleeping();
-        }
+        this.stopSleeping();
         this.playerNpc.setCurrentAiDetail("bed missing");
         this.bedPos = null;
         this.sleepTicks = 0;
@@ -140,6 +140,16 @@ public class SleepAtHomeGoal extends Goal {
         this.playerNpc.yBodyRot = facing.toYRot();
         this.playerNpc.yHeadRot = facing.toYRot();
         this.playerNpc.startSleeping(headPos);
+        if (this.playerNpc.isSleeping()) {
+            EpicFightCompat.playSleepingAnimation(this.playerNpc);
+        }
+    }
+
+    private void stopSleeping() {
+        if (this.playerNpc.isSleeping()) {
+            this.playerNpc.stopSleeping();
+        }
+        EpicFightCompat.stopSleepingAnimation(this.playerNpc);
     }
 
     private BlockPos findHomeBed(ServerLevel serverLevel) {

@@ -1,14 +1,13 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.compat.EpicFightCompat;
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
-import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
-import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
@@ -33,6 +32,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -43,6 +43,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
+import javax.annotation.Nullable;
 
 public class EscapeHoleWithBlockGoal extends Goal {
     private static final String AI_STATE = "ai.player_npc.pillaring_up";
@@ -80,6 +81,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int EXPLORATION_CLIMB_CLEAR_TICKS = 24;
     private static final int EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS = 20 * 20;
     private static final double EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
+    private static final int EXPLORATION_CLIMB_STEP_OFF_STUCK_TICKS = PILLAR_STUCK_MIN_TICKS;
+    private static final int EXPLORATION_CLIMB_STEP_OFF_TICKS = 20;
+    private static final int EXPLORATION_CLIMB_STEP_OFF_RADIUS = 5;
+    private static final int EXPLORATION_CLIMB_STEP_OFF_MAX_FALL = 16;
+    private static final double EXPLORATION_CLIMB_STEP_OFF_SPEED = 0.28D;
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
@@ -96,6 +102,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private BlockPos pillarClearPos;
     private BlockPos pillarStuckWatchPos;
     private BlockPos exitClearPos;
+    private BlockPos explorationClimbStepOffWatchPos;
+    private BlockPos explorationClimbStepOffWatchTarget;
+    private BlockPos explorationClimbStepOffWatchBase;
+    private BlockPos explorationClimbStepOffStartPos;
+    private BlockPos explorationClimbStepOffTargetPos;
     private int pillarExitY;
     private ItemStack previousMainHand = ItemStack.EMPTY;
     private ItemStack previousPillarMainHand = ItemStack.EMPTY;
@@ -113,6 +124,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private int pillarStuckWatchStartTick;
     private int nextPillarStuckRecoveryTick;
     private int pillarStuckWatchPillarsPlaced;
+    private int explorationClimbStepOffWatchStartTick;
+    private int explorationClimbStepOffTicks;
     private boolean usingTemporaryPickaxe;
     private boolean usingTemporaryBlock;
     private boolean finished;
@@ -298,6 +311,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return true;
         }
 
+        if (this.mode == EscapeMode.PILLAR && this.explorationClimbStepOffTargetPos != null) {
+            return true;
+        }
+
         if (this.mode == EscapeMode.PILLAR
                 && this.climbTargetPos != null
                 && this.shouldStopOpenSkyRouteClimb(serverLevel, this.playerNpc.blockPosition())) {
@@ -324,6 +341,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.pillarsPlaced = 0;
         this.failedPillarPlaceAttempts = 0;
         this.resetPillarStuckWatch();
+        this.resetExplorationClimbStepOffWatch();
+        this.clearExplorationClimbStepOff();
         this.finished = false;
         this.previousMainHand = ItemStack.EMPTY;
         this.previousPillarMainHand = ItemStack.EMPTY;
@@ -480,11 +499,18 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         BlockState state = serverLevel.getBlockState(this.minePos);
         if (!this.canGatherEscapeMaterial(state)) {
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
+            this.restorePreviousMainHand();
             this.playerNpc.clearBlockBreakProgress(this.minePos);
             this.minePos = null;
+            this.mineTicks = 0;
             return;
         }
         if (!this.equipPreferredToolForPillarClear(state)) {
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
+            this.restorePreviousMainHand();
             this.playerNpc.clearBlockBreakProgress(this.minePos);
             this.minePos = null;
             this.mineTicks = 0;
@@ -501,6 +527,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         );
 
         if (this.playerNpc.distanceToSqr(this.minePos.getX() + 0.5D, this.minePos.getY() + 0.5D, this.minePos.getZ() + 0.5D) > BREAK_DISTANCE_SQR) {
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
+            this.restorePreviousMainHand();
             this.playerNpc.clearBlockBreakProgress(this.minePos);
             if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
                 if (this.moveToMineTarget()) {
@@ -518,26 +547,26 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         this.playerNpc.getNavigation().stop();
-        if (this.mineTicks % 8 == 0) {
-            this.playerNpc.triggerMainHandAttackAnimation();
-            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, this.minePos, state, this.playerNpc);
-        }
-
-        this.mineTicks++;
-        int requiredMineTicks = this.getRequiredMineTicks(serverLevel, state);
-        this.playerNpc.showBlockBreakProgress(this.minePos, this.mineTicks, requiredMineTicks);
-        if (this.mineTicks < requiredMineTicks) {
+        BlockPos minedPos = this.minePos.immutable();
+        BreakingBlockAi.TickResult result = this.breakingBlockAi.tick(
+                serverLevel,
+                minedPos,
+                this::canGatherEscapeMaterial,
+                this.getRequiredMineTicks(serverLevel, minedPos, state),
+                String.format(
+                        java.util.Locale.ROOT,
+                        "escape blocks %d/%d mining %s",
+                        this.countEscapeBlocks(),
+                        this.requiredEscapeBlocks,
+                        state.getBlock().getDescriptionId()
+                )
+        );
+        if (result == BreakingBlockAi.TickResult.RUNNING) {
             return;
         }
 
-        BlockPos minedPos = this.minePos;
-        ItemStack escapeDrop = this.escapeDropFor(state);
-        if (serverLevel.destroyBlock(minedPos, false, this.playerNpc)) {
-            this.playerNpc.hurtMainHandItem(1);
-            if (!InventoryUtils.addItem(this.playerNpc, escapeDrop)) {
-                this.playerNpc.spawnAtLocation(escapeDrop);
-            }
-        }
+        this.toolAi.restoreMainHand();
+        this.restorePreviousMainHand();
         this.playerNpc.clearBlockBreakProgress(minedPos);
         this.minePos = null;
         this.mineStandPos = null;
@@ -552,6 +581,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         if (this.exitClearPos == null || !this.isClearableExitObstruction(serverLevel, this.exitClearPos, serverLevel.getBlockState(this.exitClearPos))) {
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
+            this.restorePreviousMainHand();
             this.playerNpc.clearBlockBreakProgress(this.exitClearPos);
             this.exitClearPos = this.findExitClearTarget(serverLevel, feet, this.climbTargetPos);
             this.mineTicks = 0;
@@ -563,6 +595,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         BlockState state = serverLevel.getBlockState(this.exitClearPos);
         if (!this.equipPreferredToolForPillarClear(state)) {
+            this.breakingBlockAi.stop();
+            this.toolAi.restoreMainHand();
+            this.restorePreviousMainHand();
             this.playerNpc.clearBlockBreakProgress(this.exitClearPos);
             this.exitClearPos = null;
             this.mineTicks = 0;
@@ -577,23 +612,24 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 60.0F
         );
 
-        if (this.mineTicks % 8 == 0) {
-            this.playerNpc.triggerMainHandAttackAnimation();
-            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, this.exitClearPos, state, this.playerNpc);
-        }
-
-        this.mineTicks++;
-        int requiredMineTicks = this.getRequiredMineTicks(serverLevel, this.exitClearPos, state);
-        this.playerNpc.showBlockBreakProgress(this.exitClearPos, this.mineTicks, requiredMineTicks);
-        this.updateExitClearDetail(state);
-        if (this.mineTicks < requiredMineTicks) {
+        BlockPos clearedPos = this.exitClearPos.immutable();
+        BreakingBlockAi.TickResult result = this.breakingBlockAi.tick(
+                serverLevel,
+                clearedPos,
+                clearState -> this.isClearableExitObstruction(serverLevel, clearedPos, clearState),
+                this.getRequiredMineTicks(serverLevel, clearedPos, state),
+                String.format(
+                        java.util.Locale.ROOT,
+                        "clearing pillar path %s",
+                        state.getBlock().getDescriptionId()
+                )
+        );
+        if (result == BreakingBlockAi.TickResult.RUNNING) {
             return;
         }
 
-        BlockPos clearedPos = this.exitClearPos;
-        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, clearedPos, state, this.playerNpc)) {
-            this.playerNpc.hurtMainHandItem(1);
-        }
+        this.toolAi.restoreMainHand();
+        this.restorePreviousMainHand();
         this.playerNpc.clearBlockBreakProgress(clearedPos);
         this.exitClearPos = null;
         this.mineTicks = 0;
@@ -646,6 +682,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void tickPillar(ServerLevel serverLevel) {
+        if (this.explorationClimbStepOffTargetPos != null) {
+            this.tickExplorationClimbStepOff(serverLevel);
+            return;
+        }
+
         if (this.pillarClearPos != null) {
             this.tickPillarClearance(serverLevel);
             return;
@@ -661,6 +702,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 return;
             }
             if (!this.isAtPillarBase()) {
+                if (this.tryStartStuckExplorationClimbStepOff(serverLevel)) {
+                    return;
+                }
                 this.moveToPillarBase();
                 return;
             }
@@ -920,6 +964,248 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         return false;
+    }
+
+    private boolean tryStartStuckExplorationClimbStepOff(ServerLevel serverLevel) {
+        if (!this.isBuildingExplorationClimbRequest() || this.pillarBasePos == null || !this.playerNpc.onGround()) {
+            this.resetExplorationClimbStepOffWatch();
+            return false;
+        }
+        if (!this.playerNpc.getNavigation().isDone() && !this.playerNpc.getNavigation().isStuck()) {
+            this.explorationClimbStepOffWatchStartTick = this.playerNpc.tickCount;
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos routeTarget = this.climbTargetPos == null ? this.playerNpc.getUpwardEscapeTarget() : this.climbTargetPos;
+        if (routeTarget == null) {
+            this.resetExplorationClimbStepOffWatch();
+            return false;
+        }
+
+        if (this.explorationClimbStepOffWatchPos == null
+                || !this.explorationClimbStepOffWatchPos.equals(feet)
+                || this.explorationClimbStepOffWatchTarget == null
+                || !this.explorationClimbStepOffWatchTarget.equals(routeTarget)
+                || this.explorationClimbStepOffWatchBase == null
+                || !this.explorationClimbStepOffWatchBase.equals(this.pillarBasePos)) {
+            this.explorationClimbStepOffWatchPos = feet.immutable();
+            this.explorationClimbStepOffWatchTarget = routeTarget.immutable();
+            this.explorationClimbStepOffWatchBase = this.pillarBasePos.immutable();
+            this.explorationClimbStepOffWatchStartTick = this.playerNpc.tickCount;
+            return false;
+        }
+
+        if (this.playerNpc.tickCount - this.explorationClimbStepOffWatchStartTick < EXPLORATION_CLIMB_STEP_OFF_STUCK_TICKS) {
+            return false;
+        }
+
+        BlockPos stepOffTarget = this.findExplorationClimbStepOffTarget(serverLevel, feet, routeTarget);
+        if (stepOffTarget == null) {
+            this.explorationClimbStepOffWatchStartTick = this.playerNpc.tickCount;
+            return false;
+        }
+
+        this.explorationClimbStepOffStartPos = feet.immutable();
+        this.explorationClimbStepOffTargetPos = stepOffTarget.immutable();
+        this.explorationClimbStepOffTicks = EXPLORATION_CLIMB_STEP_OFF_TICKS;
+        this.playerNpc.clearUpwardEscapeTarget();
+        this.playerNpc.getNavigation().stop();
+        this.forceExplorationClimbStepOff();
+        return true;
+    }
+
+    private boolean isBuildingExplorationClimbRequest() {
+        return this.climbTargetPos != null
+                && this.playerNpc.isExplorationUpwardEscapeRequested()
+                && this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING);
+    }
+
+    private BlockPos findExplorationClimbStepOffTarget(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
+        List<BlockPos> candidates = new ArrayList<>();
+        List<BlockPos> relaxedCandidates = new ArrayList<>();
+        int radiusSqr = EXPLORATION_CLIMB_STEP_OFF_RADIUS * EXPLORATION_CLIMB_STEP_OFF_RADIUS;
+        for (int dx = -EXPLORATION_CLIMB_STEP_OFF_RADIUS; dx <= EXPLORATION_CLIMB_STEP_OFF_RADIUS; dx++) {
+            for (int dz = -EXPLORATION_CLIMB_STEP_OFF_RADIUS; dz <= EXPLORATION_CLIMB_STEP_OFF_RADIUS; dz++) {
+                if (dx == 0 && dz == 0 || dx * dx + dz * dz > radiusSqr) {
+                    continue;
+                }
+
+                int x = feet.getX() + dx;
+                int z = feet.getZ() + dz;
+                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                int fall = feet.getY() - y;
+                if (fall < 0 || fall > EXPLORATION_CLIMB_STEP_OFF_MAX_FALL) {
+                    continue;
+                }
+
+                BlockPos candidate = new BlockPos(x, y, z);
+                if (!this.canStandAt(serverLevel, candidate) || !this.canStepOffToward(serverLevel, feet, candidate)) {
+                    continue;
+                }
+
+                if (PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)) {
+                    relaxedCandidates.add(candidate.immutable());
+                } else {
+                    candidates.add(candidate.immutable());
+                }
+            }
+        }
+
+        BlockPos selected = this.selectExplorationClimbStepOffTarget(candidates, feet, routeTarget);
+        if (selected != null) {
+            return selected;
+        }
+        selected = this.selectExplorationClimbStepOffTarget(relaxedCandidates, feet, routeTarget);
+        return selected == null ? this.findOpenExplorationClimbPushTarget(serverLevel, feet, routeTarget) : selected;
+    }
+
+    @Nullable
+    private BlockPos selectExplorationClimbStepOffTarget(List<BlockPos> candidates, BlockPos feet, BlockPos routeTarget) {
+        candidates.sort(Comparator
+                .comparingInt((BlockPos pos) -> serverLevelCanSeeSkySafe(pos) ? 0 : 1)
+                .thenComparingDouble((BlockPos pos) -> horizontalDistanceSqr(feet, pos))
+                .thenComparingInt(pos -> Math.abs(feet.getY() - pos.getY()))
+                .thenComparingDouble(pos -> routeTarget == null ? 0.0D : routeTarget.distSqr(pos)));
+        return candidates.isEmpty() ? null : candidates.get(0).immutable();
+    }
+
+    private boolean serverLevelCanSeeSkySafe(BlockPos pos) {
+        return this.playerNpc.level() instanceof ServerLevel serverLevel && serverLevel.canSeeSky(pos.above());
+    }
+
+    @Nullable
+    private BlockPos findOpenExplorationClimbPushTarget(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
+        List<Direction> directions = this.directionsAwayFrom(feet, this.pillarBasePos == null ? routeTarget : this.pillarBasePos);
+        for (Direction direction : directions) {
+            BlockPos adjacent = feet.relative(direction);
+            if (serverLevel.isInWorldBounds(adjacent)
+                    && serverLevel.getWorldBorder().isWithinBounds(adjacent)
+                    && this.hasOpenBodySpace(serverLevel, adjacent)) {
+                return feet.relative(direction, EXPLORATION_CLIMB_STEP_OFF_RADIUS).immutable();
+            }
+        }
+        return null;
+    }
+
+    private List<Direction> directionsAwayFrom(BlockPos from, BlockPos awayFrom) {
+        List<Direction> directions = new ArrayList<>();
+        if (awayFrom != null) {
+            for (Direction direction : this.directionsToward(from, awayFrom)) {
+                Direction opposite = direction.getOpposite();
+                if (!directions.contains(opposite)) {
+                    directions.add(opposite);
+                }
+            }
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            if (!directions.contains(direction)) {
+                directions.add(direction);
+            }
+        }
+        return directions;
+    }
+
+    private boolean canStepOffToward(ServerLevel serverLevel, BlockPos feet, BlockPos target) {
+        Direction direction = this.firstStepDirection(feet, target);
+        if (direction == null) {
+            return false;
+        }
+        BlockPos adjacent = feet.relative(direction);
+        return serverLevel.isInWorldBounds(adjacent)
+                && serverLevel.getWorldBorder().isWithinBounds(adjacent)
+                && this.hasOpenBodySpace(serverLevel, adjacent);
+    }
+
+    @Nullable
+    private Direction firstStepDirection(BlockPos from, BlockPos to) {
+        int dx = to.getX() - from.getX();
+        int dz = to.getZ() - from.getZ();
+        if (dx == 0 && dz == 0) {
+            return null;
+        }
+        if (Math.abs(dx) >= Math.abs(dz) && dx != 0) {
+            return dx > 0 ? Direction.EAST : Direction.WEST;
+        }
+        return dz > 0 ? Direction.SOUTH : Direction.NORTH;
+    }
+
+    private void tickExplorationClimbStepOff(ServerLevel serverLevel) {
+        if (this.explorationClimbStepOffStartPos == null || this.explorationClimbStepOffTargetPos == null) {
+            this.finished = true;
+            this.clearExplorationClimbStepOff();
+            return;
+        }
+
+        this.explorationClimbStepOffTicks--;
+        this.forceExplorationClimbStepOff();
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        boolean movedAwayAndLanded = !feet.equals(this.explorationClimbStepOffStartPos) && this.playerNpc.onGround();
+        if (movedAwayAndLanded || this.explorationClimbStepOffTicks <= 0) {
+            this.playerNpc.clearUpwardEscapeTarget();
+            this.finished = true;
+            this.clearExplorationClimbStepOff();
+        }
+    }
+
+    private void forceExplorationClimbStepOff() {
+        if (this.explorationClimbStepOffStartPos == null || this.explorationClimbStepOffTargetPos == null) {
+            return;
+        }
+
+        double targetX = this.explorationClimbStepOffTargetPos.getX() + 0.5D;
+        double targetZ = this.explorationClimbStepOffTargetPos.getZ() + 0.5D;
+        double dx = targetX - this.playerNpc.getX();
+        double dz = targetZ - this.playerNpc.getZ();
+        double length = Math.sqrt(dx * dx + dz * dz);
+        if (length < 1.0E-4D) {
+            return;
+        }
+
+        this.playerNpc.getNavigation().stop();
+        this.playerNpc.getLookControl().setLookAt(
+                targetX,
+                this.explorationClimbStepOffTargetPos.getY(),
+                targetZ,
+                30.0F,
+                30.0F
+        );
+        this.playerNpc.getMoveControl().setWantedPosition(
+                targetX,
+                this.explorationClimbStepOffTargetPos.getY(),
+                targetZ,
+                1.15D
+        );
+        Vec3 motion = this.playerNpc.getDeltaMovement();
+        this.playerNpc.setDeltaMovement(
+                dx / length * EXPLORATION_CLIMB_STEP_OFF_SPEED,
+                motion.y,
+                dz / length * EXPLORATION_CLIMB_STEP_OFF_SPEED
+        );
+        this.playerNpc.hasImpulse = true;
+        this.playerNpc.setCurrentAiDetail("exploration climb forced step off @ "
+                + posText(this.explorationClimbStepOffStartPos)
+                + " -> "
+                + posText(this.explorationClimbStepOffTargetPos));
+    }
+
+    private void clearExplorationClimbStepOff() {
+        this.explorationClimbStepOffStartPos = null;
+        this.explorationClimbStepOffTargetPos = null;
+        this.explorationClimbStepOffTicks = 0;
+    }
+
+    private void resetExplorationClimbStepOffWatch() {
+        this.explorationClimbStepOffWatchPos = null;
+        this.explorationClimbStepOffWatchTarget = null;
+        this.explorationClimbStepOffWatchBase = null;
+        this.explorationClimbStepOffWatchStartTick = 0;
+    }
+
+    private static String posText(BlockPos pos) {
+        return pos.getX() + " " + pos.getY() + " " + pos.getZ();
     }
 
     private boolean canPlacePillarWithoutClipping(ServerLevel serverLevel, BlockPos pos, BlockState state) {
@@ -2147,45 +2433,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || state.is(Blocks.PODZOL);
     }
 
-    private ItemStack escapeDropFor(BlockState state) {
-        if (this.isDirtEscapeMaterial(state)) {
-            if (state.is(Blocks.COARSE_DIRT)) {
-                return new ItemStack(Items.COARSE_DIRT);
-            }
-            if (state.is(Blocks.ROOTED_DIRT)) {
-                return new ItemStack(Items.ROOTED_DIRT);
-            }
-            return new ItemStack(Items.DIRT);
-        }
-        if (state.is(Blocks.DEEPSLATE) || state.is(Blocks.COBBLED_DEEPSLATE)) {
-            return new ItemStack(Items.COBBLED_DEEPSLATE);
-        }
-        return new ItemStack(Items.COBBLESTONE);
-    }
-
-    private int getRequiredMineTicks(ServerLevel serverLevel, BlockState state) {
-        return this.getRequiredMineTicks(serverLevel, this.minePos, state);
-    }
-
     private int getRequiredMineTicks(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        float hardness = state.getDestroySpeed(serverLevel, pos);
-        if (hardness < 0.0F) {
-            return MAX_GOAL_TICKS;
-        }
-
-        ItemStack heldStack = this.playerNpc.getMainHandItem();
-        float toolSpeed = heldStack.isEmpty() ? 1.0F : heldStack.getDestroySpeed(state);
-        if (toolSpeed <= 0.0F) {
-            toolSpeed = 1.0F;
-        }
-
-        boolean correctTool = !state.requiresCorrectToolForDrops() || heldStack.isCorrectToolForDrops(state);
-        float progressPerTick = toolSpeed / hardness / (correctTool ? 30.0F : 100.0F);
-        if (progressPerTick <= 0.0F) {
-            return MAX_GOAL_TICKS;
-        }
-
-        return Math.max(1, (int) Math.ceil(1.0F / progressPerTick));
+        return BreakingBlockAi.requiredBreakTicks(serverLevel, pos, state, this.playerNpc);
     }
 
     private boolean hasPickaxe() {
@@ -2597,6 +2846,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.pillarClearPos = null;
         this.pillarStuckWatchPos = null;
         this.exitClearPos = null;
+        this.explorationClimbStepOffWatchPos = null;
+        this.explorationClimbStepOffWatchTarget = null;
+        this.explorationClimbStepOffWatchBase = null;
+        this.explorationClimbStepOffStartPos = null;
+        this.explorationClimbStepOffTargetPos = null;
         this.pillarExitY = 0;
         this.previousMainHand = ItemStack.EMPTY;
         this.previousPillarMainHand = ItemStack.EMPTY;
@@ -2613,6 +2867,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.pillarStuckWatchStartTick = 0;
         this.nextPillarStuckRecoveryTick = 0;
         this.pillarStuckWatchPillarsPlaced = 0;
+        this.explorationClimbStepOffWatchStartTick = 0;
+        this.explorationClimbStepOffTicks = 0;
         this.usingTemporaryPickaxe = false;
         this.usingTemporaryBlock = false;
         this.finished = false;

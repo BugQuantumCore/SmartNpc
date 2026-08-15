@@ -1,7 +1,9 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -17,6 +19,7 @@ import java.util.List;
 import java.util.function.Predicate;
 
 public class ExploreAroundGoal extends Goal {
+    private static final String LOG_EXPLORATION_DETAIL = "exploring for logs";
     private static final int[][] SEARCH_DISTANCE_BANDS = {
             {32, 48},
             {24, 32},
@@ -34,15 +37,31 @@ public class ExploreAroundGoal extends Goal {
     private static final int EXPLORE_CAN_USE_INTERVAL_TICKS = 20;
     private static final int CONTINUE_PREDICATE_INTERVAL_TICKS = 20;
     private static final int ESCAPE_REQUEST_COOLDOWN_TICKS = 20 * 5;
+    private static final int BUILDING_LOG_LOCAL_SURFACE_RADIUS = 18;
+    private static final int BUILDING_LOG_LOCAL_SURFACE_MIN_RADIUS = 4;
+    private static final int BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL = 10;
+    private static final int BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS = 24;
     private static final int RETURN_HOME_REQUEST_TICKS = 20 * 120;
     private static final int RETURN_HOME_RETRY_COOLDOWN_TICKS = 20 * 15;
     private static final int MAX_LOCAL_ESCAPE_PATH_CHECKS = 6;
     private static final int LOCAL_SURFACE_ESCAPE_RADIUS = 6;
     private static final int MIN_LOCAL_SURFACE_NEIGHBORS = 2;
+    private static final int MINING_LOG_COLUMN_DROP_RADIUS = 8;
+    private static final int MINING_LOG_COLUMN_DROP_MAX_FALL = 6;
+    private static final int MINING_LOG_COLUMN_DROP_TICKS = 20 * 2;
+    private static final int MINING_LOG_COLUMN_DROP_MAX_SOLID_SIDE_SUPPORTS = 1;
+    private static final float INITIAL_SPRINT_CHANCE = 0.35F;
+    private static final float WALK_TO_SPRINT_CHANCE = 0.55F;
+    private static final int MIN_WALK_PACE_TICKS = 20 * 3;
+    private static final int MAX_WALK_PACE_TICKS = 20 * 8;
+    private static final int MIN_SPRINT_PACE_TICKS = 20 * 2;
+    private static final int MAX_SPRINT_PACE_TICKS = 20 * 5;
+    private static final double MIN_SPRINT_DISTANCE_SQR = 10.0D * 10.0D;
     private static final double ARRIVAL_DISTANCE_SQR = 3.0D * 3.0D;
 
     private final PlayerNpcEntity playerNpc;
     private final PathNavigationAi pathNavigationAi;
+    private final PathStuckFallbackAi pathStuckFallbackAi;
     private final double speed;
     private final String detail;
     private final Predicate<ServerLevel> shouldExplore;
@@ -60,6 +79,11 @@ public class ExploreAroundGoal extends Goal {
     private int nextEscapeRequestTick;
     private boolean continuePredicatesAllowed = true;
     private boolean waitingForRetry;
+    private BlockPos forcedDropTargetPos;
+    private BlockPos forcedDropStartPos;
+    private int forcedDropTicks;
+    private int movementPaceTicks;
+    private boolean explorationSprinting;
 
     public ExploreAroundGoal(
             PlayerNpcEntity playerNpc,
@@ -93,6 +117,7 @@ public class ExploreAroundGoal extends Goal {
     ) {
         this.playerNpc = playerNpc;
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
+        this.pathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
         this.speed = speed;
         this.detail = detail;
         this.shouldExplore = shouldExplore;
@@ -128,10 +153,14 @@ public class ExploreAroundGoal extends Goal {
             return false;
         }
 
+        this.clearForcedDrop();
         this.waitingForRetry = false;
         this.retryWaitTicks = 0;
         this.targetPos = this.findReachableSurfaceTarget(serverLevel);
         if (this.targetPos == null) {
+            if (this.tryStartMiningLogColumnDrop(serverLevel)) {
+                return true;
+            }
             if (this.allowUpwardEscapeRequest && this.tryRequestShortUpwardEscape(serverLevel, null)) {
                 this.waitingForRetry = false;
                 this.retryWaitTicks = 0;
@@ -161,6 +190,14 @@ public class ExploreAroundGoal extends Goal {
             return false;
         }
 
+        if (this.forcedDropTargetPos != null) {
+            return this.pathStuckFallbackAi.isRunning()
+                    || (this.forcedDropTicks > 0
+                    && this.forcedDropStartPos != null
+                    && (this.playerNpc.blockPosition().equals(this.forcedDropStartPos)
+                    || !this.playerNpc.onGround()));
+        }
+
         if (this.playerNpc.tickCount >= this.nextContinuePredicateCheckTick) {
             this.nextContinuePredicateCheckTick = this.playerNpc.tickCount + CONTINUE_PREDICATE_INTERVAL_TICKS;
             this.continuePredicatesAllowed = this.shouldExplore.test(serverLevel)
@@ -179,6 +216,7 @@ public class ExploreAroundGoal extends Goal {
     public void start() {
         this.exploreTicks = 0;
         this.repathTicks = 0;
+        this.stopExplorationSprint();
         this.continuePredicatesAllowed = true;
         this.nextContinuePredicateCheckTick = 0;
         this.playerNpc.setCurrentAiState("ai.player_npc.exploring");
@@ -186,6 +224,12 @@ public class ExploreAroundGoal extends Goal {
             this.playerNpc.setCurrentAiDetail(this.retryDetail());
             return;
         }
+        if (this.forcedDropTargetPos != null && this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            this.forcedDropTicks = Math.max(this.forcedDropTicks, MINING_LOG_COLUMN_DROP_TICKS);
+            this.tickMiningLogColumnDrop(serverLevel);
+            return;
+        }
+        this.startRandomMovementPace();
         this.playerNpc.setCurrentAiDetail(this.detail);
         if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
             this.moveToTarget(serverLevel);
@@ -206,6 +250,12 @@ public class ExploreAroundGoal extends Goal {
             return;
         }
 
+        if (this.forcedDropTargetPos != null) {
+            this.tickMiningLogColumnDrop(serverLevel);
+            return;
+        }
+
+        this.tickRandomMovementPace();
         this.playerNpc.getLookControl().setLookAt(
                 this.targetPos.getX() + 0.5D,
                 this.targetPos.getY(),
@@ -228,6 +278,9 @@ public class ExploreAroundGoal extends Goal {
         this.nextContinuePredicateCheckTick = 0;
         this.continuePredicatesAllowed = true;
         this.waitingForRetry = false;
+        this.stopExplorationSprint();
+        this.clearForcedDrop();
+        this.pathStuckFallbackAi.stop();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
     }
@@ -254,7 +307,56 @@ public class ExploreAroundGoal extends Goal {
                 return candidate.immutable();
             }
         }
+        if (this.shouldUseBuildingLogLocalSurfaceFallback()) {
+            return this.findBuildingLogLocalSurfaceTarget(serverLevel, center);
+        }
         return null;
+    }
+
+    private boolean shouldUseBuildingLogLocalSurfaceFallback() {
+        return LOG_EXPLORATION_DETAIL.equals(this.detail)
+                && this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
+                && this.playerNpc.shouldPrioritizeLogGathering();
+    }
+
+    private BlockPos findBuildingLogLocalSurfaceTarget(ServerLevel serverLevel, BlockPos center) {
+        List<BlockPos> candidates = new ArrayList<>();
+        int radius = BUILDING_LOG_LOCAL_SURFACE_RADIUS;
+        int minRadiusSqr = BUILDING_LOG_LOCAL_SURFACE_MIN_RADIUS * BUILDING_LOG_LOCAL_SURFACE_MIN_RADIUS;
+        int maxRadiusSqr = radius * radius;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                int distanceSqr = dx * dx + dz * dz;
+                if (distanceSqr < minRadiusSqr || distanceSqr > maxRadiusSqr) {
+                    continue;
+                }
+
+                int x = center.getX() + dx;
+                int z = center.getZ() + dz;
+                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                BlockPos candidate = new BlockPos(x, y, z);
+                if (PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)
+                        || !this.isSafeExploreTarget(serverLevel, center, candidate)) {
+                    continue;
+                }
+                candidates.add(candidate.immutable());
+            }
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> pos.distSqr(center))
+                .thenComparingInt(BlockPos::getY));
+        return this.pathNavigationAi.findReachableRandomizedCandidate(
+                serverLevel,
+                candidates,
+                BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL,
+                BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS,
+                MAX_EXPLORE_SAFE_DROP_BLOCKS
+        ).orElse(null);
     }
 
     private boolean isSafeExploreTarget(ServerLevel serverLevel, BlockPos center, BlockPos pos) {
@@ -286,6 +388,74 @@ public class ExploreAroundGoal extends Goal {
         this.scheduleRetry(serverLevel);
     }
 
+    private void startRandomMovementPace() {
+        boolean sprint = this.canSprintTowardTarget()
+                && this.playerNpc.getRandom().nextFloat() < INITIAL_SPRINT_CHANCE;
+        this.setExplorationSprinting(sprint);
+        this.movementPaceTicks = sprint ? this.nextSprintPaceTicks() : this.nextWalkPaceTicks();
+    }
+
+    private void tickRandomMovementPace() {
+        if (!this.canSprintTowardTarget()) {
+            if (this.explorationSprinting) {
+                this.setExplorationSprinting(false);
+                this.movementPaceTicks = this.nextWalkPaceTicks();
+            } else if (this.movementPaceTicks > 0) {
+                this.movementPaceTicks--;
+            }
+            return;
+        }
+
+        this.setExplorationSprinting(this.explorationSprinting);
+        if (this.movementPaceTicks-- > 0) {
+            return;
+        }
+
+        if (this.explorationSprinting) {
+            this.setExplorationSprinting(false);
+            this.movementPaceTicks = this.nextWalkPaceTicks();
+            return;
+        }
+
+        boolean sprint = this.playerNpc.getRandom().nextFloat() < WALK_TO_SPRINT_CHANCE;
+        this.setExplorationSprinting(sprint);
+        this.movementPaceTicks = sprint ? this.nextSprintPaceTicks() : this.nextWalkPaceTicks();
+    }
+
+    private boolean canSprintTowardTarget() {
+        return this.targetPos != null
+                && this.forcedDropTargetPos == null
+                && !this.playerNpc.isShiftKeyDown()
+                && !this.playerNpc.isCrouching()
+                && !this.playerNpc.isInWaterOrBubble()
+                && !this.playerNpc.isInLava()
+                && this.distanceToTargetSqr() >= MIN_SPRINT_DISTANCE_SQR;
+    }
+
+    private void setExplorationSprinting(boolean sprinting) {
+        this.explorationSprinting = sprinting;
+        if (this.playerNpc.isSprinting() != sprinting) {
+            this.playerNpc.setSprinting(sprinting);
+        }
+    }
+
+    private void stopExplorationSprint() {
+        this.setExplorationSprinting(false);
+        this.movementPaceTicks = 0;
+    }
+
+    private int nextWalkPaceTicks() {
+        return this.randomTicksBetween(MIN_WALK_PACE_TICKS, MAX_WALK_PACE_TICKS);
+    }
+
+    private int nextSprintPaceTicks() {
+        return this.randomTicksBetween(MIN_SPRINT_PACE_TICKS, MAX_SPRINT_PACE_TICKS);
+    }
+
+    private int randomTicksBetween(int minInclusive, int maxInclusive) {
+        return minInclusive + this.playerNpc.getRandom().nextInt(maxInclusive - minInclusive + 1);
+    }
+
     private void scheduleRetry(ServerLevel serverLevel) {
         boolean completedFullSearch = this.searchRadiusIndex >= SEARCH_DISTANCE_BANDS.length - 1;
         if (completedFullSearch && this.allowUpwardEscapeRequest) {
@@ -305,6 +475,156 @@ public class ExploreAroundGoal extends Goal {
         this.nextSearchTick = this.playerNpc.tickCount + this.retryWaitTicks;
         this.waitingForRetry = true;
         this.playerNpc.getNavigation().stop();
+    }
+
+    private boolean tryStartMiningLogColumnDrop(ServerLevel serverLevel) {
+        if (!this.isMiningOnlyLogExploration()) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (!this.isOnNarrowColumnTop(serverLevel, feet)) {
+            return false;
+        }
+
+        BlockPos dropTarget = this.findMiningLogColumnDropTarget(serverLevel, feet);
+        if (dropTarget == null) {
+            return false;
+        }
+
+        this.targetPos = dropTarget;
+        this.forcedDropTargetPos = dropTarget;
+        this.forcedDropStartPos = feet.immutable();
+        this.forcedDropTicks = MINING_LOG_COLUMN_DROP_TICKS;
+        this.waitingForRetry = false;
+        this.retryWaitTicks = 0;
+        this.nextSearchTick = this.playerNpc.tickCount + RADIUS_RETRY_COOLDOWN_TICKS;
+        if (!this.startMiningLogColumnPathFallback(serverLevel)) {
+            this.targetPos = null;
+            this.clearForcedDrop();
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isMiningOnlyLogExploration() {
+        return LOG_EXPLORATION_DETAIL.equals(this.detail)
+                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
+                && !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && this.playerNpc.shouldPrioritizeLogGathering();
+    }
+
+    private boolean isOnNarrowColumnTop(ServerLevel serverLevel, BlockPos feet) {
+        if (!this.playerNpc.onGround()) {
+            return false;
+        }
+
+        BlockPos floor = feet.below();
+        if (!serverLevel.isInWorldBounds(floor)
+                || serverLevel.getBlockState(floor).getCollisionShape(serverLevel, floor).isEmpty()) {
+            return false;
+        }
+
+        int solidSides = 0;
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos side = floor.relative(direction);
+            if (serverLevel.getBlockState(side).isSolidRender(serverLevel, side)) {
+                solidSides++;
+            }
+        }
+        return solidSides <= MINING_LOG_COLUMN_DROP_MAX_SOLID_SIDE_SUPPORTS;
+    }
+
+    private BlockPos findMiningLogColumnDropTarget(ServerLevel serverLevel, BlockPos feet) {
+        List<BlockPos> candidates = new ArrayList<>();
+        List<BlockPos> relaxedCandidates = new ArrayList<>();
+        int radiusSqr = MINING_LOG_COLUMN_DROP_RADIUS * MINING_LOG_COLUMN_DROP_RADIUS;
+        for (int dx = -MINING_LOG_COLUMN_DROP_RADIUS; dx <= MINING_LOG_COLUMN_DROP_RADIUS; dx++) {
+            for (int dz = -MINING_LOG_COLUMN_DROP_RADIUS; dz <= MINING_LOG_COLUMN_DROP_RADIUS; dz++) {
+                if (dx == 0 && dz == 0 || dx * dx + dz * dz > radiusSqr) {
+                    continue;
+                }
+
+                int x = feet.getX() + dx;
+                int z = feet.getZ() + dz;
+                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                int fall = feet.getY() - y;
+                if (fall <= 0 || fall > MINING_LOG_COLUMN_DROP_MAX_FALL) {
+                    continue;
+                }
+
+                BlockPos candidate = new BlockPos(x, y, z);
+                if (!this.canStandAt(serverLevel, candidate)
+                        || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)) {
+                    continue;
+                }
+
+                if (serverLevel.canSeeSky(candidate.above()) && this.hasLocalSurfaceRoom(serverLevel, candidate)) {
+                    candidates.add(candidate.immutable());
+                } else {
+                    relaxedCandidates.add(candidate.immutable());
+                }
+            }
+        }
+
+        BlockPos selected = this.selectMiningLogColumnDropTarget(candidates, feet);
+        if (selected != null) {
+            return selected;
+        }
+        return this.selectMiningLogColumnDropTarget(relaxedCandidates, feet);
+    }
+
+    private BlockPos selectMiningLogColumnDropTarget(List<BlockPos> candidates, BlockPos feet) {
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> horizontalDistanceSqr(feet, pos))
+                .thenComparingInt(pos -> Math.abs(feet.getY() - pos.getY())));
+        return candidates.isEmpty() ? null : candidates.get(0).immutable();
+    }
+
+    private void tickMiningLogColumnDrop(ServerLevel serverLevel) {
+        if (this.forcedDropStartPos == null || this.forcedDropTargetPos == null) {
+            this.targetPos = null;
+            this.clearForcedDrop();
+            return;
+        }
+
+        this.forcedDropTicks--;
+        if (this.pathStuckFallbackAi.tick(serverLevel, this.detail)) {
+            this.playerNpc.setCurrentAiDetail(this.pathStuckFallbackAi.detail(this.detail));
+            return;
+        }
+
+        if (!this.playerNpc.blockPosition().equals(this.forcedDropStartPos) && this.playerNpc.onGround()) {
+            this.targetPos = null;
+            this.clearForcedDrop();
+            return;
+        }
+
+        if (this.forcedDropTicks <= 0 || !this.startMiningLogColumnPathFallback(serverLevel)) {
+            this.targetPos = null;
+            this.clearForcedDrop();
+        }
+    }
+
+    private boolean startMiningLogColumnPathFallback(ServerLevel serverLevel) {
+        if (this.forcedDropTargetPos == null) {
+            return false;
+        }
+        boolean started = this.pathStuckFallbackAi.start(
+                serverLevel,
+                this.forcedDropTargetPos,
+                this.detail,
+                pos -> PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+        );
+        this.playerNpc.setCurrentAiDetail(this.pathStuckFallbackAi.detail(this.detail));
+        return started;
+    }
+
+    private void clearForcedDrop() {
+        this.forcedDropTargetPos = null;
+        this.forcedDropStartPos = null;
+        this.forcedDropTicks = 0;
+        this.pathStuckFallbackAi.stop();
     }
 
     private boolean requestReturnHomeAfterFailedExploration() {

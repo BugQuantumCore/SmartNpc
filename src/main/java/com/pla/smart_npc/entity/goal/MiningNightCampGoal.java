@@ -6,15 +6,21 @@ import com.pla.smart_npc.entity.ai.FurnaceAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.SneakingAi;
-import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
@@ -37,6 +43,7 @@ public class MiningNightCampGoal extends Goal {
     private static final int ACTION_DELAY_TICKS = 12;
     private static final int FURNACE_ACTION_COOLDOWN_TICKS = 20;
     private static final int FURNACE_FAIL_COOLDOWN_TICKS = 20 * 3;
+    private static final int MAX_FURNACE_RECOVERY_TICKS = 20 * 10;
     private static final double FURNACE_USE_DISTANCE_SQR = 2.25D * 2.25D;
     private static final double FURNACE_STAND_REACHED_SQR = 1.25D * 1.25D;
     private static final int TORCH_CHECK_INTERVAL_TICKS = 20 * 5;
@@ -49,6 +56,11 @@ public class MiningNightCampGoal extends Goal {
     private static final int MIN_LOOK_TICKS = 20;
     private static final int RANDOM_LOOK_TICKS = 20 * 3;
     private static final int WALK_REPATH_TICKS = 20;
+    private static final String CAMP_FURNACE_X = "PlayerNpcNightCampFurnaceX";
+    private static final String CAMP_FURNACE_Y = "PlayerNpcNightCampFurnaceY";
+    private static final String CAMP_FURNACE_Z = "PlayerNpcNightCampFurnaceZ";
+    private static final String CAMP_FURNACE_DIMENSION = "PlayerNpcNightCampFurnaceDimension";
+    private static final String CAMP_FURNACE_OWNER = "PlayerNpcNightCampFurnaceOwner";
 
     private final PlayerNpcEntity playerNpc;
     private final FurnaceAi furnaceAi;
@@ -69,6 +81,7 @@ public class MiningNightCampGoal extends Goal {
     private int stationaryTicks;
     private int lookTicks;
     private int repathTicks;
+    private int furnaceRecoveryTicks;
     private boolean finished;
     private boolean placedTorch;
     private boolean walkSneaking;
@@ -111,13 +124,28 @@ public class MiningNightCampGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.getUpwardEscapeTarget() != null
-                || !shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
+                || this.playerNpc.getUpwardEscapeTarget() != null) {
             return false;
         }
 
         this.resetPlan();
         this.campCenter = this.playerNpc.blockPosition().immutable();
+        this.adoptNearbyLegacyTemporaryFurnace(serverLevel);
+        CampFurnaceRef ownedFurnace = this.resolveOwnedCampFurnace();
+        if (ownedFurnace != null) {
+            if (!ownedFurnace.level().hasChunkAt(ownedFurnace.pos())) {
+                return false;
+            }
+            if (!this.isOwnedCampFurnace(ownedFurnace)) {
+                this.clearCampFurnaceOwnership(ownedFurnace.pos());
+            } else if (!shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
+                    || !this.canReuseOwnedFurnace(serverLevel, ownedFurnace)) {
+                return this.planFurnaceRecovery(ownedFurnace);
+            }
+        }
+        if (!shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
+            return false;
+        }
         return true;
     }
 
@@ -131,7 +159,9 @@ public class MiningNightCampGoal extends Goal {
                 && this.playerNpc.getTarget() == null
                 && this.playerNpc.getUpwardEscapeTarget() == null
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
-                && shouldPauseMiningForNightCamp(this.playerNpc, serverLevel);
+                && (this.furnaceMode == FurnaceMode.RECOVER
+                || shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
+                || this.hasOwnedCampFurnaceReference());
     }
 
     @Override
@@ -159,13 +189,31 @@ public class MiningNightCampGoal extends Goal {
 
     @Override
     public void tick() {
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
-                || !shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             this.finished = true;
             return;
         }
 
         this.playerNpc.setCurrentAiState(AI_STATE);
+        if (this.furnaceMode == FurnaceMode.RECOVER) {
+            this.tickRecoverFurnace(serverLevel);
+            return;
+        }
+        if (!shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
+            CampFurnaceRef ownedFurnace = this.resolveOwnedCampFurnace();
+            if (ownedFurnace == null || !ownedFurnace.level().hasChunkAt(ownedFurnace.pos())) {
+                this.finished = true;
+                return;
+            }
+            if (!this.isOwnedCampFurnace(ownedFurnace)) {
+                this.clearCampFurnaceOwnership(ownedFurnace.pos());
+                this.finished = true;
+                return;
+            }
+            this.planFurnaceRecovery(ownedFurnace);
+            this.tickRecoverFurnace(serverLevel);
+            return;
+        }
         if (this.tickFurnaceWork(serverLevel)) {
             return;
         }
@@ -207,6 +255,17 @@ public class MiningNightCampGoal extends Goal {
         if (workFurnace != null && this.planFurnaceInteraction(serverLevel, workFurnace)) {
             this.tickUseFurnace(serverLevel);
             return true;
+        }
+
+        CampFurnaceRef ownedFurnace = this.resolveOwnedCampFurnace();
+        if (ownedFurnace != null
+                && ownedFurnace.level().hasChunkAt(ownedFurnace.pos())
+                && this.isOwnedCampFurnace(ownedFurnace)) {
+            return false;
+        }
+        BlockPos trackedTemporary = this.getTemporaryFurnacePos();
+        if (trackedTemporary != null) {
+            return false;
         }
 
         if (this.furnaceAi.shouldPlaceFurnaceForWork(serverLevel)) {
@@ -293,8 +352,17 @@ public class MiningNightCampGoal extends Goal {
             return;
         }
 
+        if (!this.saveTemporaryFurnace(serverLevel, this.furnacePos)) {
+            boolean removed = serverLevel.removeBlock(this.furnacePos, false);
+            this.finishPlacementMainHand();
+            if (removed) {
+                this.returnStack(furnace);
+            }
+            this.clearActiveFurnaceAction(FURNACE_FAIL_COOLDOWN_TICKS);
+            return;
+        }
+
         this.finishPlacementMainHand();
-        this.saveTemporaryFurnace(this.furnacePos);
         this.furnaceMode = FurnaceMode.INTERACT;
         this.furnaceCooldownTicks = 0;
         this.furnaceStandPos = this.findFurnaceStand(serverLevel, this.furnacePos);
@@ -393,6 +461,15 @@ public class MiningNightCampGoal extends Goal {
     }
 
     private BlockPos findWorkFurnace(ServerLevel serverLevel) {
+        CampFurnaceRef ownedFurnace = this.resolveOwnedCampFurnace();
+        if (ownedFurnace != null
+                && ownedFurnace.level() == serverLevel
+                && ownedFurnace.level().hasChunkAt(ownedFurnace.pos())
+                && this.isOwnedCampFurnace(ownedFurnace)
+                && this.furnaceAi.hasFurnaceWork(serverLevel, ownedFurnace.pos())) {
+            return ownedFurnace.pos();
+        }
+
         BlockPos temporary = this.getTemporaryFurnacePos();
         if (temporary != null) {
             if (serverLevel.getBlockState(temporary).is(Blocks.FURNACE)) {
@@ -439,6 +516,63 @@ public class MiningNightCampGoal extends Goal {
         this.furnaceStandPos = stand;
         this.actionDelayTicks = 0;
         return true;
+    }
+
+    private boolean planFurnaceRecovery(CampFurnaceRef ownedFurnace) {
+        if (ownedFurnace == null || !ownedFurnace.level().hasChunkAt(ownedFurnace.pos())) {
+            return false;
+        }
+        this.furnaceMode = FurnaceMode.RECOVER;
+        this.furnacePos = ownedFurnace.pos();
+        this.furnaceStandPos = ownedFurnace.level() == this.playerNpc.level()
+                ? this.findFurnaceStand(ownedFurnace.level(), ownedFurnace.pos())
+                : null;
+        this.actionDelayTicks = 0;
+        this.furnaceRecoveryTicks = 0;
+        return true;
+    }
+
+    private void tickRecoverFurnace(ServerLevel currentLevel) {
+        CampFurnaceRef ownedFurnace = this.resolveOwnedCampFurnace();
+        if (ownedFurnace == null) {
+            this.finished = true;
+            return;
+        }
+        if (!ownedFurnace.level().hasChunkAt(ownedFurnace.pos())) {
+            this.finished = true;
+            return;
+        }
+        if (!this.isOwnedCampFurnace(ownedFurnace)) {
+            this.clearCampFurnaceOwnership(ownedFurnace.pos());
+            this.finished = true;
+            return;
+        }
+
+        this.furnacePos = ownedFurnace.pos();
+        this.furnaceRecoveryTicks++;
+        if (ownedFurnace.level() != currentLevel) {
+            this.finished = this.reclaimOwnedCampFurnace(ownedFurnace);
+            return;
+        }
+
+        this.lookAtFurnace();
+        if (!this.ensureFurnaceStand(currentLevel) || !this.isAtFurnaceStand()) {
+            this.playerNpc.setCurrentAiDetail(this.detail("recovering temporary camp furnace", this.furnacePos));
+            if (this.furnaceStandPos != null) {
+                this.moveToFurnaceStand();
+            }
+            if (this.furnaceRecoveryTicks >= MAX_FURNACE_RECOVERY_TICKS) {
+                this.finished = this.reclaimOwnedCampFurnace(ownedFurnace);
+            }
+            return;
+        }
+
+        this.playerNpc.getNavigation().stop();
+        if (this.actionDelayTicks++ < ACTION_DELAY_TICKS) {
+            this.playerNpc.setCurrentAiDetail(this.detail("packing temporary camp furnace", this.furnacePos));
+            return;
+        }
+        this.finished = this.reclaimOwnedCampFurnace(ownedFurnace);
     }
 
     private BlockPos findFurnacePlacement(ServerLevel serverLevel) {
@@ -585,6 +719,8 @@ public class MiningNightCampGoal extends Goal {
 
     private BlockPos findCampWalkTarget(ServerLevel serverLevel) {
         BlockPos center = this.campCenter != null ? this.campCenter : this.playerNpc.blockPosition();
+        boolean keepUnderground = GatherStoneGoal.isMiningJobActive(this.playerNpc)
+                && !serverLevel.canSeeSky(center.above());
         List<BlockPos> candidates = new ArrayList<>();
         for (int dy = -CAMP_WALK_VERTICAL_RADIUS; dy <= CAMP_WALK_VERTICAL_RADIUS; dy++) {
             for (int dx = -CAMP_WALK_RADIUS; dx <= CAMP_WALK_RADIUS; dx++) {
@@ -604,7 +740,8 @@ public class MiningNightCampGoal extends Goal {
         int checks = 0;
         while (!candidates.isEmpty() && checks++ < 32) {
             BlockPos candidate = candidates.remove(this.playerNpc.getRandom().nextInt(candidates.size())).immutable();
-            if (!PathNavigationAi.canStandAt(serverLevel, candidate)) {
+            if (!PathNavigationAi.canStandAt(serverLevel, candidate)
+                    || (keepUnderground && serverLevel.canSeeSky(candidate.above()))) {
                 continue;
             }
             Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
@@ -725,16 +862,164 @@ public class MiningNightCampGoal extends Goal {
         );
     }
 
-    private void saveTemporaryFurnace(BlockPos pos) {
-        this.playerNpc.getPersistentData().putInt(FurnaceAi.TEMP_FURNACE_X, pos.getX());
-        this.playerNpc.getPersistentData().putInt(FurnaceAi.TEMP_FURNACE_Y, pos.getY());
-        this.playerNpc.getPersistentData().putInt(FurnaceAi.TEMP_FURNACE_Z, pos.getZ());
+    private boolean saveTemporaryFurnace(ServerLevel serverLevel, BlockPos pos) {
+        if (!(serverLevel.getBlockEntity(pos) instanceof FurnaceBlockEntity furnace)) {
+            return false;
+        }
+
+        furnace.getPersistentData().putUUID(CAMP_FURNACE_OWNER, this.playerNpc.getUUID());
+        furnace.setChanged();
+
+        CompoundTag data = this.playerNpc.getPersistentData();
+        data.putInt(FurnaceAi.TEMP_FURNACE_X, pos.getX());
+        data.putInt(FurnaceAi.TEMP_FURNACE_Y, pos.getY());
+        data.putInt(FurnaceAi.TEMP_FURNACE_Z, pos.getZ());
+        data.putInt(CAMP_FURNACE_X, pos.getX());
+        data.putInt(CAMP_FURNACE_Y, pos.getY());
+        data.putInt(CAMP_FURNACE_Z, pos.getZ());
+        data.putString(CAMP_FURNACE_DIMENSION, serverLevel.dimension().location().toString());
+        return true;
     }
 
     private void clearTemporaryFurnace() {
         this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_X);
         this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Y);
         this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Z);
+    }
+
+    private boolean hasOwnedCampFurnaceReference() {
+        CompoundTag data = this.playerNpc.getPersistentData();
+        return data.contains(CAMP_FURNACE_X)
+                && data.contains(CAMP_FURNACE_Y)
+                && data.contains(CAMP_FURNACE_Z)
+                && data.contains(CAMP_FURNACE_DIMENSION);
+    }
+
+    private CampFurnaceRef resolveOwnedCampFurnace() {
+        if (!this.hasOwnedCampFurnaceReference()) {
+            return null;
+        }
+
+        CompoundTag data = this.playerNpc.getPersistentData();
+        BlockPos pos = new BlockPos(
+                data.getInt(CAMP_FURNACE_X),
+                data.getInt(CAMP_FURNACE_Y),
+                data.getInt(CAMP_FURNACE_Z)
+        );
+        ResourceLocation dimensionId = ResourceLocation.tryParse(data.getString(CAMP_FURNACE_DIMENSION));
+        if (dimensionId == null || this.playerNpc.getServer() == null) {
+            this.clearCampFurnaceOwnership(pos);
+            return null;
+        }
+
+        ResourceKey<Level> levelKey = ResourceKey.create(Registries.DIMENSION, dimensionId);
+        ServerLevel serverLevel = this.playerNpc.getServer().getLevel(levelKey);
+        if (serverLevel == null || !serverLevel.isInWorldBounds(pos)) {
+            this.clearCampFurnaceOwnership(pos);
+            return null;
+        }
+        return new CampFurnaceRef(serverLevel, pos.immutable());
+    }
+
+    private boolean isOwnedCampFurnace(CampFurnaceRef ownedFurnace) {
+        if (ownedFurnace == null
+                || !ownedFurnace.level().getBlockState(ownedFurnace.pos()).is(Blocks.FURNACE)
+                || !(ownedFurnace.level().getBlockEntity(ownedFurnace.pos()) instanceof FurnaceBlockEntity furnace)) {
+            return false;
+        }
+        CompoundTag furnaceData = furnace.getPersistentData();
+        return furnaceData.hasUUID(CAMP_FURNACE_OWNER)
+                && this.playerNpc.getUUID().equals(furnaceData.getUUID(CAMP_FURNACE_OWNER));
+    }
+
+    private boolean canReuseOwnedFurnace(ServerLevel currentLevel, CampFurnaceRef ownedFurnace) {
+        if (ownedFurnace.level() != currentLevel) {
+            return false;
+        }
+        return this.isWithinLocalFurnaceScan(ownedFurnace.pos());
+    }
+
+    private void adoptNearbyLegacyTemporaryFurnace(ServerLevel currentLevel) {
+        if (this.hasOwnedCampFurnaceReference()) {
+            return;
+        }
+        BlockPos legacyPos = this.getTemporaryFurnacePos();
+        if (legacyPos == null
+                || !currentLevel.hasChunkAt(legacyPos)
+                || !this.isWithinLocalFurnaceScan(legacyPos)
+                || !currentLevel.getBlockState(legacyPos).is(Blocks.FURNACE)
+                || !(currentLevel.getBlockEntity(legacyPos) instanceof FurnaceBlockEntity furnace)) {
+            return;
+        }
+
+        CompoundTag furnaceData = furnace.getPersistentData();
+        if (furnaceData.hasUUID(CAMP_FURNACE_OWNER)
+                && !this.playerNpc.getUUID().equals(furnaceData.getUUID(CAMP_FURNACE_OWNER))) {
+            return;
+        }
+        this.saveTemporaryFurnace(currentLevel, legacyPos);
+    }
+
+    private boolean isWithinLocalFurnaceScan(BlockPos furnace) {
+        BlockPos currentPos = this.playerNpc.blockPosition();
+        int dx = furnace.getX() - currentPos.getX();
+        int dz = furnace.getZ() - currentPos.getZ();
+        return Math.abs(furnace.getY() - currentPos.getY()) <= 2
+                && dx * dx + dz * dz <= FURNACE_SCAN_RADIUS * FURNACE_SCAN_RADIUS;
+    }
+
+    private boolean reclaimOwnedCampFurnace(CampFurnaceRef ownedFurnace) {
+        if (ownedFurnace == null || !ownedFurnace.level().hasChunkAt(ownedFurnace.pos())) {
+            return false;
+        }
+        if (!this.isOwnedCampFurnace(ownedFurnace)) {
+            this.clearCampFurnaceOwnership(ownedFurnace.pos());
+            return true;
+        }
+        if (!(ownedFurnace.level().getBlockEntity(ownedFurnace.pos()) instanceof FurnaceBlockEntity furnace)) {
+            return false;
+        }
+
+        List<ItemStack> contents = new ArrayList<>(furnace.getContainerSize());
+        for (int slot = 0; slot < furnace.getContainerSize(); slot++) {
+            contents.add(furnace.getItem(slot).copy());
+            furnace.setItem(slot, ItemStack.EMPTY);
+        }
+        furnace.setChanged();
+        if (!ownedFurnace.level().removeBlock(ownedFurnace.pos(), false)) {
+            for (int slot = 0; slot < contents.size(); slot++) {
+                furnace.setItem(slot, contents.get(slot));
+            }
+            furnace.setChanged();
+            return false;
+        }
+
+        this.clearCampFurnaceOwnership(ownedFurnace.pos());
+        for (ItemStack stack : contents) {
+            this.returnStack(stack);
+        }
+        this.returnStack(new ItemStack(Items.FURNACE));
+        this.playerNpc.triggerMainHandUseAnimation();
+        ownedFurnace.level().playSound(
+                null,
+                ownedFurnace.pos(),
+                SoundEvents.ITEM_PICKUP,
+                SoundSource.BLOCKS,
+                0.5F,
+                1.0F
+        );
+        return true;
+    }
+
+    private void clearCampFurnaceOwnership(BlockPos ownedPos) {
+        if (ownedPos != null && ownedPos.equals(this.getTemporaryFurnacePos())) {
+            this.clearTemporaryFurnace();
+        }
+        CompoundTag data = this.playerNpc.getPersistentData();
+        data.remove(CAMP_FURNACE_X);
+        data.remove(CAMP_FURNACE_Y);
+        data.remove(CAMP_FURNACE_Z);
+        data.remove(CAMP_FURNACE_DIMENSION);
     }
 
     private void clearActiveFurnaceAction(int cooldownTicks) {
@@ -764,9 +1049,8 @@ public class MiningNightCampGoal extends Goal {
             this.returnTemporaryMainHandOnRestore = returnCurrentOnRestore;
         } else if (!currentMainHand.isEmpty()
                 && this.returnTemporaryMainHandOnRestore
-                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)
-                && !InventoryUtils.addItem(this.playerNpc, currentMainHand)) {
-            this.playerNpc.spawnAtLocation(currentMainHand);
+                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)) {
+            this.returnStack(currentMainHand);
         }
 
         ItemStack held = stack.copy();
@@ -782,9 +1066,8 @@ public class MiningNightCampGoal extends Goal {
         ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
         if (!currentMainHand.isEmpty()
                 && this.returnTemporaryMainHandOnRestore
-                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)
-                && !InventoryUtils.addItem(this.playerNpc, currentMainHand)) {
-            this.playerNpc.spawnAtLocation(currentMainHand);
+                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)) {
+            this.returnStack(currentMainHand);
         }
 
         this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
@@ -805,8 +1088,12 @@ public class MiningNightCampGoal extends Goal {
     }
 
     private void returnStack(ItemStack stack) {
-        if (!stack.isEmpty() && !InventoryUtils.addItem(this.playerNpc, stack)) {
-            this.playerNpc.spawnAtLocation(stack);
+        if (stack.isEmpty()) {
+            return;
+        }
+        ItemStack remaining = this.playerNpc.getInventory().addItem(stack.copy());
+        if (!remaining.isEmpty()) {
+            this.playerNpc.spawnAtLocation(remaining);
         }
     }
 
@@ -824,6 +1111,7 @@ public class MiningNightCampGoal extends Goal {
         this.stationaryTicks = 0;
         this.lookTicks = 0;
         this.repathTicks = 0;
+        this.furnaceRecoveryTicks = 0;
         this.finished = false;
         this.placedTorch = false;
         this.walkSneaking = false;
@@ -834,7 +1122,11 @@ public class MiningNightCampGoal extends Goal {
     private enum FurnaceMode {
         NONE,
         PLACE,
-        INTERACT
+        INTERACT,
+        RECOVER
+    }
+
+    private record CampFurnaceRef(ServerLevel level, BlockPos pos) {
     }
 
     private enum ActivityMode {

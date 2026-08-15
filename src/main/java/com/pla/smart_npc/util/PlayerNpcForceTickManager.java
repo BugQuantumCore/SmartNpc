@@ -50,6 +50,7 @@ public final class PlayerNpcForceTickManager {
     private static final int FORCE_TICK_DISTANCE = 2;
     private static final int RESTORED_ENTITY_LOAD_GRACE_TICKS = 20 * 30;
     private static final String NPC_TAB_PREFIX = "[NPC] ";
+    private static final String NPC_TAB_PROFILE_PREFIX = "zzNPC";
     private static final int TAB_PROFILE_NAME_LENGTH = 16;
     private static final TicketType<TicketKey> PLAYER_NPC_TICKET = TicketType.create(
             SmartNpc.MODID + ":player_npc_force_tick",
@@ -157,6 +158,20 @@ public final class PlayerNpcForceTickManager {
         if (managedNpc != null) {
             event.setDisplayName(managedNpc.tabDisplayName());
         }
+    }
+
+    public static boolean isNpcTabProfileName(String profileName) {
+        if (profileName == null
+                || profileName.length() != TAB_PROFILE_NAME_LENGTH
+                || !profileName.startsWith(NPC_TAB_PROFILE_PREFIX)) {
+            return false;
+        }
+        for (int i = NPC_TAB_PROFILE_PREFIX.length(); i < profileName.length(); i++) {
+            if (Character.digit(profileName.charAt(i), 16) < 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public static void track(PlayerNpcEntity npc) {
@@ -407,7 +422,7 @@ public final class PlayerNpcForceTickManager {
 
     private static String tabProfileName(UUID npcId) {
         String compactId = npcId.toString().replace("-", "");
-        return ("zzNPC" + compactId).substring(0, TAB_PROFILE_NAME_LENGTH);
+        return (NPC_TAB_PROFILE_PREFIX + compactId).substring(0, TAB_PROFILE_NAME_LENGTH);
     }
 
     private static Set<ChunkPos> forceTickChunksAround(ChunkPos center) {

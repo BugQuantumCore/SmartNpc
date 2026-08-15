@@ -57,6 +57,7 @@ public class RespondToNpcAlertGoal extends Goal {
         }
 
         if (this.shouldAttack(this.threat)) {
+            this.playerNpc.setSprinting(false);
             this.playerNpc.setTarget(this.threat);
             this.playerNpc.setCurrentAiState("ai.player_npc.assisting_alert");
             this.avoiding = false;
@@ -66,6 +67,7 @@ public class RespondToNpcAlertGoal extends Goal {
 
         this.avoiding = true;
         this.avoidTicks = AVOID_TICKS;
+        this.playerNpc.setSprinting(true);
         this.playerNpc.setTarget(null);
         this.playerNpc.setCurrentAiState("ai.player_npc.avoiding_alert");
         this.moveAway();
@@ -87,6 +89,7 @@ public class RespondToNpcAlertGoal extends Goal {
 
     @Override
     public void stop() {
+        this.playerNpc.setSprinting(false);
         this.threat = null;
         this.avoiding = false;
         this.avoidTicks = 0;

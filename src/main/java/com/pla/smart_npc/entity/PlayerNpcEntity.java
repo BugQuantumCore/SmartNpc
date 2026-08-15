@@ -7,6 +7,7 @@ import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.entity.goal.BeingAtHomeGoal;
@@ -40,6 +41,7 @@ import com.pla.smart_npc.entity.goal.JukeboxDanceGoal;
 import com.pla.smart_npc.entity.goal.LootNearbyChestGoal;
 import com.pla.smart_npc.entity.goal.LowHealthFleeGoal;
 import com.pla.smart_npc.entity.goal.ManageHomeBaseGoal;
+import com.pla.smart_npc.entity.goal.MiningCaveStrollGoal;
 import com.pla.smart_npc.entity.goal.MiningNightCampGoal;
 import com.pla.smart_npc.entity.goal.PlayerNpcFishingGoal;
 import com.pla.smart_npc.entity.goal.PlayerNpcProjectileBlockGoal;
@@ -106,6 +108,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ServerLevelAccessor;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkHooks;
@@ -154,6 +157,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int EXPLORATION_CLIMB_CLEAR_TICKS = 24;
     private static final double EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR = 5.0D * 5.0D;
     private static final int EXPLORATION_CLIMB_CLEAR_RANDOM_POOL = 8;
+    private static final int IDLE_RESOURCE_STUCK_TICKS = 20 * 10;
+    private static final int IDLE_RESOURCE_STUCK_RECHECK_TICKS = 20 * 4;
+    private static final int IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS = 6;
+    private static final int IDLE_RESOURCE_SURFACE_ESCAPE_TICKS = 20 * 8;
+    private static final int IDLE_RESOURCE_SURFACE_ESCAPE_MAX_BLOCKS = 10;
+    private static final int IDLE_RESOURCE_CLEAR_TICKS = 24;
+    private static final double IDLE_RESOURCE_CLEAR_DISTANCE_SQR = 4.5D * 4.5D;
+    private static final int IDLE_RESOURCE_CLEAR_RANDOM_POOL = 8;
     private static final double EXPERIENCE_PICKUP_RADIUS = 3.0D;
     private static final long DAY_LENGTH_TICKS = 24000L;
     private static final long DAILY_JOB_ROLL_TIME = 1L;
@@ -278,6 +289,16 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private final ToolAi explorationClimbToolAi = new ToolAi(this);
     private final BreakingBlockAi explorationClimbBreakingBlockAi = new BreakingBlockAi(this, this.explorationClimbToolAi);
     private final ClearBlockAi explorationClimbClearBlockAi = new ClearBlockAi(this, this.explorationClimbBreakingBlockAi);
+    private final PathStuckFallbackAi idleResourcePathStuckFallbackAi = new PathStuckFallbackAi(this);
+    private final ToolAi idleResourceFallbackToolAi = new ToolAi(this);
+    private final BreakingBlockAi idleResourceFallbackBreakingBlockAi = new BreakingBlockAi(this, this.idleResourceFallbackToolAi);
+    private final ClearBlockAi idleResourceFallbackClearBlockAi = new ClearBlockAi(this, this.idleResourceFallbackBreakingBlockAi);
+    @Nullable
+    private BlockPos idleResourceStuckWatchPos;
+    @Nullable
+    private BlockPos idleResourceStuckWatchTarget;
+    private int idleResourceStuckTicks = 0;
+    private int idleResourceStuckRecheckTicks = 0;
     private double placeBlockToParryChance;
     private int placeBlockParryCooldown = 0;
     private int stunEscapeCooldown = 0;
@@ -1529,6 +1550,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     protected void registerGoals() {
         GatherLogsGoal gatherLogsGoal = new GatherLogsGoal(this, 1.0D);
+        GatherMissingBuildMaterialGoal gatherMissingBuildMaterialGoal = new GatherMissingBuildMaterialGoal(this, 1.0D);
         this.goalSelector.addGoal(0, new FloatGoal(this));
         this.goalSelector.addGoal(0, new EscapeWaterCurrentGoal(this));
         this.registerVanillaCombatReplacementGoals();
@@ -1544,7 +1566,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(5, this.gated(new TerraformBuildSiteGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new MeleeAttackGoal(this, 1.0D, true));
         this.goalSelector.addGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(4, this.gated(new MiningNightCampGoal(this, 1.0D), PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
+        this.goalSelector.addGoal(4, new MiningNightCampGoal(this, 1.0D));
         this.goalSelector.addGoal(5, new CookFoodGoal(this));
         this.goalSelector.addGoal(5, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new CraftCropFoodGoal(this), PlayerNpcInterest.FARMING));
@@ -1567,7 +1589,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
-        this.goalSelector.addGoal(6, new GatherMissingBuildMaterialGoal(this, 1.0D));
+        this.goalSelector.addGoal(6, gatherMissingBuildMaterialGoal);
+        this.goalSelector.addGoal(7, this.gated(new MiningCaveStrollGoal(this, 1.0D), PlayerNpcInterest.MINING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
@@ -1607,12 +1630,38 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
+                "strolling around",
+                level -> PlayerNpcFishingGoal.shouldStrollForMissingFishingString(this, level)
+                        && !this.shouldStayHomeForWeather(level)
+                        && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
+                level -> false,
+                true,
+                true
+        ), PlayerNpcInterest.FISHING));
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+                this,
+                1.0D,
                 "exploring for build materials",
                 level -> GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(this, level)
                         && this.getGatherCooldown() <= 0
                         && !this.shouldStayHomeForWeather(level)
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
-                level -> GatherMissingBuildMaterialGoal.hasNearbyGatherTarget(this, level)
+                gatherMissingBuildMaterialGoal::hasNearbyActionableGatherTarget
+        ), PlayerNpcInterest.BUILDING));
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+                this,
+                1.0D,
+                "strolling after finishing home",
+                level -> this.isDailyJobActive(PlayerNpcInterest.BUILDING)
+                        && BuildHouseGoal.isHomeLayoutFinished(this, level)
+                        && PlayerNpcBuildMaterialUtil.findMissingBuildMaterialNeed(level, this).isEmpty()
+                        && !this.shouldPrioritizeLogGathering()
+                        && !this.shouldPrioritizeCobblestoneGathering()
+                        && !this.shouldStayHomeForWeather(level)
+                        && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
+                level -> false,
+                true,
+                true
         ), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
@@ -1658,6 +1707,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return true;
         }
         if (this.isDailyJobActive(PlayerNpcInterest.MINING) && !this.hasInterest(PlayerNpcInterest.BUILDING)) {
+            return true;
+        }
+        if (this.hasInterest(PlayerNpcInterest.BUILDING) && this.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
             return true;
         }
         return this.hasNearbyTreeCover(serverLevel);
@@ -2345,6 +2397,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.cleanupStaleCombatState();
         this.tickTasklessActivityWatchdog();
         this.tickExplorationClimbFallback(serverLevel);
+        this.tickIdleResourceStuckFallback(serverLevel);
 
         if ((tickCount + getId()) % 10 == 0) {
             this.pickupNearbyExperienceOrbs();
@@ -2702,6 +2755,359 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.explorationClimbWatchTarget = null;
         this.explorationClimbSafeStandTarget = null;
         this.explorationClimbStuckTicks = 0;
+    }
+
+    private void tickIdleResourceStuckFallback(ServerLevel serverLevel) {
+        if (this.idleResourceFallbackClearBlockAi.isRunning()) {
+            this.tickIdleResourceFallbackClearBlock(serverLevel);
+            return;
+        }
+
+        if (this.idleResourcePathStuckFallbackAi.tick(serverLevel, "idle resource fallback")) {
+            this.setIdleTraceDetail(this.idleResourcePathStuckFallbackAi.detail("idle resource fallback"), 20 * 3);
+            return;
+        }
+
+        if (!this.canRunIdleResourceStuckFallback(serverLevel)) {
+            this.resetIdleResourceStuckFallback();
+            return;
+        }
+
+        BlockPos feet = this.blockPosition();
+        BlockPos navigationTarget = this.getNavigation().getTargetPos();
+        BlockPos surfaceEscapeTarget = serverLevel.canSeeSky(feet.above())
+                ? null
+                : this.findIdleResourceSurfaceEscapeTarget(serverLevel, feet);
+        BlockPos routeTarget = navigationTarget == null
+                ? surfaceEscapeTarget == null ? feet : surfaceEscapeTarget
+                : navigationTarget;
+
+        if (this.idleResourceStuckWatchPos == null
+                || !this.idleResourceStuckWatchPos.equals(feet)
+                || this.idleResourceStuckWatchTarget == null
+                || !this.idleResourceStuckWatchTarget.equals(routeTarget)) {
+            this.idleResourceStuckWatchPos = feet.immutable();
+            this.idleResourceStuckWatchTarget = routeTarget.immutable();
+            this.idleResourceStuckTicks = 0;
+            return;
+        }
+
+        this.idleResourcePathStuckFallbackAi.watchAndStart(
+                serverLevel,
+                routeTarget,
+                routeTarget,
+                "idle resource fallback",
+                pos -> PlayerNpcHomeUtil.isInsideBuildFootprint(this, pos)
+        );
+        if (this.idleResourcePathStuckFallbackAi.isRunning()) {
+            this.setIdleTraceDetail(this.idleResourcePathStuckFallbackAi.detail("idle resource fallback"), 20 * 3);
+            return;
+        }
+
+        if (this.idleResourceStuckRecheckTicks > 0) {
+            this.idleResourceStuckRecheckTicks--;
+            return;
+        }
+
+        if (++this.idleResourceStuckTicks < IDLE_RESOURCE_STUCK_TICKS) {
+            return;
+        }
+
+        if (surfaceEscapeTarget == null && this.startIdleResourceFallbackClearBlock(serverLevel, feet, routeTarget)) {
+            this.idleResourceStuckRecheckTicks = IDLE_RESOURCE_STUCK_RECHECK_TICKS;
+            this.idleResourceStuckTicks = 0;
+            return;
+        }
+
+        if (surfaceEscapeTarget == null
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this, feet)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this, surfaceEscapeTarget)) {
+            this.setIdleTraceDetail("idle resource fallback blocked: no surface escape or clear @ " + posText(feet), 20 * 3);
+            this.idleResourceStuckRecheckTicks = IDLE_RESOURCE_STUCK_RECHECK_TICKS;
+            this.idleResourceStuckTicks = 0;
+            return;
+        }
+
+        this.getNavigation().stop();
+        this.requestExplorationUpwardEscapeTo(
+                surfaceEscapeTarget,
+                IDLE_RESOURCE_SURFACE_ESCAPE_TICKS,
+                IDLE_RESOURCE_SURFACE_ESCAPE_MAX_BLOCKS
+        );
+        this.setCurrentAiDetail("exploration climb request @ "
+                + posText(surfaceEscapeTarget)
+                + " max="
+                + IDLE_RESOURCE_SURFACE_ESCAPE_MAX_BLOCKS);
+        this.setIdleTraceDetail("idle resource fallback climb request @ " + posText(surfaceEscapeTarget), 20 * 3);
+        this.idleResourceStuckRecheckTicks = IDLE_RESOURCE_STUCK_RECHECK_TICKS;
+        this.idleResourceStuckTicks = 0;
+        this.wakeUpIdleWork();
+    }
+
+    private void tickIdleResourceFallbackClearBlock(ServerLevel serverLevel) {
+        if (!this.canRunIdleResourceStuckFallback(serverLevel)) {
+            this.resetIdleResourceStuckFallback();
+            return;
+        }
+
+        BlockPos target = this.idleResourceFallbackClearBlockAi.targetPos();
+        ClearBlockAi.TickResult result = this.idleResourceFallbackClearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            this.setCurrentAiState(AI_IDLE);
+            this.setIdleTraceDetail(this.idleResourceFallbackClearBlockAi.detail(), 20 * 3);
+            return;
+        }
+
+        this.idleResourceFallbackToolAi.restoreMainHand();
+        this.idleResourceStuckTicks = 0;
+        this.idleResourceStuckRecheckTicks = IDLE_RESOURCE_STUCK_RECHECK_TICKS;
+        this.idleResourceStuckWatchPos = null;
+        this.idleResourceStuckWatchTarget = null;
+        if (result == ClearBlockAi.TickResult.DONE) {
+            if (this.forceIdleResourceMoveThrough(serverLevel, target)) {
+                this.setIdleTraceDetail("idle resource fallback clear done; forced move @ " + posTextOrNone(target), 20 * 3);
+            } else {
+                this.setIdleTraceDetail("idle resource fallback clear done; retrying @ " + posTextOrNone(target), 20 * 3);
+            }
+        } else {
+            this.setIdleTraceDetail("idle resource fallback clear failed; retrying", 20 * 3);
+        }
+        this.wakeUpIdleWork();
+    }
+
+    private boolean startIdleResourceFallbackClearBlock(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
+        List<BlockPos> candidates = this.idleResourceFallbackClearCandidates(feet, routeTarget);
+        if (candidates.isEmpty()) {
+            return false;
+        }
+
+        int preferredCount = Math.min(IDLE_RESOURCE_CLEAR_RANDOM_POOL, candidates.size());
+        if (preferredCount > 1) {
+            Collections.rotate(candidates.subList(0, preferredCount), this.getRandom().nextInt(preferredCount));
+        }
+
+        for (BlockPos candidate : candidates) {
+            if (this.idleResourceFallbackClearBlockAi.start(
+                    serverLevel,
+                    candidate,
+                    state -> this.isIdleResourceFallbackClearable(serverLevel, candidate, state),
+                    "clearing idle resource fallback",
+                    IDLE_RESOURCE_CLEAR_TICKS,
+                    IDLE_RESOURCE_CLEAR_DISTANCE_SQR,
+                    true
+            )) {
+                this.setIdleTraceDetail("idle resource fallback clearing @ " + posText(candidate), 20 * 3);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<BlockPos> idleResourceFallbackClearCandidates(BlockPos feet, BlockPos routeTarget) {
+        List<BlockPos> candidates = new ArrayList<>();
+        this.addIdleResourceClearCandidate(candidates, feet);
+        this.addIdleResourceClearCandidate(candidates, feet.above());
+        this.addIdleResourceClearCandidate(candidates, feet.above(2));
+
+        for (Direction direction : this.idleResourceDirectionsToward(feet, routeTarget)) {
+            BlockPos side = feet.relative(direction);
+            this.addIdleResourceClearCandidate(candidates, side);
+            this.addIdleResourceClearCandidate(candidates, side.above());
+            this.addIdleResourceClearCandidate(candidates, side.above(2));
+
+            BlockPos next = side.relative(direction);
+            this.addIdleResourceClearCandidate(candidates, next);
+            this.addIdleResourceClearCandidate(candidates, next.above());
+        }
+
+        candidates.removeIf(pos -> pos == null
+                || pos.equals(feet.below())
+                || this.isTemporaryPillarSupport(pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this, pos));
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> pos.distSqr(feet))
+                .thenComparingDouble(pos -> routeTarget == null ? 0.0D : pos.distSqr(routeTarget)));
+        return candidates.stream()
+                .map(BlockPos::immutable)
+                .distinct()
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+    }
+
+    private void addIdleResourceClearCandidate(List<BlockPos> candidates, BlockPos pos) {
+        if (pos != null) {
+            candidates.add(pos.immutable());
+        }
+    }
+
+    private List<Direction> idleResourceDirectionsToward(BlockPos feet, BlockPos routeTarget) {
+        List<Direction> directions = new ArrayList<>();
+        if (routeTarget != null) {
+            int dx = routeTarget.getX() - feet.getX();
+            int dz = routeTarget.getZ() - feet.getZ();
+            Direction xDirection = dx > 0 ? Direction.EAST : dx < 0 ? Direction.WEST : null;
+            Direction zDirection = dz > 0 ? Direction.SOUTH : dz < 0 ? Direction.NORTH : null;
+            if (Math.abs(dx) >= Math.abs(dz)) {
+                this.addIdleResourceDirection(directions, xDirection);
+                this.addIdleResourceDirection(directions, zDirection);
+            } else {
+                this.addIdleResourceDirection(directions, zDirection);
+                this.addIdleResourceDirection(directions, xDirection);
+            }
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            this.addIdleResourceDirection(directions, direction);
+        }
+        return directions;
+    }
+
+    private void addIdleResourceDirection(List<Direction> directions, @Nullable Direction direction) {
+        if (direction != null && !directions.contains(direction)) {
+            directions.add(direction);
+        }
+    }
+
+    private boolean isIdleResourceFallbackClearable(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        return pos != null
+                && state != null
+                && !state.isAir()
+                && !pos.equals(this.blockPosition().below())
+                && !this.isTemporaryPillarSupport(pos)
+                && !PlayerNpcHomeUtil.isInsideBuildFootprint(this, pos)
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(this, serverLevel, pos)
+                && ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, state, true);
+    }
+
+    private boolean forceIdleResourceMoveThrough(ServerLevel serverLevel, @Nullable BlockPos clearedPos) {
+        if (clearedPos == null) {
+            return false;
+        }
+
+        BlockPos feet = this.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        this.addIdleResourceClearCandidate(candidates, clearedPos);
+        this.addIdleResourceClearCandidate(candidates, clearedPos.below());
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            this.addIdleResourceClearCandidate(candidates, clearedPos.relative(direction));
+            this.addIdleResourceClearCandidate(candidates, clearedPos.below().relative(direction));
+        }
+
+        Optional<BlockPos> stand = candidates.stream()
+                .map(BlockPos::immutable)
+                .distinct()
+                .filter(pos -> !PlayerNpcHomeUtil.isInsideBuildFootprint(this, pos))
+                .filter(pos -> PathNavigationAi.canStandAt(serverLevel, pos))
+                .min(Comparator.comparingDouble(pos -> pos.distSqr(feet)));
+        if (stand.isEmpty()) {
+            return false;
+        }
+
+        double targetX = stand.get().getX() + 0.5D;
+        double targetZ = stand.get().getZ() + 0.5D;
+        double dx = targetX - this.getX();
+        double dz = targetZ - this.getZ();
+        double length = Math.sqrt(dx * dx + dz * dz);
+        if (length < 1.0E-4D) {
+            return false;
+        }
+
+        this.getNavigation().stop();
+        this.getLookControl().setLookAt(targetX, this.getY(), targetZ, 30.0F, 30.0F);
+        this.getMoveControl().setWantedPosition(targetX, this.getY(), targetZ, 1.0D);
+        Vec3 motion = this.getDeltaMovement();
+        this.setDeltaMovement(dx / length * 0.24D, motion.y, dz / length * 0.24D);
+        this.hasImpulse = true;
+        return true;
+    }
+
+    private boolean canRunIdleResourceStuckFallback(ServerLevel serverLevel) {
+        String state = this.getCurrentAiState();
+        if ((!AI_IDLE.equals(state) && !"ai.player_npc.looking_for_work".equals(state))
+                || this.hasRunningAiGoals()
+                || !this.isAlive()
+                || this.isNoAi()
+                || this.isPassenger()
+                || this.isHealing()
+                || this.getTarget() != null
+                || this.isSleeping()
+                || this.getUpwardEscapeTarget() != null
+                || this.getHoleEscapeCooldown() > 0
+                || !this.onGround()
+                || !this.getNavigation().isDone() && !this.getNavigation().isStuck()) {
+            return false;
+        }
+
+        return this.hasInterest(PlayerNpcInterest.BUILDING)
+                && this.isDailyJobActive(PlayerNpcInterest.BUILDING)
+                && (this.shouldPrioritizeLogGathering()
+                || this.shouldPrioritizeCobblestoneGathering()
+                || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, this)
+                || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, this));
+    }
+
+    @Nullable
+    private BlockPos findIdleResourceSurfaceEscapeTarget(ServerLevel serverLevel, BlockPos feet) {
+        List<BlockPos> candidates = new ArrayList<>();
+        List<BlockPos> relaxedCandidates = new ArrayList<>();
+        int radiusSqr = IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS * IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS;
+        for (int dx = -IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS; dx <= IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS; dx++) {
+            for (int dz = -IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS; dz <= IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS; dz++) {
+                if (dx == 0 && dz == 0 || dx * dx + dz * dz > radiusSqr) {
+                    continue;
+                }
+
+                int x = feet.getX() + dx;
+                int z = feet.getZ() + dz;
+                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                int climb = y - feet.getY();
+                if (climb <= 0 || climb > IDLE_RESOURCE_SURFACE_ESCAPE_MAX_BLOCKS) {
+                    continue;
+                }
+
+                BlockPos candidate = new BlockPos(x, y, z);
+                if (!PathNavigationAi.canStandAt(serverLevel, candidate)
+                        || PlayerNpcHomeUtil.isInsideBuildFootprint(this, candidate)) {
+                    continue;
+                }
+
+                if (serverLevel.canSeeSky(candidate.above())) {
+                    candidates.add(candidate.immutable());
+                } else {
+                    relaxedCandidates.add(candidate.immutable());
+                }
+            }
+        }
+
+        BlockPos selected = this.selectIdleResourceSurfaceEscapeTarget(candidates, feet);
+        if (selected != null) {
+            return selected;
+        }
+        return this.selectIdleResourceSurfaceEscapeTarget(relaxedCandidates, feet);
+    }
+
+    @Nullable
+    private BlockPos selectIdleResourceSurfaceEscapeTarget(List<BlockPos> candidates, BlockPos feet) {
+        candidates.sort(Comparator
+                .comparingInt((BlockPos pos) -> pos.getY() - feet.getY())
+                .thenComparingDouble(pos -> pos.distSqr(feet)));
+        return candidates.isEmpty() ? null : candidates.get(0).immutable();
+    }
+
+    private void resetIdleResourceStuckFallback() {
+        this.idleResourcePathStuckFallbackAi.stop();
+        this.idleResourceFallbackClearBlockAi.stop();
+        this.idleResourceFallbackToolAi.restoreMainHand();
+        this.idleResourceStuckWatchPos = null;
+        this.idleResourceStuckWatchTarget = null;
+        this.idleResourceStuckTicks = 0;
+        this.idleResourceStuckRecheckTicks = 0;
+    }
+
+    private static String posTextOrNone(@Nullable BlockPos pos) {
+        return pos == null ? "none" : posText(pos);
+    }
+
+    private static String posText(BlockPos pos) {
+        return pos.getX() + " " + pos.getY() + " " + pos.getZ();
     }
 
     private boolean hasExplorationClimbFallbackDetail() {

@@ -2,7 +2,10 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.entity.ai.WaterEscapeAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
@@ -45,9 +48,11 @@ import net.minecraftforge.registries.ForgeRegistries;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 public class BuildHouseGoal extends Goal {
@@ -64,12 +69,17 @@ public class BuildHouseGoal extends Goal {
     private static final int MAX_SAME_PLACEMENT_TICKS = 20 * 8;
     private static final int MAX_PLACEMENT_ATTEMPTS = 4;
     private static final int MAX_UNREACHABLE_BUILD_TARGET_TICKS = 20 * 4;
+    private static final int CRAFT_ROUTE_CLEAR_TRIGGER_TICKS = 20;
+    private static final int CRAFT_ROUTE_NO_PROGRESS_TICKS = 20 * 3;
+    private static final int CRAFT_ROUTE_CLEAR_TICKS = 24;
     private static final int BUILD_MOTION_INTERVAL_TICKS = 12;
     private static final int BUILD_WORK_AREA_MARGIN = 4;
     private static final int BUILD_WORK_AREA_HEIGHT = 8;
     private static final int READY_BUILD_WORK_CACHE_TICKS = 20 * 3;
     private static final double BUILD_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double BUILD_HORIZONTAL_DISTANCE_SQR = 4.0D * 4.0D;
+    private static final double CRAFT_ROUTE_PROGRESS_EPSILON_SQR = 0.25D;
+    private static final double CRAFT_ROUTE_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
     private static final String ACTIVE_BUILD_BATCH_KEY = "SmartNpcActiveBuildBatch";
     private static final Map<PlayerNpcEntity, HomeBuildWorkCache> HOME_BUILD_WORK_CACHE = new WeakHashMap<>();
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
@@ -82,8 +92,12 @@ public class BuildHouseGoal extends Goal {
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
     private final WaterEscapeAi waterEscapeAi;
+    private final ToolAi craftRouteToolAi;
+    private final BreakingBlockAi craftRouteBreakingBlockAi;
+    private final ClearBlockAi craftRouteClearBlockAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private final List<PlayerNpcBuildLayout.RelativeBlock> blueprint = new ArrayList<>();
+    private final Set<BlockPos> skippedCraftRouteClearTargets = new HashSet<>();
     private PlayerNpcHomeUtil.HomeArea homeArea;
     private PlayerNpcBuildLayout selectedLayout;
     private BlockPos origin;
@@ -112,12 +126,20 @@ public class BuildHouseGoal extends Goal {
     private int nextBuildMotionTick;
     private BlockPos unreachableBuildTargetPos;
     private int unreachableBuildTargetTicks;
+    private BlockPos craftApproachTarget;
+    private BlockPos craftRouteTablePos;
+    private BlockPos craftRouteRequestedPos;
+    private int craftRouteNoProgressTicks;
+    private double bestCraftApproachDistanceSqr = Double.MAX_VALUE;
     private String missingMaterial = "";
 
     public BuildHouseGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.waterEscapeAi = new WaterEscapeAi(playerNpc);
+        this.craftRouteToolAi = new ToolAi(playerNpc);
+        this.craftRouteBreakingBlockAi = new BreakingBlockAi(playerNpc, this.craftRouteToolAi);
+        this.craftRouteClearBlockAi = new ClearBlockAi(playerNpc, this.craftRouteBreakingBlockAi);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -143,6 +165,36 @@ public class BuildHouseGoal extends Goal {
 
     public static void invalidateHomeBuildWorkCache(PlayerNpcEntity playerNpc) {
         HOME_BUILD_WORK_CACHE.remove(playerNpc);
+    }
+
+    public static boolean isHomeLayoutFinished(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null || serverLevel == null) {
+            return false;
+        }
+
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        Optional<PlayerNpcBuildLayout> layout = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc)
+                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
+        if (home.isEmpty()
+                || layout.isEmpty()
+                || layout.get().width() != home.get().width()
+                || layout.get().depth() != home.get().depth()
+                || TerraformBuildSiteGoal.hasActionablePrepWork(playerNpc, serverLevel)) {
+            return false;
+        }
+
+        BlockPos origin = home.get().origin();
+        for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
+            if (block.optional()
+                    || block.state().isAir()
+                    || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
+                continue;
+            }
+            if (!PlayerNpcBuildMaterialUtil.matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean cachedContinuableHomeBuildWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -381,6 +433,9 @@ public class BuildHouseGoal extends Goal {
         this.placementAttempts = 0;
         this.nextBuildMotionTick = 0;
         this.clearUnreachableBuildTarget();
+        this.stopCraftRouteClear();
+        this.resetCraftRouteProgress();
+        this.skippedCraftRouteClearTargets.clear();
         this.placingBlockAi.resetDelay();
         this.missingMaterial = "";
         setBuildBatchActive(this.playerNpc, true);
@@ -394,6 +449,13 @@ public class BuildHouseGoal extends Goal {
             return;
         }
 
+        if (this.tickWaterEscape(serverLevel, this.activeBuildBlock)) {
+            return;
+        }
+        if (this.tickCraftRouteClear(serverLevel, this.activeBuildBlock)) {
+            return;
+        }
+
         PlayerNpcBuildLayout.RelativeBlock block = this.currentBuildBlock(serverLevel);
         if (block == null) {
             this.blueprint.clear();
@@ -401,9 +463,6 @@ public class BuildHouseGoal extends Goal {
         }
 
         BlockPos target = block.toWorld(this.origin);
-        if (this.tickWaterEscape(serverLevel, block)) {
-            return;
-        }
 
         if (this.trackPlacementTarget(target) && this.samePlacementTicks >= MAX_SAME_PLACEMENT_TICKS) {
             this.recoverStalledPlacement(serverLevel, target, block);
@@ -493,6 +552,7 @@ public class BuildHouseGoal extends Goal {
 
     @Override
     public void stop() {
+        this.stopCraftRouteClear();
         this.restorePreviousMainHand();
         if (!this.playerNpc.level().isClientSide) {
             boolean canContinueBatch = this.playerNpc.level() instanceof ServerLevel serverLevel
@@ -538,6 +598,8 @@ public class BuildHouseGoal extends Goal {
         this.placementAttempts = 0;
         this.nextBuildMotionTick = 0;
         this.clearUnreachableBuildTarget();
+        this.resetCraftRouteProgress();
+        this.skippedCraftRouteClearTargets.clear();
         this.placingBlockAi.resetDelay();
         this.waterEscapeAi.stop();
         this.missingMaterial = "";
@@ -782,10 +844,18 @@ public class BuildHouseGoal extends Goal {
         this.restorePreviousMainHand();
         this.playerNpc.getLookControl().setLookAt(tablePos.getX() + 0.5D, tablePos.getY() + 0.5D, tablePos.getZ() + 0.5D, 40.0F, 40.0F);
         if (this.playerNpc.distanceToSqr(tablePos.getX() + 0.5D, tablePos.getY(), tablePos.getZ() + 0.5D) > BUILD_DISTANCE_SQR) {
+            this.trackCraftRouteProgress(tablePos);
             this.moveTowardBuildTarget(tablePos, block, "walking to craft");
+            if ((this.unreachableBuildTargetTicks >= CRAFT_ROUTE_CLEAR_TRIGGER_TICKS
+                    || this.craftRouteNoProgressTicks >= CRAFT_ROUTE_NO_PROGRESS_TICKS)
+                    && this.startCraftRouteClear(serverLevel, tablePos, block)) {
+                this.clearUnreachableBuildTarget();
+            }
             return true;
         }
         this.clearUnreachableBuildTarget();
+        this.resetCraftRouteProgress();
+        this.skippedCraftRouteClearTargets.clear();
 
         this.playerNpc.getNavigation().stop();
         if (this.placeDelay++ < 8) {
@@ -970,7 +1040,179 @@ public class BuildHouseGoal extends Goal {
         this.cachedCraftingBlock = null;
         this.cachedCraftingNeeded = false;
         this.clearUnreachableBuildTarget();
+        if (!this.craftRouteClearBlockAi.isRunning()) {
+            this.resetCraftRouteProgress();
+            this.skippedCraftRouteClearTargets.clear();
+        }
         this.placingBlockAi.resetDelay();
+    }
+
+    private boolean tickCraftRouteClear(ServerLevel serverLevel, PlayerNpcBuildLayout.RelativeBlock block) {
+        if (!this.craftRouteClearBlockAi.isRunning()) {
+            return false;
+        }
+
+        BlockPos clearTarget = this.craftRouteClearBlockAi.targetPos();
+        if (!this.isSafeCraftRouteClearTarget(serverLevel, clearTarget)) {
+            this.rejectProtectedCraftRouteTarget(clearTarget);
+            this.updateTaskDetail("craft path clear protected; retrying", block);
+            return true;
+        }
+
+        ClearBlockAi.TickResult result = this.craftRouteClearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            BlockPos resolvedTarget = this.craftRouteClearBlockAi.targetPos();
+            if (!this.isSafeCraftRouteClearTarget(serverLevel, resolvedTarget)) {
+                this.rejectProtectedCraftRouteTarget(resolvedTarget);
+                this.updateTaskDetail("craft path clear protected; retrying", block);
+                return true;
+            }
+            this.updateTaskDetail(this.craftRouteClearBlockAi.detail(), block);
+            return true;
+        }
+
+        this.craftRouteToolAi.restoreMainHand();
+        this.craftRouteTablePos = null;
+        this.craftRouteRequestedPos = null;
+        if (result == ClearBlockAi.TickResult.DONE) {
+            this.clearUnreachableBuildTarget();
+            this.resetCraftRouteProgress();
+            this.skippedCraftRouteClearTargets.clear();
+            this.updateTaskDetail("cleared craft path; retrying", block);
+            return true;
+        }
+        if (result == ClearBlockAi.TickResult.FAILED && clearTarget != null) {
+            this.skippedCraftRouteClearTargets.add(clearTarget.immutable());
+        }
+        this.updateTaskDetail("craft path clear failed; retrying", block);
+        return true;
+    }
+
+    private boolean startCraftRouteClear(
+            ServerLevel serverLevel,
+            BlockPos tablePos,
+            PlayerNpcBuildLayout.RelativeBlock block
+    ) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>(ClearBlockAi.gatherObstructionCandidates(feet, tablePos, tablePos));
+        candidates.removeIf(pos -> pos == null
+                || pos.equals(tablePos)
+                || pos.equals(tablePos.below())
+                || pos.equals(feet.below())
+                || this.playerNpc.isTemporaryPillarSupport(pos)
+                || this.skippedCraftRouteClearTargets.contains(pos)
+                || this.isBuiltBlueprintBlock(serverLevel, pos));
+
+        this.restorePreviousMainHand();
+        this.craftRouteToolAi.restoreMainHand();
+        List<BlockPos> ordered = candidates.stream()
+                .map(BlockPos::immutable)
+                .distinct()
+                .sorted(Comparator.comparingDouble(pos -> pos.distSqr(feet)))
+                .toList();
+        for (BlockPos candidate : ordered) {
+            this.craftRouteTablePos = tablePos.immutable();
+            this.craftRouteRequestedPos = candidate;
+            if (!this.craftRouteClearBlockAi.start(
+                    serverLevel,
+                    candidate,
+                    BuildHouseGoal::isCraftRouteFoliage,
+                    "clearing craft path",
+                    CRAFT_ROUTE_CLEAR_TICKS,
+                    CRAFT_ROUTE_CLEAR_DISTANCE_SQR,
+                    true
+            )) {
+                continue;
+            }
+            if (!this.isSafeCraftRouteClearTarget(serverLevel, this.craftRouteClearBlockAi.targetPos())) {
+                this.rejectProtectedCraftRouteTarget(this.craftRouteClearBlockAi.targetPos());
+                continue;
+            }
+            this.playerNpc.getNavigation().stop();
+            this.updateTaskDetail(this.craftRouteClearBlockAi.detail(), block);
+            return true;
+        }
+        this.craftRouteTablePos = null;
+        this.craftRouteRequestedPos = null;
+        return false;
+    }
+
+    private void trackCraftRouteProgress(BlockPos tablePos) {
+        double distanceSqr = this.playerNpc.distanceToSqr(
+                tablePos.getX() + 0.5D,
+                tablePos.getY(),
+                tablePos.getZ() + 0.5D
+        );
+        if (!tablePos.equals(this.craftApproachTarget)) {
+            this.craftApproachTarget = tablePos.immutable();
+            this.bestCraftApproachDistanceSqr = distanceSqr;
+            this.craftRouteNoProgressTicks = 0;
+            this.skippedCraftRouteClearTargets.clear();
+            return;
+        }
+        if (distanceSqr + CRAFT_ROUTE_PROGRESS_EPSILON_SQR < this.bestCraftApproachDistanceSqr) {
+            this.bestCraftApproachDistanceSqr = distanceSqr;
+            this.craftRouteNoProgressTicks = 0;
+            return;
+        }
+        this.craftRouteNoProgressTicks++;
+    }
+
+    private void resetCraftRouteProgress() {
+        this.craftApproachTarget = null;
+        this.craftRouteNoProgressTicks = 0;
+        this.bestCraftApproachDistanceSqr = Double.MAX_VALUE;
+    }
+
+    private void stopCraftRouteClear() {
+        this.craftRouteClearBlockAi.stop();
+        this.craftRouteToolAi.restoreMainHand();
+        this.craftRouteTablePos = null;
+        this.craftRouteRequestedPos = null;
+    }
+
+    private boolean isSafeCraftRouteClearTarget(ServerLevel serverLevel, BlockPos pos) {
+        if (pos == null
+                || this.craftRouteTablePos == null
+                || pos.equals(this.craftRouteTablePos)
+                || pos.equals(this.craftRouteTablePos.below())
+                || pos.equals(this.playerNpc.blockPosition().below())
+                || this.playerNpc.isTemporaryPillarSupport(pos)
+                || this.skippedCraftRouteClearTargets.contains(pos)
+                || this.isBuiltBlueprintBlock(serverLevel, pos)) {
+            return false;
+        }
+        return isCraftRouteFoliage(serverLevel.getBlockState(pos));
+    }
+
+    private void rejectProtectedCraftRouteTarget(BlockPos resolvedTarget) {
+        if (this.craftRouteRequestedPos != null) {
+            this.skippedCraftRouteClearTargets.add(this.craftRouteRequestedPos.immutable());
+        }
+        if (resolvedTarget != null) {
+            this.skippedCraftRouteClearTargets.add(resolvedTarget.immutable());
+        }
+        this.stopCraftRouteClear();
+    }
+
+    private boolean isBuiltBlueprintBlock(ServerLevel serverLevel, BlockPos pos) {
+        if (this.origin == null || this.selectedLayout == null) {
+            return false;
+        }
+        for (PlayerNpcBuildLayout.RelativeBlock block : this.selectedLayout.blocks()) {
+            if (block.toWorld(this.origin).equals(pos)
+                    && !PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
+                    && this.isBuiltMatch(serverLevel, pos, block.state())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isCraftRouteFoliage(BlockState state) {
+        return state != null
+                && !state.isAir()
+                && (state.is(BlockTags.LEAVES) || state.canBeReplaced());
     }
 
     private boolean placeExactBlock(ServerLevel serverLevel, PlayerNpcBuildLayout.RelativeBlock block) {

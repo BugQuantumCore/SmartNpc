@@ -66,6 +66,9 @@ public class ReturnHomeGoal extends Goal {
         if (needsHomeSurfaceRecovery(playerNpc, homeArea)) {
             return true;
         }
+        if (miningShelterOnly && MiningNightCampGoal.shouldPauseMiningForNightCamp(playerNpc, serverLevel)) {
+            return false;
+        }
         if (isInsideHomeWorkArea(playerNpc, homeArea)) {
             return false;
         }
@@ -117,6 +120,12 @@ public class ReturnHomeGoal extends Goal {
         boolean inventoryHalfFull = this.inventoryMoreThanHalfFull();
         boolean inventoryMostlyFull = this.inventoryMostlyFull();
         boolean miningShelterOnly = isMiningShelterOnly(this.playerNpc);
+        if (miningShelterOnly
+                && !forcedExplorationReturn
+                && !forcedHomeSurfaceRecovery
+                && MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
+            return false;
+        }
         this.shelterReturn = this.shouldShelterAtHome(serverLevel);
         this.buildReturn = !miningShelterOnly && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
         this.completedStoneTripReturn = !miningShelterOnly && shouldReturnAfterCompletedStoneTrip(this.playerNpc, serverLevel, homeArea);
@@ -315,7 +324,8 @@ public class ReturnHomeGoal extends Goal {
                     this.homeCenter,
                     this::isProtectedHomeBlock,
                     this.moveDetail(),
-                    "clearing return path");
+                    "clearing return path",
+                    this.shouldUsePathStuckFallback());
             this.updateDetail();
         }
     }
@@ -453,6 +463,12 @@ public class ReturnHomeGoal extends Goal {
         BlockPos feet = this.playerNpc.blockPosition();
         int maxPillarBlocks = Math.max(1, this.homeCenter.getY() - feet.getY() + HOME_SURFACE_ESCAPE_EXTRA_BLOCKS);
         this.playerNpc.requestForcedUpwardEscapeTo(this.homeCenter, HOME_SURFACE_ESCAPE_TICKS, maxPillarBlocks);
+    }
+
+    private boolean shouldUsePathStuckFallback() {
+        return this.explorationRecoveryReturn
+                && this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING);
     }
 
     private void updateDetail() {

@@ -46,6 +46,7 @@ public final class ReturnPositionAi {
     private final ClearBlockAi clearBlockAi;
     private final PillarUpAi pillarUpAi;
     private final PathNavigationAi pathNavigationAi;
+    private final PathStuckFallbackAi pathStuckFallbackAi;
 
     private BlockPos target;
     private int repathTicks;
@@ -66,6 +67,7 @@ public final class ReturnPositionAi {
         this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
         this.pillarUpAi = new PillarUpAi(playerNpc, this.toolAi, Items.DIRT, Blocks.DIRT.defaultBlockState());
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
+        this.pathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
     }
 
     public void start(BlockPos target) {
@@ -81,9 +83,21 @@ public final class ReturnPositionAi {
         this.lastPillarDebug = "";
         this.clearBlockAi.stop();
         this.pillarUpAi.clear();
+        this.pathStuckFallbackAi.stop();
     }
 
     public void tick(ServerLevel serverLevel, BlockPos target, Predicate<BlockPos> protectedBlock, String moveDetail, String clearDetail) {
+        this.tick(serverLevel, target, protectedBlock, moveDetail, clearDetail, false);
+    }
+
+    public void tick(
+            ServerLevel serverLevel,
+            BlockPos target,
+            Predicate<BlockPos> protectedBlock,
+            String moveDetail,
+            String clearDetail,
+            boolean allowPathStuckFallback
+    ) {
         if (target == null) {
             return;
         }
@@ -95,6 +109,11 @@ public final class ReturnPositionAi {
         }
         if (this.failedRouteRelocateCooldownTicks > 0) {
             this.failedRouteRelocateCooldownTicks--;
+        }
+
+        if (this.pathStuckFallbackAi.tick(serverLevel, moveDetail)) {
+            this.detail = this.pathStuckFallbackAi.detail(moveDetail);
+            return;
         }
 
         if (this.clearBlockAi.isRunning()) {
@@ -204,6 +223,13 @@ public final class ReturnPositionAi {
             if (this.tryMoveToFailedRouteRelocation(serverLevel, target, moveDetail)) {
                 return;
             }
+            if (allowPathStuckFallback
+                    && this.pathStuckFallbackAi.watchAndStart(serverLevel, target, target, moveDetail, protectedBlock)) {
+                this.detail = this.pathStuckFallbackAi.detail(moveDetail);
+                this.repathTicks = REPATH_DELAY_TICKS;
+                this.routeAttempts = CLEAR_ATTEMPTS_BEFORE_BREAKING;
+                return;
+            }
             this.detail = moveDetail + " (moving around after blocked return; " + this.debugText("searching route") + ")";
             this.repathTicks = REPATH_DELAY_TICKS;
             this.routeAttempts = CLEAR_ATTEMPTS_BEFORE_BREAKING;
@@ -222,6 +248,7 @@ public final class ReturnPositionAi {
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
         this.pillarUpAi.clear();
+        this.pathStuckFallbackAi.stop();
         this.target = null;
         this.repathTicks = 0;
         this.routeAttempts = 0;

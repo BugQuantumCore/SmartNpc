@@ -20,11 +20,13 @@ public class BasicPlayerNpcPatch<T extends PathfinderMob> extends ZombiePatch<T>
         super.initAnimator(animator);
         animator.addLivingAnimation(LivingMotions.IDLE, Animations.BIPED_IDLE);
         animator.addLivingAnimation(LivingMotions.WALK, Animations.BIPED_WALK);
+        animator.addLivingAnimation(LivingMotions.RUN, Animations.BIPED_RUN);
         animator.addLivingAnimation(LivingMotions.CHASE, Animations.BIPED_RUN);
         animator.addLivingAnimation(LivingMotions.SNEAK, Animations.BIPED_SNEAK);
         animator.addLivingAnimation(LivingMotions.KNEEL, Animations.BIPED_KNEEL);
         animator.addLivingAnimation(LivingMotions.FALL, Animations.BIPED_FALL);
         animator.addLivingAnimation(LivingMotions.MOUNT, Animations.BIPED_MOUNT);
+        animator.addLivingAnimation(LivingMotions.SLEEP, Animations.BIPED_SLEEPING);
         animator.addLivingAnimation(LivingMotions.DEATH, Animations.BIPED_DEATH);
         if (EpicFightCloneAnimations.DIG_MAINHAND != null) {
             animator.addLivingAnimation(LivingMotions.DIGGING, EpicFightCloneAnimations.DIG_MAINHAND);
@@ -35,12 +37,18 @@ public class BasicPlayerNpcPatch<T extends PathfinderMob> extends ZombiePatch<T>
     public void updateMotion(boolean considerInaction) {
         super.updateMotion(considerInaction);
         if (this.getOriginal() instanceof PlayerNpcEntity playerNpc) {
-            if (playerNpc.isEpicFightDigging()) {
+            if (playerNpc.isSleeping()) {
+                this.currentLivingMotion = LivingMotions.SLEEP;
+                this.currentCompositeMotion = LivingMotions.SLEEP;
+            } else if (playerNpc.isEpicFightDigging()) {
                 this.currentLivingMotion = LivingMotions.DIGGING;
                 this.currentCompositeMotion = LivingMotions.DIGGING;
             } else if ((playerNpc.isShiftKeyDown() || playerNpc.isCrouching()) && canApplyCrouchMotion()) {
                 this.currentLivingMotion = isMovingMotion() ? LivingMotions.SNEAK : LivingMotions.KNEEL;
                 this.currentCompositeMotion = this.currentLivingMotion;
+            } else if (playerNpc.isSprinting() && isMovingMotion()) {
+                this.currentLivingMotion = LivingMotions.RUN;
+                this.currentCompositeMotion = LivingMotions.RUN;
             }
         }
     }
@@ -48,11 +56,13 @@ public class BasicPlayerNpcPatch<T extends PathfinderMob> extends ZombiePatch<T>
     private boolean canApplyCrouchMotion() {
         return this.currentLivingMotion == LivingMotions.IDLE
                 || this.currentLivingMotion == LivingMotions.WALK
+                || this.currentLivingMotion == LivingMotions.RUN
                 || this.currentLivingMotion == LivingMotions.CHASE;
     }
 
     private boolean isMovingMotion() {
         return this.currentLivingMotion == LivingMotions.WALK
+                || this.currentLivingMotion == LivingMotions.RUN
                 || this.currentLivingMotion == LivingMotions.CHASE;
     }
 

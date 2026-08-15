@@ -6,6 +6,7 @@ import com.pla.smart_npc.entity.PlayerNpcFishingBobberEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.init.SmartNpcModEntities;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
@@ -14,6 +15,7 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.goal.Goal;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.ClipContext;
@@ -78,6 +80,18 @@ public class PlayerNpcFishingGoal extends Goal {
 
     public static boolean shouldExploreForFishingWater(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         return isReadyForFishingWork(playerNpc, serverLevel);
+    }
+
+    public static boolean shouldStrollForMissingFishingString(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return playerNpc != null
+                && serverLevel != null
+                && playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING)
+                && !serverLevel.isNight()
+                && playerNpc.getUpwardEscapeTarget() == null
+                && !hasFishingRod(playerNpc)
+                && PlayerNpcCraftingUtil.countItem(playerNpc.getInventory(), stack -> stack.is(Items.STRING)) < 2
+                && !playerNpc.shouldPrioritizeLogGathering()
+                && !playerNpc.shouldPrioritizeCobblestoneGathering();
     }
 
     public static boolean hasNearbyFishingSpot(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {

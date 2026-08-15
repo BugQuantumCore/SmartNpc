@@ -5,6 +5,7 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.PillarUpAi;
 import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
@@ -42,8 +43,11 @@ import java.util.function.Predicate;
 
 public class GatherLogsGoal extends Goal {
     private static final int TREE_SEARCH_RADIUS = 32;
+    private static final int NEARBY_LOG_TARGET_SEARCH_RADIUS = 16;
+    private static final int NEARBY_LOG_TARGET_CACHE_TICKS = 20 * 2;
     private static final int DIRT_SEARCH_RADIUS = 10;
     private static final int MAX_LOG_PATH_CHECKS = 32;
+    private static final int MAX_NEARBY_LOG_PATH_CHECKS = 8;
     private static final int MAX_DIRT_PATH_CHECKS = 64;
     private static final int MAX_GATHER_TICKS = 20 * 30;
     private static final int REQUIRED_BREAK_TICKS = 60;
@@ -75,6 +79,7 @@ public class GatherLogsGoal extends Goal {
     private final BreakingBlockAi breakingBlockAi;
     private final ClearBlockAi clearBlockAi;
     private final PathNavigationAi pathNavigationAi;
+    private final PathStuckFallbackAi pathStuckFallbackAi;
     private final PillarUpAi pillarUpAi;
     private final WaterEscapeAi waterEscapeAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
@@ -87,10 +92,14 @@ public class GatherLogsGoal extends Goal {
     private int repathTicks;
     private int descentTicks;
     private int sameClearTargetTicks;
+    private int nearbyUsableLogTargetCacheUntilTick;
+    private boolean nearbyUsableLogTargetCacheResult;
+    private BlockPos nearbyUsableLogTargetCachePos;
     private boolean gatheringDirt;
     private boolean searchingDirtForPillar;
     private boolean descendingFromPillar;
     private String pillarTraceDetail = "";
+    private String pathFallbackDetailPrefix = "gathering logs";
 
     public GatherLogsGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -99,13 +108,30 @@ public class GatherLogsGoal extends Goal {
         this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
         this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
+        this.pathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
         this.pillarUpAi = new PillarUpAi(playerNpc, this.toolAi, Items.DIRT, Blocks.DIRT.defaultBlockState());
         this.waterEscapeAi = new WaterEscapeAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
     public boolean hasNearbyUsableLogTarget(ServerLevel serverLevel) {
-        return hasNearbyLogTarget(this.playerNpc, serverLevel, this::isIgnoredLogTarget);
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.nearbyUsableLogTargetCachePos != null
+                && this.playerNpc.tickCount < this.nearbyUsableLogTargetCacheUntilTick
+                && this.nearbyUsableLogTargetCachePos.distSqr(feet) <= 4.0D * 4.0D) {
+            return this.nearbyUsableLogTargetCacheResult;
+        }
+
+        boolean result = hasNearbyLogTarget(
+                this.playerNpc,
+                serverLevel,
+                this::isIgnoredLogTarget,
+                NEARBY_LOG_TARGET_SEARCH_RADIUS,
+                MAX_NEARBY_LOG_PATH_CHECKS);
+        this.nearbyUsableLogTargetCachePos = feet.immutable();
+        this.nearbyUsableLogTargetCacheResult = result;
+        this.nearbyUsableLogTargetCacheUntilTick = this.playerNpc.tickCount + NEARBY_LOG_TARGET_CACHE_TICKS;
+        return result;
     }
 
     public static boolean hasNearbyLogTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -113,10 +139,20 @@ public class GatherLogsGoal extends Goal {
     }
 
     private static boolean hasNearbyLogTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel, Predicate<BlockPos> ignoredLogPos) {
+        return hasNearbyLogTarget(playerNpc, serverLevel, ignoredLogPos, TREE_SEARCH_RADIUS, MAX_LOG_PATH_CHECKS);
+    }
+
+    private static boolean hasNearbyLogTarget(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            Predicate<BlockPos> ignoredLogPos,
+            int searchRadius,
+            int maxPathChecks
+    ) {
         Optional<Tree> tree = TreeAi.findNearest(
                 serverLevel,
                 playerNpc.blockPosition(),
-                TREE_SEARCH_RADIUS,
+                searchRadius,
                 pos -> !isProtectedHomeLogTarget(playerNpc, pos)
                         && !ignoredLogPos.test(pos)
         );
@@ -138,7 +174,7 @@ public class GatherLogsGoal extends Goal {
             if (!currentStandProtected && canPillarTowardFrom(playerNpc.blockPosition(), candidate)) {
                 return true;
             }
-            if (pathChecks++ >= MAX_LOG_PATH_CHECKS) {
+            if (pathChecks++ >= maxPathChecks) {
                 break;
             }
             if (findStandPos(playerNpc, serverLevel, candidate).isPresent()) {
@@ -165,18 +201,38 @@ public class GatherLogsGoal extends Goal {
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
-        if (this.shouldStayHomeForWeather(serverLevel)
-                || ReturnHomeGoal.shouldSuppressExplorationForHome(this.playerNpc, serverLevel)
-                || GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
-                || !this.needsLogs(serverLevel)
-                || !this.isSupplyLogJob()
+        if (this.shouldStayHomeForWeather(serverLevel)) {
+            this.traceCanUseBlocked("gather logs blocked: weather/home shelter");
+            return false;
+        }
+        if (ReturnHomeGoal.shouldSuppressExplorationForHome(this.playerNpc, serverLevel)) {
+            this.traceCanUseBlocked("gather logs blocked: return home priority");
+            return false;
+        }
+        if (GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel)) {
+            this.traceCanUseBlocked("gather logs blocked: stone supply phase");
+            return false;
+        }
+        if (!this.needsLogs(serverLevel)) {
+            this.traceCanUseBlocked("gather logs blocked: logs not needed");
+            return false;
+        }
+        if (!this.isSupplyLogJob()
                 && (TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
                 || BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel))) {
+            this.traceCanUseBlocked("gather logs blocked: build work ready");
             return false;
         }
 
         this.prepareLogQueue(serverLevel);
-        return this.selectNextTarget(serverLevel);
+        boolean selected = this.selectNextTarget(serverLevel);
+        if (!selected) {
+            this.cacheNearbyUsableLogTarget(false);
+            this.traceCanUseBlocked("gather logs blocked: no usable log target");
+        } else {
+            this.cacheNearbyUsableLogTarget(true);
+        }
+        return selected;
     }
 
     @Override
@@ -217,6 +273,11 @@ public class GatherLogsGoal extends Goal {
             return;
         }
 
+        if (this.tickPathStuckFallback(serverLevel)) {
+            this.updateDetail();
+            return;
+        }
+
         if (this.tickHelperAi(serverLevel)) {
             this.updateDetail();
             return;
@@ -231,6 +292,7 @@ public class GatherLogsGoal extends Goal {
         if (this.gatherTicks >= MAX_GATHER_TICKS && this.isStandingOnProtectedPillar()) {
             this.breakingBlockAi.stop();
             this.clearBlockAi.stop();
+            this.pathStuckFallbackAi.stop();
             this.pillarUpAi.clear();
             if (this.tryStartPillarDescent(serverLevel)) {
                 this.updateDetail();
@@ -282,10 +344,22 @@ public class GatherLogsGoal extends Goal {
 
         if (this.distanceToTargetSqr() > BREAK_DISTANCE_SQR) {
             this.breakingBlockAi.stop();
+            if (this.watchStandPathFallback(serverLevel)) {
+                this.updateDetail();
+                return;
+            }
             if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
                 if (!this.moveToStandPos()) {
                     if (!this.gatheringDirt
                             && this.tryMoveToBetterPillarBase(serverLevel, this.playerNpc.blockPosition(), "stand path failed")) {
+                        this.repathTicks = REPATH_INTERVAL_TICKS;
+                        this.updateDetail();
+                        return;
+                    }
+                    if (this.tryStartPathStuckFallback(
+                            serverLevel,
+                            this.standPos == null ? this.targetPos : this.standPos,
+                            "gathering logs")) {
                         this.repathTicks = REPATH_INTERVAL_TICKS;
                         this.updateDetail();
                         return;
@@ -316,6 +390,7 @@ public class GatherLogsGoal extends Goal {
         this.toolAi.restoreMainHand();
         this.clearBlockAi.stop();
         this.breakingBlockAi.stop();
+        this.pathStuckFallbackAi.stop();
         this.pillarUpAi.clear();
         this.waterEscapeAi.stop();
         if (!this.playerNpc.level().isClientSide) {
@@ -331,10 +406,13 @@ public class GatherLogsGoal extends Goal {
         this.repathTicks = 0;
         this.descentTicks = 0;
         this.sameClearTargetTicks = 0;
+        this.nearbyUsableLogTargetCacheUntilTick = 0;
+        this.nearbyUsableLogTargetCachePos = null;
         this.gatheringDirt = false;
         this.searchingDirtForPillar = false;
         this.descendingFromPillar = false;
         this.pillarTraceDetail = "";
+        this.pathFallbackDetailPrefix = "gathering logs";
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
     }
@@ -349,6 +427,65 @@ public class GatherLogsGoal extends Goal {
         if (result == WaterEscapeAi.TickResult.RUNNING && !this.waterEscapeAi.detail().isBlank()) {
             this.playerNpc.setCurrentAiDetail(this.waterEscapeAi.detail());
         }
+        return true;
+    }
+
+    private boolean tickPathStuckFallback(ServerLevel serverLevel) {
+        if (!this.pathStuckFallbackAi.tick(serverLevel, this.pathFallbackDetailPrefix)) {
+            return false;
+        }
+        this.pillarTraceDetail = this.pathStuckFallbackAi.detail(this.pathFallbackDetailPrefix);
+        return true;
+    }
+
+    private boolean watchStandPathFallback(ServerLevel serverLevel) {
+        if (this.standPos == null || this.gatheringDirt) {
+            return false;
+        }
+        return this.watchPathStuckFallback(serverLevel, this.standPos, this.standPos, "gathering logs");
+    }
+
+    private boolean watchPathStuckFallback(
+            ServerLevel serverLevel,
+            BlockPos routeTarget,
+            BlockPos directionTarget,
+            String detailPrefix
+    ) {
+        if (routeTarget == null) {
+            return false;
+        }
+
+        this.pathFallbackDetailPrefix = detailPrefix;
+        if (!this.pathStuckFallbackAi.watchAndStart(
+                serverLevel,
+                routeTarget,
+                directionTarget == null ? routeTarget : directionTarget,
+                detailPrefix,
+                pos -> isProtectedHomeStandPos(this.playerNpc, pos)
+        )) {
+            return false;
+        }
+
+        this.pillarTraceDetail = this.pathStuckFallbackAi.detail(detailPrefix);
+        return true;
+    }
+
+    private boolean tryStartPathStuckFallback(ServerLevel serverLevel, BlockPos directionTarget, String detailPrefix) {
+        if (directionTarget == null) {
+            return false;
+        }
+
+        this.pathFallbackDetailPrefix = detailPrefix;
+        if (!this.pathStuckFallbackAi.start(
+                serverLevel,
+                directionTarget,
+                detailPrefix,
+                pos -> isProtectedHomeStandPos(this.playerNpc, pos)
+        )) {
+            return false;
+        }
+
+        this.pillarTraceDetail = this.pathStuckFallbackAi.detail(detailPrefix);
         return true;
     }
 
@@ -435,11 +572,22 @@ public class GatherLogsGoal extends Goal {
                 && (serverLevel.isNight() || serverLevel.isThundering());
     }
 
+    private void traceCanUseBlocked(String detail) {
+        this.playerNpc.setIdleTraceDetail(detail, 20 * 2);
+    }
+
+    private void cacheNearbyUsableLogTarget(boolean result) {
+        this.nearbyUsableLogTargetCachePos = this.playerNpc.blockPosition().immutable();
+        this.nearbyUsableLogTargetCacheResult = result;
+        this.nearbyUsableLogTargetCacheUntilTick = this.playerNpc.tickCount + NEARBY_LOG_TARGET_CACHE_TICKS;
+    }
+
     private boolean selectNextTarget(ServerLevel serverLevel) {
         this.gatheringDirt = false;
         this.searchingDirtForPillar = false;
         this.clearBlockAi.stop();
         this.breakingBlockAi.stop();
+        this.pathStuckFallbackAi.stop();
         this.pillarUpAi.clear();
         this.standPos = null;
         this.descentTargetPos = null;
@@ -1313,6 +1461,10 @@ public class GatherLogsGoal extends Goal {
     }
 
     private void updateDetail() {
+        if (this.pathStuckFallbackAi.isRunning()) {
+            this.playerNpc.setCurrentAiDetail(this.pathStuckFallbackAi.detail(this.pathFallbackDetailPrefix));
+            return;
+        }
         if (this.clearBlockAi.isRunning()) {
             this.playerNpc.setCurrentAiDetail(this.clearBlockAi.detail());
             return;

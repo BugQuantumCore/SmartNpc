@@ -29,8 +29,10 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -72,6 +74,8 @@ public class GatherStoneGoal extends Goal {
     private static final int STONE_SAFE_STAND_EGRESS_VERTICAL_UP = 2;
     private static final int STONE_SAFE_STAND_EGRESS_RANDOM_POOL = 8;
     private static final int STONE_SAFE_STAND_EGRESS_PATH_CHECKS = 18;
+    private static final int STONE_SAFE_STAND_REACH_TIMEOUT_TICKS = 20 * 10;
+    private static final int FAILED_STONE_SAFE_STAND_SKIP_TICKS = 20 * 12;
     private static final int STONE_WORK_NO_PROGRESS_TICKS = 20 * 5;
     private static final int IDLE_DIAGNOSTIC_TICKS = 20 * 8;
 
@@ -94,6 +98,8 @@ public class GatherStoneGoal extends Goal {
     private boolean phaseStillActive = true;
     private boolean clearedAccessForTarget;
     private BlockPos stoneEgressPos;
+    private BlockPos stoneEgressWatchPos;
+    private int stoneEgressReachTicks;
     private BlockPos temporarilyBlockedTarget;
     private BlockPos lastStoneWorkProgressPos;
     private long temporarilyBlockedTargetUntilTick;
@@ -101,6 +107,7 @@ public class GatherStoneGoal extends Goal {
     private int stoneWorkNoProgressTicks;
     private String lastPhaseDiagnostic = "";
     private final Set<BlockPos> skippedAccessClearBlocks = new HashSet<>();
+    private final Map<BlockPos, Long> temporarilyBlockedStoneEgress = new HashMap<>();
 
     public GatherStoneGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -260,6 +267,7 @@ public class GatherStoneGoal extends Goal {
         }
 
         this.gatherTicks++;
+        this.tickSafeStoneStandReachTimeout(serverLevel);
         if (this.tickWaterEscape(serverLevel)) {
             return;
         }
@@ -385,7 +393,7 @@ public class GatherStoneGoal extends Goal {
         }
         this.targetPos = null;
         this.standPos = null;
-        this.stoneEgressPos = null;
+        this.clearStoneEgressTarget();
         this.stoneQueue.clear();
         this.gatherTicks = 0;
         this.repathTicks = 0;
@@ -394,6 +402,7 @@ public class GatherStoneGoal extends Goal {
         this.resetStoneWorkProgressMonitor();
         this.lastPhaseDiagnostic = "";
         this.skippedAccessClearBlocks.clear();
+        this.temporarilyBlockedStoneEgress.clear();
         this.phaseRecheckTicks = 0;
         this.phaseStillActive = true;
         this.clearedAccessForTarget = false;
@@ -482,7 +491,7 @@ public class GatherStoneGoal extends Goal {
 
         this.targetPos = null;
         this.standPos = null;
-        this.stoneEgressPos = null;
+        this.clearStoneEgressTarget();
         this.failedAccessAttempts = 0;
         this.skippedAccessClearBlocks.clear();
         this.clearedAccessForTarget = false;
@@ -760,7 +769,7 @@ public class GatherStoneGoal extends Goal {
 
     private boolean handleUnsafeStandBeforeStone(ServerLevel serverLevel) {
         if (!isUnsafeStoneWorkLocation(this.playerNpc, serverLevel, this.playerNpc.blockPosition())) {
-            this.stoneEgressPos = null;
+            this.clearStoneEgressTarget();
             return false;
         }
 
@@ -771,12 +780,12 @@ public class GatherStoneGoal extends Goal {
             return true;
         }
 
-        this.stoneEgressPos = null;
+        this.clearStoneEgressTarget();
         if (isInsideHomeFootprint(this.playerNpc, this.playerNpc.blockPosition())) {
             this.playerNpc.getNavigation().stop();
             this.targetPos = null;
             this.standPos = null;
-            this.stoneEgressPos = null;
+            this.clearStoneEgressTarget();
             this.stoneQueue.clear();
             this.clearedAccessForTarget = false;
             this.playerNpc.setCurrentAiDetail("leaving home before stone blocked "
@@ -802,18 +811,24 @@ public class GatherStoneGoal extends Goal {
     }
 
     private boolean moveToSafeStoneStand(ServerLevel serverLevel, boolean force) {
+        this.expireTemporarilyBlockedStoneEgress(serverLevel);
         if (!force && !isUnsafeStoneWorkLocation(this.playerNpc, serverLevel, this.playerNpc.blockPosition())) {
-            this.stoneEgressPos = null;
+            this.clearStoneEgressTarget();
             return false;
         }
 
-        if (this.stoneEgressPos == null
-                || !isSafeStoneStandAt(this.playerNpc, serverLevel, this.stoneEgressPos)) {
-            this.stoneEgressPos = force
+        if (this.stoneEgressPos != null
+                && (this.isStoneEgressTemporarilyBlocked(serverLevel, this.stoneEgressPos)
+                || !isSafeStoneStandAt(this.playerNpc, serverLevel, this.stoneEgressPos))) {
+            this.clearStoneEgressTarget();
+        }
+
+        if (this.stoneEgressPos == null) {
+            Optional<BlockPos> selected = force
                     ? this.findNearbySafeStoneStand(serverLevel)
                     .or(() -> this.findSafeStoneStandEgressPos(serverLevel))
-                    .orElse(null)
-                    : this.findSafeStoneStandEgressPos(serverLevel).orElse(null);
+                    : this.findSafeStoneStandEgressPos(serverLevel);
+            this.setStoneEgressTarget(selected.orElse(null));
         }
         if (this.stoneEgressPos == null) {
             return false;
@@ -825,7 +840,7 @@ public class GatherStoneGoal extends Goal {
                 this.stoneEgressPos.getY(),
                 this.stoneEgressPos.getZ() + 0.5D
         ) <= HOME_EGRESS_REACHED_DISTANCE_SQR) {
-            this.stoneEgressPos = null;
+            this.clearStoneEgressTarget();
             return false;
         }
 
@@ -844,9 +859,63 @@ public class GatherStoneGoal extends Goal {
                 MAX_STAND_SAFE_DROP_BLOCKS
         );
         if (!moved) {
-            this.stoneEgressPos = null;
+            if (this.shouldRetrySafeStoneStandEgress()) {
+                this.markStoneEgressTemporarilyBlocked(serverLevel, this.stoneEgressPos, "safe stone stand path failed");
+            }
+            this.clearStoneEgressTarget();
         }
         return moved;
+    }
+
+    private void tickSafeStoneStandReachTimeout(ServerLevel serverLevel) {
+        this.expireTemporarilyBlockedStoneEgress(serverLevel);
+        if (!this.shouldRetrySafeStoneStandEgress()) {
+            this.resetStoneEgressProgress();
+            return;
+        }
+        if (this.stoneEgressPos == null) {
+            this.resetStoneEgressProgress();
+            return;
+        }
+
+        if (this.playerNpc.distanceToSqr(
+                this.stoneEgressPos.getX() + 0.5D,
+                this.stoneEgressPos.getY(),
+                this.stoneEgressPos.getZ() + 0.5D
+        ) <= HOME_EGRESS_REACHED_DISTANCE_SQR) {
+            return;
+        }
+
+        if (this.stoneEgressWatchPos == null || !this.stoneEgressWatchPos.equals(this.stoneEgressPos)) {
+            this.stoneEgressWatchPos = this.stoneEgressPos.immutable();
+            this.stoneEgressReachTicks = 0;
+            return;
+        }
+
+        if (++this.stoneEgressReachTicks < STONE_SAFE_STAND_REACH_TIMEOUT_TICKS) {
+            return;
+        }
+
+        BlockPos timedOut = this.stoneEgressPos.immutable();
+        this.markStoneEgressTemporarilyBlocked(serverLevel, timedOut, "safe stone stand timeout");
+        this.clearStoneEgressTarget();
+        this.playerNpc.getNavigation().stop();
+        this.moveToSafeStoneStand(serverLevel, true);
+    }
+
+    private void setStoneEgressTarget(BlockPos pos) {
+        this.stoneEgressPos = pos == null ? null : pos.immutable();
+        this.resetStoneEgressProgress();
+    }
+
+    private void clearStoneEgressTarget() {
+        this.stoneEgressPos = null;
+        this.resetStoneEgressProgress();
+    }
+
+    private void resetStoneEgressProgress() {
+        this.stoneEgressWatchPos = null;
+        this.stoneEgressReachTicks = 0;
     }
 
     private Optional<BlockPos> findSafeStoneStandEgressPos(ServerLevel serverLevel) {
@@ -885,7 +954,8 @@ public class GatherStoneGoal extends Goal {
                 }
                 for (int y = maxY; y >= minY; y--) {
                     BlockPos candidate = new BlockPos(x, y, z);
-                    if (isSafeStoneStandAt(this.playerNpc, serverLevel, candidate)) {
+                    if (isSafeStoneStandAt(this.playerNpc, serverLevel, candidate)
+                            && !this.isStoneEgressTemporarilyBlocked(serverLevel, candidate)) {
                         candidates.add(candidate.immutable());
                     }
                 }
@@ -918,7 +988,8 @@ public class GatherStoneGoal extends Goal {
                 }
                 for (int dy = -STONE_SAFE_STAND_EGRESS_VERTICAL_DOWN; dy <= STONE_SAFE_STAND_EGRESS_VERTICAL_UP; dy++) {
                     BlockPos candidate = feet.offset(dx, dy, dz);
-                    if (isSafeStoneStandAt(this.playerNpc, serverLevel, candidate)) {
+                    if (isSafeStoneStandAt(this.playerNpc, serverLevel, candidate)
+                            && !this.isStoneEgressTemporarilyBlocked(serverLevel, candidate)) {
                         candidates.add(candidate.immutable());
                     }
                 }
@@ -1028,6 +1099,7 @@ public class GatherStoneGoal extends Goal {
                     + this.stoneEgressPos.getX() + " "
                     + this.stoneEgressPos.getY() + " "
                     + this.stoneEgressPos.getZ()
+                    + this.safeStoneStandTimeoutDetail()
                     + " " + ResourceAi.countStone(this.playerNpc) + "/" + this.playerNpc.getStoneSupplyGoal());
             return;
         }
@@ -1040,6 +1112,24 @@ public class GatherStoneGoal extends Goal {
                 + this.targetPos.getY() + " "
                 + this.targetPos.getZ()
                 + " " + ResourceAi.countStone(this.playerNpc) + "/" + this.playerNpc.getStoneSupplyGoal());
+    }
+
+    private String safeStoneStandTimeoutDetail() {
+        return this.shouldRetrySafeStoneStandEgress()
+                ? " timeout=" + this.safeStoneStandTimeoutSecondsRemaining() + "s"
+                : "";
+    }
+
+    private int safeStoneStandTimeoutSecondsRemaining() {
+        if (this.stoneEgressPos == null) {
+            return 0;
+        }
+        int remainingTicks = Math.max(0, STONE_SAFE_STAND_REACH_TIMEOUT_TICKS - this.stoneEgressReachTicks);
+        return (remainingTicks + 19) / 20;
+    }
+
+    private boolean shouldRetrySafeStoneStandEgress() {
+        return this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING);
     }
 
     private boolean recoverIfStoneWorkStuck(ServerLevel serverLevel) {
@@ -1391,6 +1481,37 @@ public class GatherStoneGoal extends Goal {
         }
         this.temporarilyBlockedTarget = this.targetPos.immutable();
         this.temporarilyBlockedTargetUntilTick = serverLevel.getGameTime() + FAILED_TARGET_SKIP_TICKS;
+    }
+
+    private void markStoneEgressTemporarilyBlocked(ServerLevel serverLevel, BlockPos pos, String reason) {
+        if (pos == null) {
+            return;
+        }
+        BlockPos blocked = pos.immutable();
+        this.temporarilyBlockedStoneEgress.put(
+                blocked,
+                serverLevel.getGameTime() + FAILED_STONE_SAFE_STAND_SKIP_TICKS
+        );
+        this.setStoneDiagnostic(reason + " stand=" + posText(blocked)
+                + " retryAfter=" + (FAILED_STONE_SAFE_STAND_SKIP_TICKS / 20) + "s"
+                + " target=" + posText(this.targetPos));
+    }
+
+    private boolean isStoneEgressTemporarilyBlocked(ServerLevel serverLevel, BlockPos pos) {
+        if (pos == null) {
+            return false;
+        }
+        this.expireTemporarilyBlockedStoneEgress(serverLevel);
+        return this.temporarilyBlockedStoneEgress.containsKey(pos.immutable());
+    }
+
+    private void expireTemporarilyBlockedStoneEgress(ServerLevel serverLevel) {
+        if (this.temporarilyBlockedStoneEgress.isEmpty()) {
+            return;
+        }
+
+        long now = serverLevel.getGameTime();
+        this.temporarilyBlockedStoneEgress.entrySet().removeIf(entry -> entry.getValue() <= now);
     }
 
     private static int horizontalDistanceSqr(BlockPos first, BlockPos second) {

@@ -29,9 +29,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.function.Predicate;
 
@@ -97,16 +99,16 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 && PlayerNpcBuildMaterialUtil.needsNonPrimaryBuildMaterial(serverLevel, playerNpc);
     }
 
-    public static boolean hasNearbyGatherTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        Optional<MissingBuildMaterialNeed> need = PlayerNpcBuildMaterialUtil.findMissingBuildMaterialNeed(serverLevel, playerNpc);
+    public boolean hasNearbyActionableGatherTarget(ServerLevel serverLevel) {
+        Optional<MissingBuildMaterialNeed> need = PlayerNpcBuildMaterialUtil.findMissingBuildMaterialNeed(serverLevel, this.playerNpc);
         if (need.isEmpty() || !isGatherableNeed(need.get().kind())) {
             return false;
         }
-        if (need.get().kind() == MissingBuildMaterialKind.BED) {
-            return findNearestSheep(playerNpc, serverLevel).isPresent()
-                    || findTargetBlock(playerNpc, serverLevel, need.get()).isPresent();
+        if (need.get().kind() == MissingBuildMaterialKind.BED
+                && findNearestSheep(this.playerNpc, serverLevel).isPresent()) {
+            return true;
         }
-        return findTargetBlock(playerNpc, serverLevel, need.get()).isPresent();
+        return this.findActionableBlockTarget(serverLevel, need.get()).isPresent();
     }
 
     @Override
@@ -143,14 +145,15 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         this.sheepApproachPos = null;
         this.sheepTarget = null;
         this.sheepRouteFailures = 0;
-        if (this.need.kind() == MissingBuildMaterialKind.BED) {
-            return this.selectBedGatherTarget(serverLevel);
+        Optional<ActionableBlockTarget> blockTarget = this.findActionableBlockTarget(serverLevel, this.need);
+        if (blockTarget.isPresent()) {
+            this.targetPos = blockTarget.get().target();
+            this.standPos = blockTarget.get().stand().orElse(null);
+            return true;
         }
-
-        this.targetPos = findTargetBlock(this.playerNpc, serverLevel, this.need).orElse(null);
-        if (this.targetPos != null) {
-            this.standPos = this.findStandPos(serverLevel, this.targetPos).orElse(null);
-            return this.canBreakFromCurrentPosition(this.targetPos) || this.standPos != null;
+        if (this.need.kind() == MissingBuildMaterialKind.BED) {
+            this.sheepTarget = findNearestSheep(this.playerNpc, serverLevel).orElse(null);
+            return this.sheepTarget != null;
         }
         return false;
     }
@@ -168,7 +171,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 && !shouldStayHomeForWeather(serverLevel)
                 && needsMissingBuildMaterial(this.playerNpc, serverLevel)
                 && (this.targetPos != null && this.isValidTarget(serverLevel, this.targetPos)
-                || this.sheepTarget != null && this.sheepTarget.isAlive());
+                || isUsableSheep(this.sheepTarget));
     }
 
     @Override
@@ -266,7 +269,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     }
 
     private void tickSheepTarget(ServerLevel serverLevel) {
-        if (this.sheepTarget == null || !this.sheepTarget.isAlive()) {
+        if (!isUsableSheep(this.sheepTarget)) {
             this.finishGathering();
             return;
         }
@@ -284,13 +287,13 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 }
                 this.sheepRouteFailures++;
                 if (this.sheepRouteFailures >= SHEEP_ROUTE_FAILURES_BEFORE_CLEAR
-                        && this.startClearingSheepRoute(serverLevel)) {
-                    this.repathTicks = REPATH_INTERVAL_TICKS;
-                    return;
-                }
-                if (this.sheepRouteFailures >= SHEEP_ROUTE_FAILURES_BEFORE_ESCAPE
                         && this.requestSheepApproachEscape(serverLevel)) {
                     this.finishGathering();
+                    return;
+                }
+                if (this.sheepRouteFailures >= SHEEP_ROUTE_FAILURES_BEFORE_CLEAR
+                        && this.startClearingSheepRoute(serverLevel)) {
+                    this.repathTicks = REPATH_INTERVAL_TICKS;
                     return;
                 }
                 if (this.sheepRouteFailures > SHEEP_ROUTE_FAILURES_BEFORE_ESCAPE) {
@@ -343,7 +346,18 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 SHEEP_LOCAL_ROUTE_VERTICAL_DOWN,
                 SHEEP_LOCAL_ROUTE_VERTICAL_UP);
         if (!moved) {
-            moved = this.playerNpc.getNavigation().moveTo(this.sheepTarget, this.speed);
+            BlockPos sheepPos = this.sheepTarget.blockPosition();
+            Path directPath = this.playerNpc.getNavigation().createPath(this.sheepTarget, 0);
+            boolean validDirectPath = directPath != null
+                    && directPath.canReach()
+                    && (this.pathNavigationAi.isValidPathTo(sheepPos, directPath)
+                    || (this.sheepApproachPos != null
+                    && this.pathNavigationAi.isValidPathTo(this.sheepApproachPos, directPath)));
+            if (validDirectPath) {
+                moved = this.playerNpc.getNavigation().moveTo(directPath, this.speed);
+            } else {
+                this.playerNpc.getNavigation().stop();
+            }
         }
         if (moved) {
             this.sheepRouteFailures = 0;
@@ -429,36 +443,6 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         return state != null && !state.isAir();
     }
 
-    private boolean selectBedGatherTarget(ServerLevel serverLevel) {
-        Optional<BlockPos> bedTarget = findTargetBlock(this.playerNpc, serverLevel, this.need);
-        Sheep nearbySheep = findNearestSheep(this.playerNpc, serverLevel).orElse(null);
-        Optional<BlockPos> bedStand = Optional.empty();
-        boolean canGatherBed = false;
-        if (bedTarget.isPresent()) {
-            BlockPos bedPos = bedTarget.get();
-            bedStand = this.findStandPos(serverLevel, bedPos);
-            canGatherBed = this.canBreakFromCurrentPosition(bedPos) || bedStand.isPresent();
-        }
-
-        if (canGatherBed) {
-            this.targetPos = bedTarget.get();
-            this.standPos = bedStand.orElse(null);
-            return true;
-        }
-        if (nearbySheep != null) {
-            this.sheepTarget = nearbySheep;
-            this.sheepRouteFailures = 0;
-            this.sheepApproachPos = null;
-            return true;
-        }
-        if (canGatherBed) {
-            this.targetPos = bedTarget.get();
-            this.standPos = bedStand.orElse(null);
-            return true;
-        }
-        return false;
-    }
-
     private void finishGathering() {
         this.finishGathering(20 + this.playerNpc.getRandom().nextInt(20));
     }
@@ -484,24 +468,85 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     }
 
     private Optional<BlockPos> findStandPos(ServerLevel serverLevel, BlockPos target) {
+        return findStandPos(this.playerNpc, this.pathNavigationAi, serverLevel, target);
+    }
+
+    private static Optional<BlockPos> findStandPos(
+            PlayerNpcEntity playerNpc,
+            PathNavigationAi pathNavigationAi,
+            ServerLevel serverLevel,
+            BlockPos target
+    ) {
         return Direction.Plane.HORIZONTAL.stream()
                 .map(target::relative)
                 .filter(pos -> PathNavigationAi.canStandAt(serverLevel, pos))
                 .filter(pos -> {
-                    Path path = this.playerNpc.getNavigation().createPath(pos, 0);
-                    return this.pathNavigationAi.isValidPathTo(pos, path)
-                            || this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D) <= STAND_REACHED_DISTANCE_SQR;
+                    Path path = playerNpc.getNavigation().createPath(pos, 0);
+                    return pathNavigationAi.isValidPathTo(pos, path)
+                            || playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D) <= STAND_REACHED_DISTANCE_SQR;
                 })
-                .min(Comparator.comparingDouble(pos -> this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D)))
+                .min(Comparator.comparingDouble(pos -> playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D)))
                 .map(BlockPos::immutable);
     }
 
     private boolean canBreakFromCurrentPosition(BlockPos pos) {
-        return this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) <= BREAK_DISTANCE_SQR;
+        return canBreakFromCurrentPosition(this.playerNpc, pos);
+    }
+
+    private static boolean canBreakFromCurrentPosition(PlayerNpcEntity playerNpc, BlockPos pos) {
+        return playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) <= BREAK_DISTANCE_SQR;
     }
 
     private boolean isValidTarget(ServerLevel serverLevel, BlockPos pos) {
         return this.targetPredicate().test(serverLevel.getBlockState(pos));
+    }
+
+    private Optional<ActionableBlockTarget> findActionableBlockTarget(
+            ServerLevel serverLevel,
+            MissingBuildMaterialNeed materialNeed
+    ) {
+        if (materialNeed.kind() == MissingBuildMaterialKind.BED) {
+            return this.findActionableBedTarget(serverLevel, materialNeed);
+        }
+        return findTargetBlock(this.playerNpc, serverLevel, materialNeed)
+                .flatMap(pos -> this.resolveActionableBlockTarget(serverLevel, pos));
+    }
+
+    private Optional<ActionableBlockTarget> findActionableBedTarget(
+            ServerLevel serverLevel,
+            MissingBuildMaterialNeed materialNeed
+    ) {
+        BlockPos center = this.playerNpc.blockPosition();
+        Set<BlockPos> candidates = new HashSet<>();
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int x = center.getX() - SEARCH_RADIUS; x <= center.getX() + SEARCH_RADIUS; x++) {
+            for (int y = center.getY() - 8; y <= center.getY() + 8; y++) {
+                for (int z = center.getZ() - SEARCH_RADIUS; z <= center.getZ() + SEARCH_RADIUS; z++) {
+                    cursor.set(x, y, z);
+                    BlockPos target = matchingTargetPos(serverLevel, cursor, materialNeed);
+                    if (target != null && !isProtectedHomeBlock(this.playerNpc, target)) {
+                        candidates.add(target.immutable());
+                    }
+                }
+            }
+        }
+
+        return candidates.stream()
+                .sorted(Comparator.comparingDouble(pos -> this.playerNpc.distanceToSqr(
+                        pos.getX() + 0.5D,
+                        pos.getY() + 0.5D,
+                        pos.getZ() + 0.5D)))
+                .map(pos -> this.resolveActionableBlockTarget(serverLevel, pos))
+                .flatMap(Optional::stream)
+                .findFirst();
+    }
+
+    private Optional<ActionableBlockTarget> resolveActionableBlockTarget(ServerLevel serverLevel, BlockPos target) {
+        if (this.canBreakFromCurrentPosition(target)) {
+            return Optional.of(new ActionableBlockTarget(target.immutable(), Optional.empty()));
+        }
+        return this.findStandPos(serverLevel, target)
+                .map(stand -> new ActionableBlockTarget(target.immutable(), Optional.of(stand)));
     }
 
     private Predicate<BlockState> targetPredicate() {
@@ -632,9 +677,13 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         return serverLevel.getEntitiesOfClass(
                         Sheep.class,
                         playerNpc.getBoundingBox().inflate(SEARCH_RADIUS),
-                        sheep -> sheep.isAlive() && !sheep.isBaby() && !isUnreachableSheep(playerNpc, sheep))
+                        sheep -> isUsableSheep(sheep) && !isUnreachableSheep(playerNpc, sheep))
                 .stream()
                 .min(Comparator.comparingDouble(playerNpc::distanceToSqr));
+    }
+
+    private static boolean isUsableSheep(Sheep sheep) {
+        return sheep != null && sheep.isAlive() && !sheep.isBaby() && !sheep.isSheared();
     }
 
     private static boolean isUnreachableSheep(PlayerNpcEntity playerNpc, Sheep sheep) {
@@ -721,5 +770,8 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                     && this.kind == need.kind()
                     && this.targetState.equals(need.targetState());
         }
+    }
+
+    private record ActionableBlockTarget(BlockPos target, Optional<BlockPos> stand) {
     }
 }

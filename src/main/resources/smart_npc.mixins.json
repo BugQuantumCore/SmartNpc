@@ -9,6 +9,7 @@
   "client": [
     "CameraMixin",
     "ClientPacketListenerMixin",
+    "ClientSuggestionProviderMixin",
     "GuiMixin",
     "PlayerRendererMixin"
   ],

@@ -2,6 +2,7 @@ package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -447,6 +448,7 @@ public final class WaterEscapeAi {
     private boolean isWaterPlugBlock(ItemStack stack) {
         if (stack.isEmpty()
                 || !(stack.getItem() instanceof BlockItem blockItem)
+                || stack.is(ItemTags.LOGS)
                 || stack.is(ItemTags.SAPLINGS)
                 || stack.is(Items.CRAFTING_TABLE)
                 || stack.is(Items.CHEST)
@@ -461,15 +463,31 @@ public final class WaterEscapeAi {
         BlockState state = blockItem.getBlock().defaultBlockState();
         return state.canOcclude()
                 && !state.canBeReplaced()
-                && state.getFluidState().isEmpty();
+                && state.getFluidState().isEmpty()
+                && !StoneAi.isStone(state);
     }
 
     private boolean hasWaterPlugBlock() {
-        return InventoryUtils.hasItem(this.playerNpc, this::isWaterPlugBlock);
+        return InventoryUtils.hasItem(this.playerNpc, this::isWaterPlugBlock)
+                || this.canConvertLogToWaterPlugPlanks();
     }
 
     private ItemStack takeWaterPlugBlock() {
-        return InventoryUtils.consumeItem(this.playerNpc, this::isWaterPlugBlock, 1).orElse(ItemStack.EMPTY);
+        ItemStack block = InventoryUtils.consumeItem(this.playerNpc, this::isWaterPlugBlock, 1)
+                .orElse(ItemStack.EMPTY);
+        if (!block.isEmpty()) {
+            return block;
+        }
+
+        if (PlayerNpcCraftingUtil.tryConvertOneLogToPlanks(this.playerNpc.getInventory(), 0)) {
+            return InventoryUtils.consumeItem(this.playerNpc, this::isWaterPlugBlock, 1)
+                    .orElse(ItemStack.EMPTY);
+        }
+        return ItemStack.EMPTY;
+    }
+
+    private boolean canConvertLogToWaterPlugPlanks() {
+        return InventoryUtils.hasItem(this.playerNpc.getInventory(), PlayerNpcCraftingUtil::isLogs);
     }
 
     private boolean isInWater(ServerLevel serverLevel) {
