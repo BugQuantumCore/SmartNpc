@@ -2,6 +2,7 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ReturnPositionAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
@@ -20,6 +21,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
+import net.minecraft.world.level.levelgen.Heightmap;
 
 import java.util.EnumSet;
 import java.util.Optional;
@@ -63,7 +65,7 @@ public class ReturnHomeGoal extends Goal {
         }
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
         boolean miningShelterOnly = isMiningShelterOnly(playerNpc);
-        if (needsHomeSurfaceRecovery(playerNpc, homeArea)) {
+        if (needsHomeSurfaceRecovery(playerNpc, serverLevel, homeArea)) {
             return true;
         }
         if (miningShelterOnly && MiningNightCampGoal.shouldPauseMiningForNightCamp(playerNpc, serverLevel)) {
@@ -107,7 +109,7 @@ public class ReturnHomeGoal extends Goal {
 
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
         boolean forcedExplorationReturn = this.playerNpc.hasExplorationReturnHomeRequest();
-        boolean forcedHomeSurfaceRecovery = needsHomeSurfaceRecovery(this.playerNpc, homeArea);
+        boolean forcedHomeSurfaceRecovery = needsHomeSurfaceRecovery(this.playerNpc, serverLevel, homeArea);
         if (!forcedExplorationReturn
                 && !forcedHomeSurfaceRecovery
                 && !this.canUseThrottle.canCheck(this.playerNpc)) {
@@ -302,8 +304,9 @@ public class ReturnHomeGoal extends Goal {
     public void start() {
         this.returnTicks = MAX_RETURN_TICKS;
         this.playerNpc.setCurrentAiState("ai.player_npc.returning_home");
-        if (this.homeSurfaceRecoveryReturn && this.homeCenter != null) {
-            this.requestHomeSurfaceEscape();
+        if (this.homeSurfaceRecoveryReturn && this.homeCenter != null
+                && this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            this.requestHomeSurfaceEscape(serverLevel);
         }
         if (this.homeCenter != null) {
             this.returnPositionAi.start(this.homeCenter);
@@ -319,13 +322,21 @@ public class ReturnHomeGoal extends Goal {
         this.returnTicks--;
         if (this.homeCenter != null) {
             this.playerNpc.getLookControl().setLookAt(this.homeCenter.getX() + 0.5D, this.homeCenter.getY(), this.homeCenter.getZ() + 0.5D, 40.0F, 40.0F);
-            this.returnPositionAi.tick(
-                    serverLevel,
-                    this.homeCenter,
-                    this::isProtectedHomeBlock,
-                    this.moveDetail(),
-                    "clearing return path",
-                    this.shouldUsePathStuckFallback());
+            if (this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
+                this.returnPositionAi.tickBuilderHomeReturn(
+                        serverLevel,
+                        this.homeCenter,
+                        this::isProtectedHomeBlock,
+                        this.moveDetail(),
+                        "clearing return path");
+            } else {
+                this.returnPositionAi.tick(
+                        serverLevel,
+                        this.homeCenter,
+                        this::isProtectedHomeBlock,
+                        this.moveDetail(),
+                        "clearing return path");
+            }
             this.updateDetail();
         }
     }
@@ -338,7 +349,7 @@ public class ReturnHomeGoal extends Goal {
                 || this.homeSurfaceRecoveryReturn
                 ? this.hasReachedHomeWorkAreaSurface(this.homeArea)
                 : this.hasReachedHomeCenter());
-        if (!this.playerNpc.level().isClientSide) {
+        if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
             int cooldown = !arrivedAtHome
                     ? 0
                     : this.utilityReturn
@@ -352,7 +363,7 @@ public class ReturnHomeGoal extends Goal {
             this.playerNpc.setReturnHomeCooldown(cooldown);
             if (!arrivedAtHome && this.homeCenter != null && this.playerNpc.blockPosition().getY() < this.homeCenter.getY() - 1) {
                 if (this.homeSurfaceRecoveryReturn) {
-                    this.requestHomeSurfaceEscape();
+                    this.requestHomeSurfaceEscape(serverLevel);
                 } else {
                     this.playerNpc.requestForcedUpwardEscapeTo(this.homeCenter, 20 * 8, 10);
                 }
@@ -391,8 +402,14 @@ public class ReturnHomeGoal extends Goal {
         return isInsideHomeWorkArea(this.playerNpc, homeArea);
     }
 
-    private static boolean isInsideHomeWorkArea(PlayerNpcEntity playerNpc, PlayerNpcHomeUtil.HomeArea homeArea) {
-        BlockPos pos = playerNpc.blockPosition();
+    static boolean isInsideHomeWorkArea(PlayerNpcEntity playerNpc, PlayerNpcHomeUtil.HomeArea homeArea) {
+        return isInsideHomeWorkArea(playerNpc.blockPosition(), homeArea);
+    }
+
+    static boolean isInsideHomeWorkArea(BlockPos pos, PlayerNpcHomeUtil.HomeArea homeArea) {
+        if (pos == null || homeArea == null) {
+            return false;
+        }
         return pos.getX() >= homeArea.origin().getX() - HOME_WORK_AREA_MARGIN
                 && pos.getX() < homeArea.origin().getX() + homeArea.width() + HOME_WORK_AREA_MARGIN
                 && pos.getZ() >= homeArea.origin().getZ() - HOME_WORK_AREA_MARGIN
@@ -401,21 +418,45 @@ public class ReturnHomeGoal extends Goal {
                 && pos.getY() <= homeArea.origin().getY() + 8;
     }
 
-    private static boolean needsHomeSurfaceRecovery(PlayerNpcEntity playerNpc, PlayerNpcHomeUtil.HomeArea homeArea) {
+    public static boolean needsHomeSurfaceRecovery(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null || serverLevel == null) {
+            return false;
+        }
+
+        return PlayerNpcHomeUtil.getHome(playerNpc)
+                .filter(homeArea -> needsHomeSurfaceRecovery(playerNpc, serverLevel, homeArea))
+                .isPresent();
+    }
+
+    private static boolean needsHomeSurfaceRecovery(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            PlayerNpcHomeUtil.HomeArea homeArea
+    ) {
         if (homeArea == null) {
             return false;
         }
 
         BlockPos pos = playerNpc.blockPosition();
-        return isInsideHomeWorkFootprint(pos, homeArea)
-                && pos.getY() < homeArea.origin().getY();
-    }
+        if (!PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos)) {
+            return false;
+        }
+        if (pos.getY() < homeArea.origin().getY()) {
+            return true;
+        }
+        if (pos.getY() != homeArea.origin().getY() || serverLevel.canSeeSky(pos.above())) {
+            return false;
+        }
+        if (PathNavigationAi.canStandAt(serverLevel, pos)) {
+            return false;
+        }
 
-    private static boolean isInsideHomeWorkFootprint(BlockPos pos, PlayerNpcHomeUtil.HomeArea homeArea) {
-        return pos.getX() >= homeArea.origin().getX() - HOME_WORK_AREA_MARGIN
-                && pos.getX() < homeArea.origin().getX() + homeArea.width() + HOME_WORK_AREA_MARGIN
-                && pos.getZ() >= homeArea.origin().getZ() - HOME_WORK_AREA_MARGIN
-                && pos.getZ() < homeArea.origin().getZ() + homeArea.depth() + HOME_WORK_AREA_MARGIN;
+        int localSurfaceY = serverLevel.getHeight(
+                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                pos.getX(),
+                pos.getZ()
+        );
+        return localSurfaceY > pos.getY() + 1;
     }
 
     private boolean hasReachedExplorationRecoveryHome(PlayerNpcHomeUtil.HomeArea homeArea) {
@@ -423,9 +464,12 @@ public class ReturnHomeGoal extends Goal {
     }
 
     private boolean hasReachedHomeWorkAreaSurface(PlayerNpcHomeUtil.HomeArea homeArea) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
         return homeArea != null
                 && this.isInsideHomeWorkArea(homeArea)
-                && !needsHomeSurfaceRecovery(this.playerNpc, homeArea)
+                && !needsHomeSurfaceRecovery(this.playerNpc, serverLevel, homeArea)
                 && this.hasSafeHomeSurfaceStand();
     }
 
@@ -459,16 +503,56 @@ public class ReturnHomeGoal extends Goal {
                 && PlayerNpcHomeUtil.isInside(this.homeArea, pos);
     }
 
-    private void requestHomeSurfaceEscape() {
+    private void requestHomeSurfaceEscape(ServerLevel serverLevel) {
         BlockPos feet = this.playerNpc.blockPosition();
-        int maxPillarBlocks = Math.max(1, this.homeCenter.getY() - feet.getY() + HOME_SURFACE_ESCAPE_EXTRA_BLOCKS);
-        this.playerNpc.requestForcedUpwardEscapeTo(this.homeCenter, HOME_SURFACE_ESCAPE_TICKS, maxPillarBlocks);
+        BlockPos escapeTarget = this.findHomeSurfaceEscapeTarget(serverLevel, feet);
+        int maxPillarBlocks = Math.max(1, escapeTarget.getY() - feet.getY() + HOME_SURFACE_ESCAPE_EXTRA_BLOCKS);
+        this.playerNpc.requestForcedUpwardEscapeTo(escapeTarget, HOME_SURFACE_ESCAPE_TICKS, maxPillarBlocks);
     }
 
-    private boolean shouldUsePathStuckFallback() {
-        return this.explorationRecoveryReturn
-                && this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
-                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING);
+    private BlockPos findHomeSurfaceEscapeTarget(ServerLevel serverLevel, BlockPos feet) {
+        if (this.homeArea != null && PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, feet)) {
+            int insideEscapeY = Math.max(feet.getY() + 2, this.homeArea.origin().getY() + 2);
+            return new BlockPos(feet.getX(), insideEscapeY, feet.getZ());
+        }
+
+        BlockPos nearestSurface = null;
+        double nearestDistanceSqr = Double.MAX_VALUE;
+        if (this.homeArea != null) {
+            int minX = this.homeArea.origin().getX() - HOME_WORK_AREA_MARGIN;
+            int maxX = this.homeArea.origin().getX() + this.homeArea.width() + HOME_WORK_AREA_MARGIN - 1;
+            int minZ = this.homeArea.origin().getZ() - HOME_WORK_AREA_MARGIN;
+            int maxZ = this.homeArea.origin().getZ() + this.homeArea.depth() + HOME_WORK_AREA_MARGIN - 1;
+            for (int x = minX; x <= maxX; x++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                    BlockPos candidate = new BlockPos(x, y, z);
+                    if (candidate.getY() <= feet.getY() + 1
+                            || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)
+                            || !serverLevel.canSeeSky(candidate.above())
+                            || !PathNavigationAi.canStandAt(serverLevel, candidate)) {
+                        continue;
+                    }
+
+                    double distanceSqr = candidate.distSqr(feet);
+                    if (distanceSqr < nearestDistanceSqr) {
+                        nearestSurface = candidate.immutable();
+                        nearestDistanceSqr = distanceSqr;
+                    }
+                }
+            }
+        }
+        if (nearestSurface != null) {
+            return nearestSurface;
+        }
+
+        int localSurfaceY = serverLevel.getHeight(
+                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                feet.getX(),
+                feet.getZ()
+        );
+        int fallbackY = Math.max(Math.max(feet.getY() + 2, localSurfaceY), this.homeCenter.getY());
+        return new BlockPos(feet.getX(), fallbackY, feet.getZ());
     }
 
     private void updateDetail() {

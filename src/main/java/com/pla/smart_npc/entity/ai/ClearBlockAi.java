@@ -54,6 +54,7 @@ public final class ClearBlockAi {
     private int requiredTicks;
     private double clearDistanceSqr = DEFAULT_CLEAR_DISTANCE_SQR;
     private boolean allowSoftCover;
+    private boolean allowOwnedFarmDestruction;
     private int approachRepathTicks;
     private int approachTicks;
     private int clearTargetTicks;
@@ -102,7 +103,23 @@ public final class ClearBlockAi {
             double clearDistanceSqr,
             boolean allowSoftCover
     ) {
-        if (!isClearable(serverLevel, targetPos, targetPredicate, allowSoftCover)
+        return this.start(serverLevel, targetPos, targetPredicate, detail, requiredTicks,
+                clearDistanceSqr, allowSoftCover, false);
+    }
+
+    public boolean start(
+            ServerLevel serverLevel,
+            BlockPos targetPos,
+            Predicate<BlockState> targetPredicate,
+            String detail,
+            int requiredTicks,
+            double clearDistanceSqr,
+            boolean allowSoftCover,
+            boolean allowOwnedFarmDestruction
+    ) {
+        if (!allowOwnedFarmDestruction
+                && FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, targetPos)
+                || !isClearable(serverLevel, targetPos, targetPredicate, allowSoftCover)
                 || this.playerNpc.distanceToSqr(centerX(targetPos), centerY(targetPos), centerZ(targetPos)) > clearDistanceSqr) {
             return false;
         }
@@ -115,6 +132,7 @@ public final class ClearBlockAi {
         this.requiredTicks = Math.max(1, requiredTicks);
         this.clearDistanceSqr = clearDistanceSqr;
         this.allowSoftCover = allowSoftCover;
+        this.allowOwnedFarmDestruction = allowOwnedFarmDestruction;
         this.clearTargetTicks = 0;
         this.playerNpc.getNavigation().stop();
         this.updateDetail();
@@ -151,10 +169,29 @@ public final class ClearBlockAi {
             double clearDistanceSqr,
             boolean allowSoftColumnCover
     ) {
+        return this.startNearest(serverLevel, candidates, targetPredicate, detail, requiredTicks,
+                clearDistanceSqr, allowSoftColumnCover, false);
+    }
+
+    public boolean startNearest(
+            ServerLevel serverLevel,
+            Collection<BlockPos> candidates,
+            Predicate<BlockState> targetPredicate,
+            String detail,
+            int requiredTicks,
+            double clearDistanceSqr,
+            boolean allowSoftColumnCover,
+            boolean allowOwnedFarmDestruction
+    ) {
+        Collection<BlockPos> effectiveCandidates = allowOwnedFarmDestruction
+                ? candidates
+                : candidates.stream()
+                .filter(pos -> !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos))
+                .toList();
         Optional<BlockPos> target = findNearestAccessibleClearable(
                 serverLevel,
                 this.playerNpc,
-                candidates,
+                effectiveCandidates,
                 targetPredicate,
                 clearDistanceSqr,
                 allowSoftColumnCover
@@ -168,7 +205,8 @@ public final class ClearBlockAi {
         if (allowSoftColumnCover && !targetPredicate.test(state) && isSoftCoverState(state)) {
             effectivePredicate = blockState -> targetPredicate.test(blockState) || isSoftCoverState(blockState);
         }
-        return this.start(serverLevel, target.get(), effectivePredicate, detail, requiredTicks, clearDistanceSqr, allowSoftColumnCover);
+        return this.start(serverLevel, target.get(), effectivePredicate, detail, requiredTicks,
+                clearDistanceSqr, allowSoftColumnCover, allowOwnedFarmDestruction);
     }
 
     public TickResult tick(ServerLevel serverLevel) {
@@ -177,6 +215,14 @@ public final class ClearBlockAi {
         }
 
         if (this.targetPredicate == null) {
+            this.stop();
+            return TickResult.FAILED;
+        }
+
+        if (!this.allowOwnedFarmDestruction
+                && FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, this.targetPos)) {
+            this.playerNpc.setIdleTraceDetail("clear target protected by owned farm @ "
+                    + this.targetPos.getX() + " " + this.targetPos.getY() + " " + this.targetPos.getZ(), 40);
             this.stop();
             return TickResult.FAILED;
         }
@@ -209,6 +255,13 @@ public final class ClearBlockAi {
                 this.allowSoftCover
         );
         if (blocker.isPresent() && !blocker.get().equals(this.targetPos)) {
+            if (!this.allowOwnedFarmDestruction
+                    && FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, blocker.get())) {
+                this.playerNpc.setIdleTraceDetail("clear blocker protected by owned farm @ "
+                        + blocker.get().getX() + " " + blocker.get().getY() + " " + blocker.get().getZ(), 40);
+                this.stop();
+                return TickResult.FAILED;
+            }
             this.breakingBlockAi.stop();
             this.retargetBlocker(blocker.get());
             this.updateDetail();
@@ -231,7 +284,9 @@ public final class ClearBlockAi {
                 this.targetPos,
                 this.targetPredicate,
                 this.requiredTicks,
-                this.detail + (this.isClearingBlocker() ? " blocker" : "")
+                this.detail + (this.isClearingBlocker() ? " blocker" : ""),
+                false,
+                this.allowOwnedFarmDestruction
         );
         if (result == BreakingBlockAi.TickResult.RUNNING) {
             this.updateDetail();
@@ -261,9 +316,25 @@ public final class ClearBlockAi {
         this.requiredTicks = 0;
         this.clearDistanceSqr = DEFAULT_CLEAR_DISTANCE_SQR;
         this.allowSoftCover = false;
+        this.allowOwnedFarmDestruction = false;
         this.approachRepathTicks = 0;
         this.approachTicks = 0;
         this.clearTargetTicks = 0;
+        this.centeredBlockedStandTicks = 0;
+    }
+
+    /**
+     * Keeps the selected clear request, but makes its next tick choose an approach from the
+     * NPC's new position. The overall clear timeout is deliberately preserved.
+     */
+    public void retryFromCurrentPosition() {
+        if (this.targetPos == null) {
+            return;
+        }
+        this.breakingBlockAi.stop();
+        this.standPos = null;
+        this.approachRepathTicks = 0;
+        this.approachTicks = 0;
         this.centeredBlockedStandTicks = 0;
     }
 
@@ -392,6 +463,39 @@ public final class ClearBlockAi {
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Resolves the block a clear request would initially hit from the NPC's current eye
+     * position. Clear requests deliberately remember their requested target so they can
+     * resume it after a ray blocker is removed; callers that protect owned structures can
+     * use this view to validate that blocker before starting the request.
+     */
+    public static Optional<BlockPos> resolveInitialClearTarget(
+            ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
+            BlockPos requestedTarget,
+            Predicate<BlockState> targetPredicate,
+            double maxDistanceSqr,
+            boolean allowSoftColumnCover
+    ) {
+        if (serverLevel == null
+                || playerNpc == null
+                || requestedTarget == null
+                || targetPredicate == null
+                || playerNpc.distanceToSqr(centerX(requestedTarget), centerY(requestedTarget), centerZ(requestedTarget))
+                > maxDistanceSqr
+                || !isClearable(serverLevel, requestedTarget, targetPredicate, allowSoftColumnCover)) {
+            return Optional.empty();
+        }
+        return findBreakRayBlocker(
+                serverLevel,
+                playerNpc,
+                requestedTarget,
+                targetPredicate,
+                maxDistanceSqr,
+                allowSoftColumnCover
+        ).or(() -> Optional.of(requestedTarget.immutable()));
     }
 
     private static Optional<BlockPos> findColumnCover(
@@ -562,7 +666,18 @@ public final class ClearBlockAi {
                 && !this.requestedTargetPos.equals(this.targetPos);
     }
 
-    private static Optional<BlockPos> findReachableBreakStand(PlayerNpcEntity playerNpc, ServerLevel serverLevel, BlockPos targetPos) {
+    /**
+     * Finds a bounded, exactly reachable stand whose centered eye ray first hits the
+     * requested block. At most {@value #MAX_BREAK_STAND_PATH_CHECKS} paths are probed.
+     */
+    public static Optional<BlockPos> findReachableBreakStand(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            BlockPos targetPos
+    ) {
+        if (playerNpc == null || serverLevel == null || targetPos == null) {
+            return Optional.empty();
+        }
         ArrayList<BlockPos> candidates = new ArrayList<>();
         BlockPos playerFeet = playerNpc.blockPosition();
         if (canUseBreakStand(serverLevel, playerFeet, targetPos)) {

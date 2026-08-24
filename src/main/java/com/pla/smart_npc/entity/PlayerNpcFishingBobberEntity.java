@@ -1,7 +1,6 @@
 package com.pla.smart_npc.entity;
 
 import com.pla.smart_npc.init.SmartNpcModEntities;
-import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.nbt.CompoundTag;
@@ -483,17 +482,8 @@ public class PlayerNpcFishingBobberEntity extends Projectile implements IEntityA
                 .create(LootContextParamSets.FISHING);
         LootTable lootTable = serverLevel.getServer().getLootData().getLootTable(BuiltInLootTables.FISHING);
         List<ItemStack> loot = lootTable.getRandomItems(lootParams);
-        boolean insertedLoot = false;
         for (ItemStack stack : loot) {
-            if (InventoryUtils.addItem(currentAngler, stack)) {
-                insertedLoot = true;
-            } else {
-                this.spawnLootTowardAngler(currentAngler, stack);
-            }
-        }
-
-        if (insertedLoot) {
-            currentAngler.playInventoryPickupSound();
+            this.spawnLootTowardAngler(currentAngler, stack);
         }
         serverLevel.addFreshEntity(new ExperienceOrb(serverLevel, currentAngler.getX(), currentAngler.getY() + 0.5D, currentAngler.getZ() + 0.5D, XP_PER_CATCH));
     }

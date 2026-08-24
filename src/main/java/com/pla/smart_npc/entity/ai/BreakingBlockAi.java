@@ -74,6 +74,18 @@ public final class BreakingBlockAi {
             String detail,
             boolean allowBlockEntity
     ) {
+        return this.tick(serverLevel, targetPos, targetPredicate, requiredTicks, detail, allowBlockEntity, false);
+    }
+
+    public TickResult tick(
+            ServerLevel serverLevel,
+            BlockPos targetPos,
+            Predicate<BlockState> targetPredicate,
+            int requiredTicks,
+            String detail,
+            boolean allowBlockEntity,
+            boolean allowOwnedFarmDestruction
+    ) {
         if (targetPos == null || targetPredicate == null) {
             this.stop();
             return TickResult.FAILED;
@@ -84,7 +96,7 @@ public final class BreakingBlockAi {
             this.stop();
             return TickResult.DONE;
         }
-        if (!this.canBreak(serverLevel, targetPos, state, allowBlockEntity)) {
+        if (!this.canBreak(serverLevel, targetPos, state, allowBlockEntity, allowOwnedFarmDestruction)) {
             this.stop();
             return TickResult.FAILED;
         }
@@ -121,7 +133,13 @@ public final class BreakingBlockAi {
             return TickResult.RUNNING;
         }
 
-        boolean destroyed = PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, targetPos, state, this.playerNpc);
+        boolean destroyed = PlayerNpcBlockBreakUtil.destroyBlock(
+                serverLevel,
+                targetPos,
+                state,
+                this.playerNpc,
+                allowOwnedFarmDestruction
+        );
         if (destroyed) {
             this.playerNpc.hurtMainHandItem(1);
             this.nextBreakStartTick = this.playerNpc.tickCount + POST_BREAK_DELAY_TICKS;
@@ -262,9 +280,17 @@ public final class BreakingBlockAi {
         this.updateDetail();
     }
 
-    private boolean canBreak(ServerLevel serverLevel, BlockPos targetPos, BlockState state, boolean allowBlockEntity) {
+    private boolean canBreak(
+            ServerLevel serverLevel,
+            BlockPos targetPos,
+            BlockState state,
+            boolean allowBlockEntity,
+            boolean allowOwnedFarmDestruction
+    ) {
         return serverLevel.isInWorldBounds(targetPos)
                 && serverLevel.getWorldBorder().isWithinBounds(targetPos)
+                && (allowOwnedFarmDestruction
+                || !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, targetPos))
                 && state.getDestroySpeed(serverLevel, targetPos) >= 0.0F
                 && state.getFluidState().isEmpty()
                 && (allowBlockEntity || serverLevel.getBlockEntity(targetPos) == null);

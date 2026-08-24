@@ -34,7 +34,7 @@ public final class PathNavigationAi {
     }
 
     public boolean moveTo(ServerLevel serverLevel, BlockPos target, double speed, int maxSafeDrop) {
-        if (this.escapeWaterIfNeeded(serverLevel, speed)) {
+        if (this.escapeWaterIfNeeded(serverLevel, target, speed)) {
             return true;
         }
 
@@ -67,7 +67,7 @@ public final class PathNavigationAi {
     }
 
     public boolean moveToExact(ServerLevel serverLevel, BlockPos target, double speed, int maxSafeDrop) {
-        if (this.escapeWaterIfNeeded(serverLevel, speed)) {
+        if (this.escapeWaterIfNeeded(serverLevel, target, speed)) {
             return true;
         }
 
@@ -134,8 +134,12 @@ public final class PathNavigationAi {
         return this.lastMoveFailureDetail;
     }
 
-    private boolean escapeWaterIfNeeded(ServerLevel serverLevel, double speed) {
-        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(serverLevel, Math.max(1.0D, speed));
+    private boolean escapeWaterIfNeeded(ServerLevel serverLevel, BlockPos target, double speed) {
+        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(
+                serverLevel,
+                Math.min(1.0D, Math.max(0.1D, speed)),
+                target
+        );
         if (result == WaterEscapeAi.TickResult.RUNNING || result == WaterEscapeAi.TickResult.DONE) {
             this.lastMoveFailureDetail = "";
             if (result == WaterEscapeAi.TickResult.RUNNING && !this.waterEscapeAi.detail().isBlank()) {

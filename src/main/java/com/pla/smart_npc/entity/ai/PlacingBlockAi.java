@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.ai;
 
+import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -21,7 +22,7 @@ import java.util.List;
 public final class PlacingBlockAi {
     public static final DelayProfile PLAYER_LIKE_BUILD_DELAY = new DelayProfile(10, 28, 0.22F, 28);
     public static final DelayProfile QUICK_UTILITY_DELAY = new DelayProfile(6, 12, 0.12F, 10);
-    public static final DelayProfile PILLAR_PLACE_DELAY = new DelayProfile(1, 3, 0.0F, 0);
+    public static final DelayProfile PILLAR_PLACE_DELAY = new DelayProfile(5, 8, 0.0F, 0);
     public static final DelayProfile SCAFFOLD_PLACE_DELAY = new DelayProfile(2, 5, 0.0F, 0);
 
     private final PlayerNpcEntity playerNpc;
@@ -96,8 +97,14 @@ public final class PlacingBlockAi {
     }
 
     public void playPlaceEffects(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        this.playerNpc.triggerMainHandUseAnimation();
+        this.playMainHandAction();
         PlayerNpcBlockSoundUtil.playPlaceSound(serverLevel, pos, state, this.playerNpc);
+    }
+
+    public void playMainHandAction() {
+        if (!EpicFightCompat.playMainHandUseAnimation(this.playerNpc)) {
+            this.playerNpc.triggerMainHandUseAnimation();
+        }
     }
 
     public boolean canPlaceWithoutClipping(ServerLevel serverLevel, BlockPos pos, BlockState state) {

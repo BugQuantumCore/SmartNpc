@@ -42,7 +42,8 @@ Default interests for custom or unknown names are `BUILDING`.
 - If the NPC loads after tick `1`, it may make one fallback roll during daytime so the job is not missing for the entire day.
 - If no job interests are defined, the selected job is `none` and only characteristic/baseline goals can run.
 - If the NPC has `BUILDING` but no saved home layout id, BUILDING is forced as the selected job. This is the base-selection lock: other job interests cannot run until the base/layout has been chosen.
-- At night/thunder, a NPC with `BUILDING` and a saved home treats BUILDING home-duty goals as active even if the daytime selected job was something else. This lets return-home/shelter logic run.
+- During that no-home/no-layout base-selection phase, nighttime uses the shared bounded camp activity (local walking, looking, and occasional sneaking) rather than leaving the builder idle. This passive builder mode never crafts or places a furnace or mutates the camp, and it yields immediately at daybreak or when a home/layout is selected.
+- At night/thunder, a NPC with `BUILDING` and a saved home treats BUILDING home-duty goals as active even if the daytime selected job was something else. This lets return-home/shelter logic run and suppresses normal Mining, Fishing, or Farming outdoor camps. Recovery of an already owned temporary camp furnace is still allowed before the camp gate.
 
 ## Goal Gating
 
@@ -59,7 +60,7 @@ Examples:
 - `BUILDING`: choose/save base, gather build logs/stone/materials, terraform, build house, manage home, return home, sleep at home.
 - `FISHING`: fishing and boat stockpiling.
 - `MINING`: mining supply progression, cave-adjacent ore mining, cave path clearing, torch placement in caves, and temporary furnace support for ore smelting. A pure miner gathers logs first, then stone, then searches coal/iron/gold/copper ore; it must not choose or create a house.
-- `FARMING`: crop farming and crop food crafting.
+- `FARMING`: staged owned-farm setup (logs, site, stone, irrigation, fence/gate, hoe/tilling), crop/seed acquisition, planting, harvesting, crop food crafting, pure-farmer night camping around the owned gate/path, charcoal furnace support, and bounded fence lighting. A combined BUILDING + FARMING NPC finishes its strict home/build prep before farming can become active and returns to its home instead of starting an outdoor farm camp.
 - `HUNT_MONSTERS`: smart target selection against monsters and combat gear prep.
 - `HUNT_ANIMALS`: food-limited animal hunting, sheep hunting for beds, and cooking support.
 - `HUNT_PLAYERS`: rare smart target selection against players and other PlayerNpc entities, plus combat gear prep.

@@ -16,7 +16,7 @@ Lets mining Player NPCs seek cave-adjacent ores after the mining support supplie
 - Requires log supply and stone supply to be met first. The mining-only progression is logs -> stone -> ore; do not insert house selection into this flow.
 - Requires a carried usable pickaxe for the target ore, including held, inventory, offhand, or reserved weapon/tool slots.
 - Skips while healing, in combat, inventory is nearly full, or `oreMiningCooldown` is active.
-- A pure miner can request upward escape only when logs fall below the supply goal, it is daytime, and the NPC is underground. Building miners rely on the building home-duty/night-return path.
+- A pure miner can request upward escape only when logs fall below the supply goal, it is daytime, the NPC is genuinely underground, and log gathering is not already active. A vertical sky obstruction made only from logs, leaves, vines, and replaceable plants is tree canopy rather than an underground ceiling and must not start a surface-escape pillar. Building miners rely on the building home-duty/night-return path.
 
 ## Behavior
 

@@ -278,7 +278,7 @@ Hard mode inventory also has rare utility rolls:
 - spyglass, for `UseSpyglassGoal`,
 - jukebox plus one random music disc, for `JukeboxDanceGoal`.
 
-Player NPC continues to pick up nearby items into this same container. Food, arrows, ender pearls, buckets, and block items can refill combat supplies after spawn.
+Player NPC continues to pick up nearby items into this same container. Food, arrows, ender pearls, buckets, and block items can refill combat supplies after spawn. World item pickup uses a one-block expansion on every axis around the NPC bounding box (the surrounding 3x3x3 block neighborhood, including above and below), honors the item's pickup delay, and sends the vanilla take-item packet so clients render the pickup flight and sound.
 
 Inventory-backed actions:
 
@@ -289,7 +289,7 @@ Inventory-backed actions:
 - item burning requires flint and steel or a lava bucket in inventory,
 - chest looting skips the NPC's owned home chest, requires an adjacent standing position, opens/closes the chest, and moves acceptable world-chest items sequentially into the custom inventory,
 - cave ore exploration is a `MINING` interest behavior that can mine cave-adjacent iron/coal/copper ore with a pickaxe, clear local path obstructions, craft torches from coal/charcoal and sticks, and randomly place torches in dark cave spots while not mid-break,
-- cooking is baseline AI; it can place/craft a home furnace, place/recover a temporary furnace when away from home, insert raw food, smeltable ore, cobblestone/cobbled deepslate, and fuel, and collect cooked output,
+- cooking is baseline AI; it can place/craft a home furnace, place/recover a `cooking`-kind temporary furnace when away from home, insert raw food, smeltable ore, cobblestone/cobbled deepslate, and fuel, and collect cooked output. Its placement detail reports the pending smelting reason, and night-camp recovery ignores cooking-kind temporary furnaces,
 - home supply checking is baseline AI; once per Minecraft day near home, the NPC checks its chest first and furnace second for needed food, wood, fuel, arrows, blocks, utility supplies, and furnace output before falling back to gathering/exploring,
 - gear upgrading can turn cobblestone/cobbled deepslate into stone tools, iron ingots into iron tools/armor, and diamonds into diamond tools/armor near a crafting table,
 - farming can harvest mature crops and plant a small wheat patch near the home,

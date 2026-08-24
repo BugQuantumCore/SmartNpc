@@ -4,6 +4,7 @@ import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.entity.ai.WaterEscapeAi;
@@ -11,6 +12,7 @@ import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
 import com.pla.smart_npc.util.PlayerNpcBuildLayoutLoader;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
+import com.pla.smart_npc.util.PlayerNpcBedUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
@@ -76,12 +78,14 @@ public class BuildHouseGoal extends Goal {
     private static final int BUILD_WORK_AREA_MARGIN = 4;
     private static final int BUILD_WORK_AREA_HEIGHT = 8;
     private static final int READY_BUILD_WORK_CACHE_TICKS = 20 * 3;
+    private static final int HOME_FINISHED_CACHE_TICKS = 20;
     private static final double BUILD_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double BUILD_HORIZONTAL_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double CRAFT_ROUTE_PROGRESS_EPSILON_SQR = 0.25D;
     private static final double CRAFT_ROUTE_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
     private static final String ACTIVE_BUILD_BATCH_KEY = "SmartNpcActiveBuildBatch";
     private static final Map<PlayerNpcEntity, HomeBuildWorkCache> HOME_BUILD_WORK_CACHE = new WeakHashMap<>();
+    private static final Map<PlayerNpcEntity, HomeFinishedCache> HOME_FINISHED_CACHE = new WeakHashMap<>();
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
             Direction.NORTH,
             Direction.SOUTH,
@@ -165,6 +169,7 @@ public class BuildHouseGoal extends Goal {
 
     public static void invalidateHomeBuildWorkCache(PlayerNpcEntity playerNpc) {
         HOME_BUILD_WORK_CACHE.remove(playerNpc);
+        HOME_FINISHED_CACHE.remove(playerNpc);
     }
 
     public static boolean isHomeLayoutFinished(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -173,28 +178,45 @@ public class BuildHouseGoal extends Goal {
         }
 
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
-        Optional<PlayerNpcBuildLayout> layout = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc)
-                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
+        String layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc).orElse("");
+        Optional<PlayerNpcBuildLayout> layout = PlayerNpcBuildLayoutLoader.getLayout(layoutId);
+        if (home.isPresent()) {
+            HomeFinishedCache cached = HOME_FINISHED_CACHE.get(playerNpc);
+            if (cached != null && cached.matches(playerNpc.tickCount, serverLevel.dimension().location(), home.get(), layoutId)) {
+                return cached.finished();
+            }
+        }
         if (home.isEmpty()
                 || layout.isEmpty()
                 || layout.get().width() != home.get().width()
-                || layout.get().depth() != home.get().depth()
-                || TerraformBuildSiteGoal.hasActionablePrepWork(playerNpc, serverLevel)) {
+                || layout.get().depth() != home.get().depth()) {
             return false;
         }
 
+        boolean finished = !TerraformBuildSiteGoal.hasPrepWorkIgnoringActiveJob(playerNpc, serverLevel);
         BlockPos origin = home.get().origin();
         for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
+            if (!finished) {
+                break;
+            }
             if (block.optional()
                     || block.state().isAir()
                     || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
                 continue;
             }
             if (!PlayerNpcBuildMaterialUtil.matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())) {
-                return false;
+                finished = false;
+                break;
             }
         }
-        return true;
+        HOME_FINISHED_CACHE.put(playerNpc, HomeFinishedCache.create(
+                playerNpc,
+                serverLevel.dimension().location(),
+                home.get(),
+                layoutId,
+                finished
+        ));
+        return finished;
     }
 
     private static boolean cachedContinuableHomeBuildWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -297,6 +319,7 @@ public class BuildHouseGoal extends Goal {
                 || this.playerNpc.isStoneAccessClearing()
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
+                || ReturnHomeGoal.needsHomeSurfaceRecovery(this.playerNpc, serverLevel)
                 || this.playerNpc.getTarget() != null) {
             return false;
         }
@@ -390,6 +413,7 @@ public class BuildHouseGoal extends Goal {
                 && this.playerNpc.isAlive()
                 && this.playerNpc.getUpwardEscapeTarget() == null
                 && this.playerNpc.getHoleEscapeCooldown() <= 0
+                && !this.needsHomeSurfaceRecovery()
                 && this.playerNpc.getTarget() == null
                 && !this.shouldShelterAtExistingHome();
     }
@@ -607,7 +631,8 @@ public class BuildHouseGoal extends Goal {
     }
 
     private boolean tickWaterEscape(ServerLevel serverLevel, PlayerNpcBuildLayout.RelativeBlock block) {
-        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(serverLevel, 1.1D);
+        BlockPos workDestination = block == null || this.origin == null ? this.origin : block.toWorld(this.origin);
+        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(serverLevel, 1.0D, workDestination);
         if (result != WaterEscapeAi.TickResult.RUNNING && result != WaterEscapeAi.TickResult.DONE) {
             return false;
         }
@@ -687,6 +712,9 @@ public class BuildHouseGoal extends Goal {
     }
 
     private boolean canBuildAt(ServerLevel serverLevel, PlayerNpcBuildLayout layout, BlockPos origin, boolean allowExistingHouseBlocks) {
+        if (FarmAi.overlapsOwnedFarm(this.playerNpc, origin, layout.width(), layout.depth())) {
+            return false;
+        }
         int terrainClears = 0;
         int maxTerrainClears = Math.max(MAX_TERRAIN_CLEARS_PER_BUILD_SITE, layout.width() * layout.height() * layout.depth() / 3);
         for (long packedFootprint : layout.footprint()) {
@@ -1432,12 +1460,14 @@ public class BuildHouseGoal extends Goal {
     }
 
     private boolean canClearForBuild(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        boolean bedObstruction = PlayerNpcBedUtil.isSafeBuildObstruction(serverLevel, this.playerNpc, pos, state);
         return !state.isAir()
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && state.getFluidState().isEmpty()
                 && !this.isProtectedTemporaryCraftingTable(serverLevel, pos)
-                && serverLevel.getBlockEntity(pos) == null
-                && (state.canBeReplaced()
+                && (serverLevel.getBlockEntity(pos) == null || bedObstruction)
+                && (bedObstruction
+                || state.canBeReplaced()
                 || state.getCollisionShape(serverLevel, pos).isEmpty()
                 || state.is(BlockTags.MINEABLE_WITH_SHOVEL)
                 || state.is(BlockTags.MINEABLE_WITH_AXE)
@@ -1623,6 +1653,11 @@ public class BuildHouseGoal extends Goal {
                 && pos.getZ() < homeArea.origin().getZ() + homeArea.depth() + BUILD_WORK_AREA_MARGIN
                 && pos.getY() >= homeArea.origin().getY()
                 && pos.getY() <= homeArea.origin().getY() + BUILD_WORK_AREA_HEIGHT;
+    }
+
+    private boolean needsHomeSurfaceRecovery() {
+        return this.playerNpc.level() instanceof ServerLevel serverLevel
+                && ReturnHomeGoal.needsHomeSurfaceRecovery(this.playerNpc, serverLevel);
     }
 
     private void deferBlockedPlacement(PlayerNpcBuildLayout.RelativeBlock block) {
@@ -2088,6 +2123,48 @@ public class BuildHouseGoal extends Goal {
                     && this.depth == homeArea.depth()
                     && this.layoutId.equals(currentLayoutId)
                     && this.inventoryHash == currentInventoryHash;
+        }
+    }
+
+    private record HomeFinishedCache(
+            int tick,
+            ResourceLocation dimension,
+            BlockPos origin,
+            int width,
+            int depth,
+            String layoutId,
+            boolean finished
+    ) {
+        static HomeFinishedCache create(
+                PlayerNpcEntity playerNpc,
+                ResourceLocation dimension,
+                PlayerNpcHomeUtil.HomeArea homeArea,
+                String layoutId,
+                boolean finished
+        ) {
+            return new HomeFinishedCache(
+                    playerNpc.tickCount,
+                    dimension,
+                    homeArea.origin(),
+                    homeArea.width(),
+                    homeArea.depth(),
+                    layoutId,
+                    finished
+            );
+        }
+
+        boolean matches(
+                int currentTick,
+                ResourceLocation currentDimension,
+                PlayerNpcHomeUtil.HomeArea homeArea,
+                String currentLayoutId
+        ) {
+            return currentTick - this.tick <= HOME_FINISHED_CACHE_TICKS
+                    && this.dimension.equals(currentDimension)
+                    && this.origin.equals(homeArea.origin())
+                    && this.width == homeArea.width()
+                    && this.depth == homeArea.depth()
+                    && this.layoutId.equals(currentLayoutId);
         }
     }
 }

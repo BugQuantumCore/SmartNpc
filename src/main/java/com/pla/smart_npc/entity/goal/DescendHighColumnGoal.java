@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
@@ -26,6 +27,7 @@ public class DescendHighColumnGoal extends Goal {
     private static final int MAX_SOLID_SIDE_SUPPORTS = 1;
 
     private final PlayerNpcEntity playerNpc;
+    private final TerraformBuildSiteGoal terraformBuildSiteGoal;
     private final ToolAi toolAi;
     private final BreakingBlockAi breakingBlockAi;
     private BlockPos floorTarget;
@@ -33,8 +35,9 @@ public class DescendHighColumnGoal extends Goal {
     private int descentSteps;
     private boolean finished;
 
-    public DescendHighColumnGoal(PlayerNpcEntity playerNpc) {
+    public DescendHighColumnGoal(PlayerNpcEntity playerNpc, TerraformBuildSiteGoal terraformBuildSiteGoal) {
         this.playerNpc = playerNpc;
+        this.terraformBuildSiteGoal = terraformBuildSiteGoal;
         this.toolAi = new ToolAi(playerNpc);
         this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
@@ -50,6 +53,7 @@ public class DescendHighColumnGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
+                || this.terraformBuildSiteGoal.hasPendingSupportFillEscapeHandoff(serverLevel)
                 || this.shouldYieldToMiningSupplyWork()
                 || !this.shouldRunForCurrentState()) {
             return false;
@@ -171,11 +175,13 @@ public class DescendHighColumnGoal extends Goal {
     }
 
     private boolean canBreakColumnBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        // Completed pillar supports stay remembered for placement safety, but this goal only starts
+        // after the upward request and escape cooldown end and its narrow-column checks pass.
         return pos != null
                 && serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
                 && !this.isProtectedHomeBlock(pos)
-                && !this.playerNpc.isTemporaryPillarSupport(pos)
+                && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && state.getFluidState().isEmpty()
                 && serverLevel.getBlockEntity(pos) == null

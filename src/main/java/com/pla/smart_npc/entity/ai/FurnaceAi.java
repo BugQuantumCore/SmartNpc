@@ -13,6 +13,7 @@ import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
 
@@ -23,6 +24,11 @@ public final class FurnaceAi {
     public static final String TEMP_FURNACE_X = "PlayerNpcTemporaryFurnaceX";
     public static final String TEMP_FURNACE_Y = "PlayerNpcTemporaryFurnaceY";
     public static final String TEMP_FURNACE_Z = "PlayerNpcTemporaryFurnaceZ";
+    // The position keys predate separate cooking/camp lifecycles, so tag their
+    // semantic owner instead of letting either goal claim every shared position.
+    public static final String TEMP_FURNACE_KIND = "PlayerNpcTemporaryFurnaceKind";
+    public static final String TEMP_FURNACE_KIND_COOKING = "cooking";
+    public static final String TEMP_FURNACE_KIND_NIGHT_CAMP = "night_camp";
 
     private static final int MAX_INPUT_STACK = 64;
     private static final int COAL_FUEL_BATCH = 8;
@@ -35,6 +41,25 @@ public final class FurnaceAi {
 
     public FurnaceAi(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+    }
+
+    public static boolean hasValidTrackedTemporaryFurnace(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
+        if (serverLevel == null
+                || playerNpc == null
+                || !playerNpc.getPersistentData().contains(TEMP_FURNACE_X)
+                || !playerNpc.getPersistentData().contains(TEMP_FURNACE_Y)
+                || !playerNpc.getPersistentData().contains(TEMP_FURNACE_Z)) {
+            return false;
+        }
+
+        BlockPos pos = new BlockPos(
+                playerNpc.getPersistentData().getInt(TEMP_FURNACE_X),
+                playerNpc.getPersistentData().getInt(TEMP_FURNACE_Y),
+                playerNpc.getPersistentData().getInt(TEMP_FURNACE_Z)
+        );
+        return serverLevel.hasChunkAt(pos)
+                && serverLevel.getBlockState(pos).is(Blocks.FURNACE)
+                && serverLevel.getBlockEntity(pos) instanceof FurnaceBlockEntity;
     }
 
     public boolean hasFurnaceWork(ServerLevel serverLevel, BlockPos pos) {
@@ -61,10 +86,33 @@ public final class FurnaceAi {
                 && this.hasFuel();
     }
 
+    public String describePendingWork(ServerLevel serverLevel) {
+        if (PlayerNpcBuildMaterialUtil.needsGlassSmelting(serverLevel, this.playerNpc)) {
+            return "build glass";
+        }
+        if (PlayerNpcBuildMaterialUtil.needsStoneSmelting(serverLevel, this.playerNpc)) {
+            return "build stone";
+        }
+        if (PlayerNpcBuildMaterialUtil.needsTorchCharcoalSmelting(serverLevel, this.playerNpc)) {
+            return "build torch charcoal";
+        }
+        if (FarmAi.needsFarmTorchCharcoalSmelting(serverLevel, this.playerNpc)) {
+            return "farm torch charcoal";
+        }
+        if (this.hasCookableFood()) {
+            return "food";
+        }
+        if (this.hasHeldOrInventoryItem(FurnaceAi::isSmeltableOreMaterial)) {
+            return "ore";
+        }
+        return "unknown";
+    }
+
     public boolean hasInputForWork(ServerLevel serverLevel) {
         return PlayerNpcBuildMaterialUtil.needsGlassSmelting(serverLevel, this.playerNpc)
                 || PlayerNpcBuildMaterialUtil.needsStoneSmelting(serverLevel, this.playerNpc)
                 || PlayerNpcBuildMaterialUtil.needsTorchCharcoalSmelting(serverLevel, this.playerNpc)
+                || FarmAi.needsFarmTorchCharcoalSmelting(serverLevel, this.playerNpc)
                 || this.hasCookableFood()
                 || this.hasHeldOrInventoryItem(FurnaceAi::isSmeltableOreMaterial);
     }
@@ -206,7 +254,8 @@ public final class FurnaceAi {
     }
 
     private Optional<ItemStack> takeTorchCharcoalInput(ServerLevel serverLevel) {
-        if (!PlayerNpcBuildMaterialUtil.needsTorchCharcoalSmelting(serverLevel, this.playerNpc)) {
+        if (!PlayerNpcBuildMaterialUtil.needsTorchCharcoalSmelting(serverLevel, this.playerNpc)
+                && !FarmAi.needsFarmTorchCharcoalSmelting(serverLevel, this.playerNpc)) {
             return Optional.empty();
         }
 
@@ -242,8 +291,10 @@ public final class FurnaceAi {
 
     private boolean isTorchCharcoalWork(ServerLevel serverLevel, FurnaceBlockEntity furnace) {
         return PlayerNpcBuildMaterialUtil.needsTorchCharcoalSmelting(serverLevel, this.playerNpc)
+                || FarmAi.needsFarmTorchCharcoalSmelting(serverLevel, this.playerNpc)
                 || furnace.getItem(0).is(ItemTags.LOGS)
-                && PlayerNpcBuildMaterialUtil.hasMissingCharcoalBuildMaterial(serverLevel, this.playerNpc);
+                && (PlayerNpcBuildMaterialUtil.hasMissingCharcoalBuildMaterial(serverLevel, this.playerNpc)
+                || FarmAi.hasPendingFarmLighting(serverLevel, this.playerNpc));
     }
 
     private boolean hasCookableFood() {

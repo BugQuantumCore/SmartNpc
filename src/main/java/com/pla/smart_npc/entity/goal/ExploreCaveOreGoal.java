@@ -494,7 +494,7 @@ public class ExploreCaveOreGoal extends Goal {
         }
 
         BlockPos surfaceTarget = this.findSurfaceEscapeTarget(serverLevel, feet);
-        if (surfaceTarget != null) {
+        if (surfaceTarget != null && !this.isTreeCanopyColumn(serverLevel, feet, surfaceTarget)) {
             this.playerNpc.requestExplorationUpwardEscapeTo(surfaceTarget, UPWARD_ESCAPE_REQUEST_TICKS, 0);
         }
     }
@@ -509,8 +509,33 @@ public class ExploreCaveOreGoal extends Goal {
         return this.playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
                 && !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
                 && this.playerNpc.shouldPrioritizeLogGathering()
+                && !GatherLogsGoal.isLogGatheringEpisodeActive(this.playerNpc)
                 && !serverLevel.isNight()
                 && !serverLevel.canSeeSky(this.playerNpc.blockPosition().above());
+    }
+
+    private boolean isTreeCanopyColumn(ServerLevel serverLevel, BlockPos feet, BlockPos surfaceTarget) {
+        boolean foundTreeBlock = false;
+        int topY = Math.min(surfaceTarget.getY(), serverLevel.getMaxBuildHeight() - 1);
+        for (int y = feet.getY() + 1; y <= topY; y++) {
+            BlockPos pos = new BlockPos(feet.getX(), y, feet.getZ());
+            BlockState state = serverLevel.getBlockState(pos);
+            if (state.isAir()) {
+                continue;
+            }
+            if (state.is(BlockTags.LOGS)
+                    || state.is(BlockTags.LEAVES)
+                    || state.is(Blocks.VINE)
+                    || state.is(Blocks.CAVE_VINES)
+                    || state.is(Blocks.CAVE_VINES_PLANT)) {
+                foundTreeBlock = true;
+                continue;
+            }
+            if (!state.canBeReplaced() || !state.getCollisionShape(serverLevel, pos).isEmpty()) {
+                return false;
+            }
+        }
+        return foundTreeBlock;
     }
 
     private BlockPos findSurfaceEscapeTarget(ServerLevel serverLevel, BlockPos feet) {

@@ -86,6 +86,9 @@ public class ManageHomeBaseGoal extends Goal {
                 || this.playerNpc.getManageHomeCooldown() > 0) {
             return false;
         }
+        if (GatherLogsGoal.isLogGatheringEpisodeActive(this.playerNpc)) {
+            return false;
+        }
         if (this.playerNpc.isStoneAccessClearing()) {
             if (!this.playerNpc.getIdleTraceDetail().startsWith("stone ")) {
                 this.playerNpc.setIdleTraceDetail(

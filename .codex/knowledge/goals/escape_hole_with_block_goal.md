@@ -2,7 +2,7 @@
 
 ## Source
 
-- `src/main/java/com/pla/player_npc/entity/goal/EscapeHoleWithBlockGoal.java`
+- `src/main/java/com/pla/smart_npc/entity/goal/EscapeHoleWithBlockGoal.java`
 - Registered from `PlayerNpcEntity.registerGoals()`.
 
 ## Purpose
@@ -19,10 +19,20 @@ One-block obstacles or flat ground with an open adjacent exit must not trigger t
 
 The delayed placement prevents the block from being placed inside the NPC's bounding box before the jump lifts it clear.
 
-Utility blocks such as crafting tables, chests, furnaces, beds, and torches are not used for this escape.
+Utility blocks such as crafting tables, chests, furnaces, beds, and torches are not used as pillar material for this escape.
+
+A bed that physically occupies the active pillar/body column is a narrow clearance exception. The escape goal may break it even when it lies inside the home/build footprint, because otherwise the bed collision is invisible to pillar recovery and the NPC loops while shifting the pillar base. This exception does not extend to any other build block, and owned-farm destruction protection still applies to the target and its matching head/foot half. Occupied beds are not cleared. Bed breaking allows the bed block entity only for this validated target, uses normal `destroyBlock` neighbor updates so the paired half is removed, and emits loot from the struck half once; a no-drop cleanup removes a matching half only if it survives that vanilla update.
 
 Emergency escape material mining re-equips a pickaxe before every mining pass, adds cobblestone or cobbled deepslate directly to the NPC inventory after breaking the source block, damages the pickaxe, uses the same crack overlay helper as other gradual mining goals, and plays the source block's hit sound during mining. The final break sound/effect comes from `ServerLevel.destroyBlock`, so it only plays after the source block is actually broken.
 
-While pillaring, the NPC temporarily equips a placeable block in the main hand, looks down at the placement position, places the block underneath after the jump clears the old feet space, and restores the previous hand item when the goal stops. The held block is counted as available escape material, and placement can use a fallback near the top of the jump so the NPC does not repeatedly jump without placing.
+While pillaring, the NPC temporarily equips a placeable block in the main hand, looks down at the placement position, uses a player-like pre-placement delay, places the block underneath after the jump clears the old feet space, and restores the previous hand item when the goal stops. The held block is counted as available escape material, and placement can use a fallback near the top of the jump so the NPC does not repeatedly jump without placing.
+
+Pillar ascent must remain physical and visibly paced. Placement is allowed only when the live NPC bounding box is clear; pillar code must not approve a hypothetical collision-free position and then snap/teleport the NPC onto it. After placement, the NPC must fall onto that exact solid support. The dedicated emergency escape goal remains grounded there for 12 ticks before starting the next jump, while shared `PillarUpAi` uses two consecutive grounded ticks so routine resource, pickup, and return pillars do not pause excessively after every block. The active support column and the remembered temporary-support link down to natural ground are revalidated throughout either settlement window. If any support becomes replaceable, loses collision, or leaves a gap, ascent stops and retries through the bounded escape cooldown instead of continuing on a floating column.
+
+Airborne placement readiness must be derived from the proposed block's real collision boxes against the live NPC bounding box. Do not use an early height threshold such as 0.65 or 0.95 blocks and then treat the expected body overlap as a terminal clipping failure: a normal 0.42 jump is still inside a full support cube at those heights. `EscapeHoleWithBlockGoal` waits only two post-jump ticks before checking the live clearance each tick; shared `PillarUpAi` performs its visible action delay before jumping, then checks clearance on every airborne tick. Expected overlap waits for the apex window, while actual ceiling obstruction still follows bounded blocker recovery.
+
+Exploration may request this pillar mode only toward a genuine local surface stand. `ExploreAroundGoal` rejects stands supported by logs/leaves and rejects relaxed elevated candidates without at least one terrain-supported walk-off, preventing a tree trunk or isolated canopy column from being treated as a surface route. Missing-string fishing strolls never request this mode; a confirmed leaf collision in their navigation corridor belongs to shared foliage clearing instead.
+
+Completed exploration supports remain marked temporarily for placement safety, but that memory must not delay `DescendHighColumnGoal`. Once the upward request has ended, the hole cooldown has elapsed, and the existing narrow-column, lower-terrain, home, farm, fluid, block-entity, and breakability checks pass, descent may remove the remembered support immediately instead of waiting for the 45-second support-memory expiry.
 
 Cooldown uses `PlayerNpcEntity.holeEscapeCooldown`, decremented from the entity tick.

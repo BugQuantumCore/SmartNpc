@@ -22,6 +22,7 @@ public final class EpicFightCompat {
     private static Method registerArmaturesMethod;
     private static Method keepDiggingStateMethod;
     private static Method playDiggingAnimationMethod;
+    private static Method playMainHandUseAnimationMethod;
     private static Method stopDiggingAnimationMethod;
     private static Method keepSleepingStateMethod;
     private static Method playSleepingAnimationMethod;
@@ -66,6 +67,10 @@ public final class EpicFightCompat {
         invokeEntityHook("play digging animation", playerNpc, EpicFightCompat::playDiggingAnimationMethod);
     }
 
+    public static boolean playMainHandUseAnimation(PlayerNpcEntity playerNpc) {
+        return invokeBooleanEntityHook("play main-hand use animation", playerNpc, EpicFightCompat::playMainHandUseAnimationMethod);
+    }
+
     public static void stopDiggingAnimation(PlayerNpcEntity playerNpc) {
         invokeEntityHook("stop digging animation", playerNpc, EpicFightCompat::stopDiggingAnimationMethod);
     }
@@ -106,6 +111,19 @@ public final class EpicFightCompat {
         }
     }
 
+    private static boolean invokeBooleanEntityHook(String action, PlayerNpcEntity playerNpc, MethodLookup methodLookup) {
+        if (!isLoaded() || hooksDisabled) {
+            return false;
+        }
+
+        try {
+            return Boolean.TRUE.equals(methodLookup.method().invoke(null, playerNpc));
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException exception) {
+            disableHooks(action, exception);
+            return false;
+        }
+    }
+
     private static Method registerArmaturesMethod() throws ClassNotFoundException, NoSuchMethodException {
         if (registerArmaturesMethod == null) {
             registerArmaturesMethod = hooksClass().getMethod("registerArmatures");
@@ -125,6 +143,13 @@ public final class EpicFightCompat {
             playDiggingAnimationMethod = entityHookMethod("playDiggingAnimation");
         }
         return playDiggingAnimationMethod;
+    }
+
+    private static Method playMainHandUseAnimationMethod() throws ClassNotFoundException, NoSuchMethodException {
+        if (playMainHandUseAnimationMethod == null) {
+            playMainHandUseAnimationMethod = entityHookMethod("playMainHandUseAnimation");
+        }
+        return playMainHandUseAnimationMethod;
     }
 
     private static Method stopDiggingAnimationMethod() throws ClassNotFoundException, NoSuchMethodException {

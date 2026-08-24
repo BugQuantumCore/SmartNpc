@@ -63,6 +63,7 @@
   "ai.player_npc.scared_hiding": "Hiding",
   "ai.player_npc.trolling_golem": "Trolling golem",
   "ai.player_npc.building_house": "Building shelter",
+  "ai.player_npc.building_night_camp": "Waiting out the night",
   "ai.player_npc.terraforming_build_site": "Terraforming build site",
   "ai.player_npc.calling_for_help": "Calling for help",
   "ai.player_npc.assisting_alert": "Assisting alert",

@@ -42,8 +42,20 @@ public class InventoryUtils {
     }
 
     public static boolean addItem(SimpleContainer inventory, ItemStack stack) {
-        if (stack.isEmpty()) {
-            return true;
+        return addItemAndReturnRemainder(inventory, stack).isEmpty();
+    }
+
+    /**
+     * Inserts as much of {@code stack} as possible and returns only the part that did not fit.
+     * Callers that may drop overflow must use this instead of dropping the original stack after
+     * {@link #addItem(SimpleContainer, ItemStack)} reports a partial insertion.
+     */
+    public static ItemStack addItemAndReturnRemainder(SimpleContainer inventory, ItemStack stack) {
+        if (stack == null || stack.isEmpty()) {
+            return ItemStack.EMPTY;
+        }
+        if (inventory == null) {
+            return stack.copy();
         }
 
         ItemStack remaining = stack.copy();
@@ -77,12 +89,19 @@ public class InventoryUtils {
         if (changed) {
             inventory.setChanged();
         }
-        return remaining.isEmpty();
+        return remaining;
     }
 
     public static boolean addItem(Entity entity, ItemStack stack) {
         SimpleContainer inventory = getTrackedInventory(entity);
         return inventory != null && addItem(inventory, stack);
+    }
+
+    public static ItemStack addItemAndReturnRemainder(Entity entity, ItemStack stack) {
+        SimpleContainer inventory = getTrackedInventory(entity);
+        return inventory == null
+                ? stack == null ? ItemStack.EMPTY : stack.copy()
+                : addItemAndReturnRemainder(inventory, stack);
     }
 
     public static boolean hasItem(SimpleContainer inventory, ItemLike itemLike) {

@@ -13,6 +13,7 @@ import yesman.epicfight.world.capabilities.entitypatch.LivingEntityPatch;
 
 public final class EpicFight {
     private static boolean warnedMissingDigAnimation;
+    private static boolean warnedMissingUseAnimation;
     private static boolean warnedMissingSleepAnimation;
 
     private EpicFight() {
@@ -48,6 +49,20 @@ public final class EpicFight {
             patch.currentCompositeMotion = LivingMotions.DIGGING;
             patch.playAnimationSynchronized(animation, 0.0F);
         }
+    }
+
+    public static boolean playMainHandUseAnimation(PlayerNpcEntity playerNpc) {
+        if (!canAnimate(playerNpc)) {
+            return false;
+        }
+
+        LivingEntityPatch<?> patch = getPatch(playerNpc);
+        AssetAccessor<? extends StaticAnimation> animation = mainHandUseAnimation();
+        if (patch != null && animation != null) {
+            patch.playAnimationSynchronized(animation, 0.0F);
+            return true;
+        }
+        return false;
     }
 
     public static void stopDiggingAnimation(PlayerNpcEntity playerNpc) {
@@ -129,6 +144,19 @@ public final class EpicFight {
         return null;
     }
 
+    static AssetAccessor<? extends StaticAnimation> mainHandUseAnimation() {
+        AssetAccessor<? extends StaticAnimation> animation = EpicFightCloneAnimations.USE_MAINHAND;
+        if (isMainHandUseAnimationUsable(animation)) {
+            return animation;
+        }
+
+        if (!warnedMissingUseAnimation) {
+            warnedMissingUseAnimation = true;
+            SmartNpc.LOGGER.warn("Smart NPC Epic Fight main-hand use animation is unavailable; using the vanilla swing instead.");
+        }
+        return null;
+    }
+
     private static LivingEntityPatch<?> getPatch(PlayerNpcEntity playerNpc) {
         return EpicFightCapabilities.getEntityPatch(playerNpc, LivingEntityPatch.class);
     }
@@ -168,6 +196,22 @@ public final class EpicFight {
             if (!warnedMissingSleepAnimation) {
                 warnedMissingSleepAnimation = true;
                 SmartNpc.LOGGER.warn("Smart NPC Epic Fight sleeping animation could not be resolved.", exception);
+            }
+            return false;
+        }
+    }
+
+    private static boolean isMainHandUseAnimationUsable(AssetAccessor<? extends StaticAnimation> animation) {
+        if (animation == null) {
+            return false;
+        }
+
+        try {
+            return animation.isPresent();
+        } catch (RuntimeException exception) {
+            if (!warnedMissingUseAnimation) {
+                warnedMissingUseAnimation = true;
+                SmartNpc.LOGGER.warn("Smart NPC Epic Fight main-hand use animation could not be resolved; using the vanilla swing instead.", exception);
             }
             return false;
         }

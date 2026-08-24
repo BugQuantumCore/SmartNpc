@@ -25,7 +25,6 @@ import java.util.Optional;
 import java.util.function.Predicate;
 
 public class BeingAtHomeGoal extends Goal {
-    private static final double HOME_START_DISTANCE_SQR = 28.0D * 28.0D;
     private static final double AFK_REACHED_DISTANCE_SQR = 1.5D * 1.5D;
     private static final int MIN_AFK_TICKS = 20 * 12;
     private static final int MAX_AFK_TICKS = 20 * 35;
@@ -106,6 +105,10 @@ public class BeingAtHomeGoal extends Goal {
 
         this.homeArea = savedHome.get();
         this.sheltering = shelterNow;
+        if (!ReturnHomeGoal.isInsideHomeWorkArea(this.playerNpc, this.homeArea)
+                || ReturnHomeGoal.needsHomeSurfaceRecovery(this.playerNpc, serverLevel)) {
+            return false;
+        }
         if (!this.sheltering
                 && (this.playerNpc.shouldPrioritizeLogGathering()
                 || this.playerNpc.shouldPrioritizeCobblestoneGathering())) {
@@ -116,11 +119,6 @@ public class BeingAtHomeGoal extends Goal {
         }
         if (!this.sheltering && !this.isFinishedHouse(serverLevel, this.homeArea)) {
             this.cooldownTicks = SHORT_COOLDOWN_TICKS;
-            return false;
-        }
-
-        BlockPos homeCenter = PlayerNpcHomeUtil.center(this.homeArea);
-        if (this.playerNpc.distanceToSqr(homeCenter.getX() + 0.5D, homeCenter.getY(), homeCenter.getZ() + 0.5D) > HOME_START_DISTANCE_SQR) {
             return false;
         }
 
@@ -139,7 +137,11 @@ public class BeingAtHomeGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
-        return (this.sheltering || this.afkTicks > 0)
+        return this.playerNpc.level() instanceof ServerLevel serverLevel
+                && this.homeArea != null
+                && ReturnHomeGoal.isInsideHomeWorkArea(this.playerNpc, this.homeArea)
+                && !ReturnHomeGoal.needsHomeSurfaceRecovery(this.playerNpc, serverLevel)
+                && (this.sheltering || this.afkTicks > 0)
                 && this.afkPos != null
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
@@ -274,7 +276,7 @@ public class BeingAtHomeGoal extends Goal {
         BlockPos current = this.playerNpc.blockPosition();
         BlockPos homeCenter = PlayerNpcHomeUtil.center(homeArea);
         if (this.canStandAt(serverLevel, current)
-                && current.distSqr(homeCenter) <= HOME_START_DISTANCE_SQR) {
+                && ReturnHomeGoal.isInsideHomeWorkArea(current, homeArea)) {
             return current.immutable();
         }
 
@@ -284,7 +286,9 @@ public class BeingAtHomeGoal extends Goal {
             for (int z = homeCenter.getZ() - radius; z <= homeCenter.getZ() + radius; z++) {
                 for (int y = homeCenter.getY() - 2; y <= homeCenter.getY() + 4; y++) {
                     BlockPos candidate = new BlockPos(x, y, z);
-                    if (this.canStandAt(serverLevel, candidate) && this.canReachOrAlreadyAt(serverLevel, homeArea, candidate)) {
+                    if (ReturnHomeGoal.isInsideHomeWorkArea(candidate, homeArea)
+                            && this.canStandAt(serverLevel, candidate)
+                            && this.canReachOrAlreadyAt(serverLevel, homeArea, candidate)) {
                         candidates.add(candidate.immutable());
                     }
                 }

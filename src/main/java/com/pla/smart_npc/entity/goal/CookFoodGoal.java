@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.FurnaceAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
@@ -10,6 +11,7 @@ import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
+import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -33,10 +35,6 @@ import java.util.EnumSet;
 import java.util.List;
 
 public class CookFoodGoal extends Goal {
-    public static final String TEMP_FURNACE_X = "PlayerNpcTemporaryFurnaceX";
-    public static final String TEMP_FURNACE_Y = "PlayerNpcTemporaryFurnaceY";
-    public static final String TEMP_FURNACE_Z = "PlayerNpcTemporaryFurnaceZ";
-
     private static final int COOLDOWN_TICKS = 20 * 20;
     private static final int FAIL_COOLDOWN_TICKS = 20 * 4;
     private static final int FURNACE_SCAN_RADIUS = 5;
@@ -67,6 +65,7 @@ public class CookFoodGoal extends Goal {
     private boolean temporaryFurnace;
     private boolean usingTemporaryTool;
     private boolean returnTemporaryMainHandOnRestore;
+    private String furnaceWorkReason = "unknown";
 
     public CookFoodGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -91,7 +90,7 @@ public class CookFoodGoal extends Goal {
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
-        if (this.shouldDeferForPrimaryStoneSupply(serverLevel)) {
+        if (this.shouldDeferForPrimarySupply(serverLevel)) {
             return false;
         }
         if (this.shouldDeferForFishingNightCamp()) {
@@ -105,6 +104,9 @@ public class CookFoodGoal extends Goal {
         if (temporary != null) {
             if (serverLevel.getBlockState(temporary).is(Blocks.FURNACE)
                     && serverLevel.getBlockEntity(temporary) instanceof FurnaceBlockEntity furnace) {
+                if (this.isInsideOwnedFarmFurnaceExclusion(temporary)) {
+                    return this.planRecovery(serverLevel, temporary);
+                }
                 if (this.furnaceAi.hasFurnaceWork(serverLevel, furnace)) {
                     return this.planInteraction(serverLevel, temporary, true);
                 }
@@ -145,10 +147,14 @@ public class CookFoodGoal extends Goal {
         return placement != null && this.planPlacement(serverLevel, placement, Mode.PLACE_TEMPORARY, true);
     }
 
-    private boolean shouldDeferForPrimaryStoneSupply(ServerLevel serverLevel) {
+    private boolean shouldDeferForPrimarySupply(ServerLevel serverLevel) {
+        if (GatherLogsGoal.isLogGatheringEpisodeActive(this.playerNpc)) {
+            return true;
+        }
         return !serverLevel.isNight()
                 && !serverLevel.isThundering()
-                && GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel);
+                && (GatherLogsGoal.hasLogSupplyDemand(this.playerNpc, serverLevel)
+                || GatherStoneGoal.isStoneSupplyPhaseActive(this.playerNpc, serverLevel));
     }
 
     private boolean shouldDeferForFishingNightCamp() {
@@ -157,7 +163,9 @@ public class CookFoodGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
-        return !this.finished
+        return this.playerNpc.level() instanceof ServerLevel serverLevel
+                && !this.shouldDeferForPrimarySupply(serverLevel)
+                && !this.finished
                 && this.furnacePos != null
                 && this.cookTicks < MAX_COOK_TICKS
                 && this.playerNpc.isAlive()
@@ -266,6 +274,7 @@ public class CookFoodGoal extends Goal {
         this.furnacePos = pos.immutable();
         this.furnaceStandPos = stand;
         this.temporaryFurnace = temporary;
+        this.furnaceWorkReason = this.furnaceAi.describePendingWork(serverLevel);
         return true;
     }
 
@@ -285,7 +294,7 @@ public class CookFoodGoal extends Goal {
 
         this.lookAtFurnace();
         if (!this.isAtFurnaceStand()) {
-            this.playerNpc.setCurrentAiDetail("walking to furnace placement");
+            this.playerNpc.setCurrentAiDetail(this.placementDetail("walking to furnace placement"));
             if (!this.moveToFurnaceStand()) {
                 this.finished = true;
             }
@@ -294,7 +303,7 @@ public class CookFoodGoal extends Goal {
 
         this.playerNpc.getNavigation().stop();
         if (this.actionDelayTicks++ < ACTION_DELAY_TICKS) {
-            this.playerNpc.setCurrentAiDetail("preparing furnace");
+            this.playerNpc.setCurrentAiDetail(this.placementDetail("preparing furnace"));
             return;
         }
         this.actionDelayTicks = 0;
@@ -337,6 +346,22 @@ public class CookFoodGoal extends Goal {
             this.toolAi.restoreMainHand();
             this.clearTemporaryFurnace();
             this.acted = true;
+            this.finished = true;
+            return;
+        }
+
+        if (this.isInsideOwnedFarmFurnaceExclusion(this.furnacePos)) {
+            if (!this.ensureFurnaceStand(serverLevel) || !this.isAtFurnaceStand()) {
+                this.breakingBlockAi.stop();
+                this.toolAi.restoreMainHand();
+                this.playerNpc.setCurrentAiDetail("recovering misplaced farm furnace");
+                if (!this.moveToFurnaceStand()) {
+                    this.finished = true;
+                }
+                return;
+            }
+            this.playerNpc.getNavigation().stop();
+            this.acted = this.packMisplacedTemporaryFurnace(serverLevel);
             this.finished = true;
             return;
         }
@@ -506,6 +531,25 @@ public class CookFoodGoal extends Goal {
     private BlockPos findTemporaryFurnacePlacement(ServerLevel serverLevel) {
         BlockPos center = this.playerNpc.blockPosition();
         List<BlockPos> candidates = new ArrayList<>();
+        Plan farmPlan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        if (farmPlan != null && !farmPlan.pathPositions().isEmpty()) {
+            BlockPos insideGateFeet = farmPlan.pathPositions().get(0).above();
+            int outwardX = Integer.compare(farmPlan.gatePos().getX(), insideGateFeet.getX());
+            int outwardZ = Integer.compare(farmPlan.gatePos().getZ(), insideGateFeet.getZ());
+            BlockPos outsideGateFeet = farmPlan.gatePos().offset(outwardX, 0, outwardZ);
+            for (int radius = 1; radius <= 3; radius++) {
+                for (int dx = -radius; dx <= radius; dx++) {
+                    for (int dz = -radius; dz <= radius; dz++) {
+                        if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) {
+                            continue;
+                        }
+                        for (int dy = -1; dy <= 1; dy++) {
+                            candidates.add(outsideGateFeet.offset(dx, dy, dz));
+                        }
+                    }
+                }
+            }
+        }
         for (Direction direction : Direction.Plane.HORIZONTAL) {
             candidates.add(center.relative(direction));
         }
@@ -523,6 +567,7 @@ public class CookFoodGoal extends Goal {
                 }
             }
         }
+        candidates = new ArrayList<>(candidates.stream().distinct().toList());
         candidates.sort(Comparator.comparingDouble(center::distSqr));
 
         for (BlockPos candidate : candidates) {
@@ -536,6 +581,9 @@ public class CookFoodGoal extends Goal {
 
     private boolean canPlaceFurnaceAt(ServerLevel serverLevel, BlockPos pos) {
         if (!serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+            return false;
+        }
+        if (this.isInsideOwnedFarmFurnaceExclusion(pos)) {
             return false;
         }
         if (this.homeArea != null && PlayerNpcHomeUtil.isInside(this.homeArea, pos)) {
@@ -566,7 +614,10 @@ public class CookFoodGoal extends Goal {
                 return immutable;
             }
             Path path = this.playerNpc.getNavigation().createPath(immutable, 0);
-            if (path != null && path.canReach()) {
+            if (path != null
+                    && path.canReach()
+                    && path.getEndNode() != null
+                    && path.getEndNode().asBlockPos().equals(immutable)) {
                 return immutable;
             }
         }
@@ -601,10 +652,45 @@ public class CookFoodGoal extends Goal {
             return false;
         }
         Path path = this.playerNpc.getNavigation().createPath(this.furnaceStandPos, 0);
-        if (path == null || !path.canReach()) {
+        if (path == null
+                || !path.canReach()
+                || path.getEndNode() == null
+                || !path.getEndNode().asBlockPos().equals(this.furnaceStandPos)) {
             return false;
         }
         return this.playerNpc.getNavigation().moveTo(path, 1.0D);
+    }
+
+    private boolean packMisplacedTemporaryFurnace(ServerLevel serverLevel) {
+        if (!(serverLevel.getBlockEntity(this.furnacePos) instanceof FurnaceBlockEntity furnace)) {
+            return false;
+        }
+        List<ItemStack> contents = new ArrayList<>(furnace.getContainerSize());
+        for (int slot = 0; slot < furnace.getContainerSize(); slot++) {
+            contents.add(furnace.getItem(slot).copy());
+            furnace.setItem(slot, ItemStack.EMPTY);
+        }
+        furnace.setChanged();
+        if (!serverLevel.removeBlock(this.furnacePos, false)) {
+            for (int slot = 0; slot < contents.size(); slot++) {
+                furnace.setItem(slot, contents.get(slot));
+            }
+            furnace.setChanged();
+            return false;
+        }
+        for (ItemStack stack : contents) {
+            this.returnStack(stack);
+        }
+        this.returnStack(new ItemStack(Items.FURNACE));
+        this.placingBlockAi.playMainHandAction();
+        this.clearTemporaryFurnace();
+        this.playerNpc.setCurrentAiDetail("packed misplaced farm furnace");
+        return true;
+    }
+
+    private boolean isInsideOwnedFarmFurnaceExclusion(BlockPos pos) {
+        return FarmAi.isProtectedFarmBlock(this.playerNpc, pos)
+                || FarmAi.isInsideOwnedFarmWorkOrEntranceFootprint(this.playerNpc, pos);
     }
 
     private double distanceToFurnaceSqr(BlockPos standPos, BlockPos pos) {
@@ -713,27 +799,38 @@ public class CookFoodGoal extends Goal {
     }
 
     private BlockPos getTemporaryFurnacePos() {
-        if (!this.playerNpc.getPersistentData().contains(TEMP_FURNACE_X)) {
+        if (FurnaceAi.TEMP_FURNACE_KIND_NIGHT_CAMP.equals(
+                this.playerNpc.getPersistentData().getString(FurnaceAi.TEMP_FURNACE_KIND))
+                || !this.playerNpc.getPersistentData().contains(FurnaceAi.TEMP_FURNACE_X)) {
             return null;
         }
 
         return new BlockPos(
-                this.playerNpc.getPersistentData().getInt(TEMP_FURNACE_X),
-                this.playerNpc.getPersistentData().getInt(TEMP_FURNACE_Y),
-                this.playerNpc.getPersistentData().getInt(TEMP_FURNACE_Z)
+                this.playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_X),
+                this.playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Y),
+                this.playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Z)
         );
     }
 
     private void saveTemporaryFurnace(BlockPos pos) {
-        this.playerNpc.getPersistentData().putInt(TEMP_FURNACE_X, pos.getX());
-        this.playerNpc.getPersistentData().putInt(TEMP_FURNACE_Y, pos.getY());
-        this.playerNpc.getPersistentData().putInt(TEMP_FURNACE_Z, pos.getZ());
+        this.playerNpc.getPersistentData().putInt(FurnaceAi.TEMP_FURNACE_X, pos.getX());
+        this.playerNpc.getPersistentData().putInt(FurnaceAi.TEMP_FURNACE_Y, pos.getY());
+        this.playerNpc.getPersistentData().putInt(FurnaceAi.TEMP_FURNACE_Z, pos.getZ());
+        this.playerNpc.getPersistentData().putString(
+                FurnaceAi.TEMP_FURNACE_KIND,
+                FurnaceAi.TEMP_FURNACE_KIND_COOKING
+        );
     }
 
     private void clearTemporaryFurnace() {
-        this.playerNpc.getPersistentData().remove(TEMP_FURNACE_X);
-        this.playerNpc.getPersistentData().remove(TEMP_FURNACE_Y);
-        this.playerNpc.getPersistentData().remove(TEMP_FURNACE_Z);
+        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_X);
+        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Y);
+        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Z);
+        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_KIND);
+    }
+
+    private String placementDetail(String action) {
+        return action + " (work: " + this.furnaceWorkReason + ")";
     }
 
     private void lookAtFurnace() {
@@ -844,8 +941,9 @@ public class CookFoodGoal extends Goal {
     }
 
     private void returnStack(ItemStack stack) {
-        if (!stack.isEmpty() && !InventoryUtils.addItem(this.playerNpc, stack)) {
-            this.playerNpc.spawnAtLocation(stack);
+        ItemStack remainder = InventoryUtils.addItemAndReturnRemainder(this.playerNpc, stack);
+        if (!remainder.isEmpty()) {
+            this.playerNpc.spawnAtLocation(remainder);
         }
     }
 
@@ -861,6 +959,7 @@ public class CookFoodGoal extends Goal {
         this.temporaryFurnace = false;
         this.usingTemporaryTool = false;
         this.returnTemporaryMainHandOnRestore = false;
+        this.furnaceWorkReason = "unknown";
     }
 
     private enum Mode {

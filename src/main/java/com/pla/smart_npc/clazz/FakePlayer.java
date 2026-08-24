@@ -35,7 +35,8 @@ public class FakePlayer extends PathfinderMob {
     private static final List<FakePlayerName> HARDCODED_NAMES = List.of(
             new FakePlayerName("mine", PlayerNpcInterest.MINING),
             new FakePlayerName("build", PlayerNpcInterest.BUILDING),
-            new FakePlayerName("fish", PlayerNpcInterest.FISHING)
+            new FakePlayerName("fish", PlayerNpcInterest.FISHING),
+            new FakePlayerName("farm", PlayerNpcInterest.FARMING)
 //            new FakePlayerName("Darkere", PlayerNpcInterest.BUILDING, PlayerNpcInterest.HUNT_ANIMALS),
 //            new FakePlayerName("Darkhax", PlayerNpcInterest.MINING),
 //            new FakePlayerName("Emberwalker", PlayerNpcInterest.BUILDING, PlayerNpcInterest.HUNT_MONSTERS),

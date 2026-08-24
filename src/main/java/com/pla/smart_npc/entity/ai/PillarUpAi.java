@@ -15,6 +15,8 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 public final class PillarUpAi {
     public enum TickResult {
@@ -26,12 +28,11 @@ public final class PillarUpAi {
 
     private static final int JUMP_WINDUP_TICKS = 2;
     private static final int MAX_PLACE_WAIT_TICKS = 32;
-    private static final int FORCE_PLACE_TICKS = 3;
-    private static final double PLACE_CLEARANCE_Y = 0.65D;
-    private static final double FALLBACK_PLACE_CLEARANCE_Y = 0.55D;
     private static final double CENTER_EPSILON = 0.05D;
     private static final double CENTER_BLOCKER_PADDING = 0.04D;
     private static final int COLLISION_BLOCKER_FAIL_TICKS = 8;
+    private static final int PILLAR_SETTLE_TICKS = 2;
+    private static final int MAX_SETTLE_WAIT_TICKS = 30;
 
     private final PlayerNpcEntity playerNpc;
     private final ToolAi toolAi;
@@ -41,9 +42,14 @@ public final class PillarUpAi {
     private BlockPos placePos;
     private BlockPos lastPlacedPos;
     private BlockPos lastFailureBlockerPos;
+    private BlockPos observedJumpBlockerPos;
+    private BlockPos settlingSupportPos;
     private String lastFailureDetail = "";
     private int jumpDelayTicks;
     private int placeWaitTicks;
+    private int settleTicks;
+    private int settleWaitTicks;
+    private final Set<BlockPos> placedSupports = new LinkedHashSet<>();
 
     public PillarUpAi(PlayerNpcEntity playerNpc, ToolAi toolAi, ItemLike blockItem, BlockState placeState) {
         this.playerNpc = playerNpc;
@@ -54,7 +60,7 @@ public final class PillarUpAi {
     }
 
     public boolean isRunning() {
-        return this.placePos != null;
+        return this.placePos != null || this.settlingSupportPos != null;
     }
 
     public boolean canStart(ServerLevel serverLevel, BlockPos feet) {
@@ -70,6 +76,11 @@ public final class PillarUpAi {
         }
         if (!this.hasBlock()) {
             return "missing block item " + this.blockItem.asItem().getDescriptionId();
+        }
+
+        BlockPos missingSupport = this.findMissingTemporarySupportLink(serverLevel, feet);
+        if (missingSupport != null) {
+            return "missing pillar support " + posText(missingSupport);
         }
 
         String spaceBlocker = this.pillarSpaceBlocker(serverLevel, feet);
@@ -111,21 +122,42 @@ public final class PillarUpAi {
             return false;
         }
 
+        if (!this.placedSupports.contains(feet.below())) {
+            this.placedSupports.clear();
+        }
+        BlockPos missingSupport = this.findMissingPlacedSupport(serverLevel, feet);
+        if (missingSupport != null) {
+            this.lastFailureBlockerPos = missingSupport.immutable();
+            this.lastFailureDetail = "missing pillar support @ " + posText(missingSupport);
+            return false;
+        }
+
         this.placePos = feet.immutable();
         this.lastPlacedPos = null;
         this.lastFailureBlockerPos = null;
+        this.observedJumpBlockerPos = null;
         this.lastFailureDetail = "";
         this.jumpDelayTicks = JUMP_WINDUP_TICKS;
         this.placingBlockAi.resetDelay();
         this.placeWaitTicks = 0;
+        this.settleTicks = 0;
+        this.settleWaitTicks = 0;
         this.playerNpc.getNavigation().stop();
         this.lookDownAt(this.placePos);
         return true;
     }
 
     public TickResult tick(ServerLevel serverLevel) {
+        if (this.settlingSupportPos != null) {
+            return this.tickSupportSettlement(serverLevel);
+        }
         if (this.placePos == null) {
             return TickResult.IDLE;
+        }
+
+        BlockPos missingSupport = this.findMissingPlacedSupport(serverLevel, this.playerNpc.blockPosition());
+        if (missingSupport != null) {
+            return this.fail("missing pillar support @ " + posText(missingSupport), missingSupport);
         }
 
         if (this.jumpDelayTicks > 0) {
@@ -138,6 +170,10 @@ public final class PillarUpAi {
             }
             this.playerNpc.getNavigation().stop();
             this.lookDownAt(this.placePos);
+            if (this.jumpDelayTicks == 1
+                    && this.placingBlockAi.tickDelay(PlacingBlockAi.PILLAR_PLACE_DELAY)) {
+                return TickResult.RUNNING;
+            }
             this.jumpDelayTicks--;
             if (this.jumpDelayTicks <= 0) {
                 this.playerNpc.shortPillarJump();
@@ -145,23 +181,23 @@ public final class PillarUpAi {
             return TickResult.RUNNING;
         }
 
-        if (this.placingBlockAi.tickDelay(PlacingBlockAi.PILLAR_PLACE_DELAY)) {
-            return TickResult.RUNNING;
-        }
-
+        this.rememberJumpBlocker(serverLevel);
         if (this.tryAcceptOccupiedPillarSupport(serverLevel)) {
-            return TickResult.PLACED;
+            return TickResult.RUNNING;
         }
 
         this.placeWaitTicks++;
         if (this.placeWaitTicks > MAX_PLACE_WAIT_TICKS) {
-            BlockPos blocker = this.findCurrentCollisionBlocker(serverLevel);
+            BlockPos blocker = this.bestFailureBlocker(serverLevel);
             return this.fail("pillar clearance timeout", blocker);
         }
 
-        if (!this.hasPlacementClearance()) {
-            BlockPos blocker = this.findCurrentCollisionBlocker(serverLevel);
-            if (blocker != null && this.placeWaitTicks >= COLLISION_BLOCKER_FAIL_TICKS) {
+        if (!this.hasPlacementClearance(serverLevel, this.placePos, this.placeState)) {
+            BlockPos blocker = this.bestFailureBlocker(serverLevel);
+            boolean finishedBlockedJump = this.observedJumpBlockerPos != null
+                    && this.playerNpc.getDeltaMovement().y <= 0.05D;
+            if (blocker != null
+                    && (finishedBlockedJump || this.placeWaitTicks >= COLLISION_BLOCKER_FAIL_TICKS)) {
                 return this.fail("pillar jump blocked by " + blockText(serverLevel.getBlockState(blocker)), blocker);
             }
             this.lookDownAt(this.placePos);
@@ -170,7 +206,7 @@ public final class PillarUpAi {
 
         if (!serverLevel.getBlockState(this.placePos).canBeReplaced()) {
             if (this.tryAcceptOccupiedPillarSupport(serverLevel)) {
-                return TickResult.PLACED;
+                return TickResult.RUNNING;
             }
             return this.fail("pillar base no longer replaceable", this.placePos);
         }
@@ -189,11 +225,14 @@ public final class PillarUpAi {
             return this.fail("failed to set pillar block", this.placePos);
         }
 
-        this.playerNpc.markTemporaryPillarSupport(this.placePos);
-        this.snapAbovePillarIfNeeded(this.placePos);
-        this.lastPlacedPos = this.placePos.immutable();
-        this.clear();
-        return TickResult.PLACED;
+        BlockPos placedSupport = this.placePos.immutable();
+        if (!this.isStablePillarSupport(serverLevel, placedSupport)) {
+            return this.fail("placed pillar support did not remain solid", placedSupport);
+        }
+        this.playerNpc.markTemporaryPillarSupport(placedSupport);
+        this.placedSupports.add(placedSupport);
+        this.beginSupportSettlement(placedSupport);
+        return TickResult.RUNNING;
     }
 
     public BlockPos consumeLastPlacedPos() {
@@ -216,19 +255,25 @@ public final class PillarUpAi {
 
     public void clear() {
         this.placePos = null;
+        this.observedJumpBlockerPos = null;
+        this.settlingSupportPos = null;
         this.jumpDelayTicks = 0;
         this.placingBlockAi.resetDelay();
         this.placeWaitTicks = 0;
+        this.settleTicks = 0;
+        this.settleWaitTicks = 0;
+        this.placedSupports.clear();
     }
 
     public String detail() {
-        if (this.placePos == null) {
+        BlockPos activePos = this.placePos == null ? this.settlingSupportPos : this.placePos;
+        if (activePos == null) {
             return "";
         }
-        return "pillaring up @ "
-                + this.placePos.getX() + " "
-                + this.placePos.getY() + " "
-                + this.placePos.getZ();
+        return (this.settlingSupportPos == null ? "pillaring up @ " : "settling on pillar @ ")
+                + activePos.getX() + " "
+                + activePos.getY() + " "
+                + activePos.getZ();
     }
 
     public boolean hasPillarSpace(ServerLevel serverLevel, BlockPos feet) {
@@ -306,16 +351,15 @@ public final class PillarUpAi {
         return this.playerNpc.consumeInventoryItem(this.blockItem, 1).isPresent();
     }
 
-    private boolean hasPlacementClearance() {
-        if (this.placePos == null) {
+    private boolean hasPlacementClearance(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        if (pos == null || this.playerNpc.onGround()) {
             return false;
         }
-
-        double clearedY = this.playerNpc.getBoundingBox().minY - this.placePos.getY();
-        return clearedY >= PLACE_CLEARANCE_Y
-                || this.placeWaitTicks >= FORCE_PLACE_TICKS
-                && clearedY >= FALLBACK_PLACE_CLEARANCE_Y
-                && this.playerNpc.getDeltaMovement().y <= 0.05D;
+        return state.getCollisionShape(serverLevel, pos)
+                .toAabbs()
+                .stream()
+                .map(box -> box.move(pos))
+                .noneMatch(box -> box.intersects(this.playerNpc.getBoundingBox().inflate(0.02D)));
     }
 
     private boolean canPlaceWithoutClipping(ServerLevel serverLevel, BlockPos pos, BlockState state) {
@@ -328,18 +372,7 @@ public final class PillarUpAi {
                 .stream()
                 .map(box -> box.move(pos))
                 .toList();
-        if (boxes.stream().noneMatch(box -> box.intersects(this.playerNpc.getBoundingBox().inflate(0.02D)))) {
-            return true;
-        }
-
-        double snapUp = pos.getY() + 1.0D - this.playerNpc.getBoundingBox().minY;
-        if (snapUp < -0.05D || snapUp > 0.35D) {
-            return false;
-        }
-
-        AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
-        return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
-                && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox);
+        return boxes.stream().noneMatch(box -> box.intersects(this.playerNpc.getBoundingBox().inflate(0.02D)));
     }
 
     private boolean tryAcceptOccupiedPillarSupport(ServerLevel serverLevel) {
@@ -355,25 +388,13 @@ public final class PillarUpAi {
             return false;
         }
 
-        BlockPos feet = this.playerNpc.blockPosition();
-        if (feet.getX() != this.placePos.getX() || feet.getZ() != this.placePos.getZ()) {
+        if (!this.isStandingOnPillarSupport(serverLevel, this.placePos)) {
             return false;
         }
 
-        double snapUp = this.placePos.getY() + 1.0D - this.playerNpc.getBoundingBox().minY;
-        if (snapUp < -0.05D || snapUp > 1.25D) {
-            return false;
-        }
-
-        AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
-        if (!PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox)) {
-            return false;
-        }
-
-        this.playerNpc.markTemporaryPillarSupport(this.placePos);
-        this.snapAbovePillarIfNeeded(this.placePos);
-        this.lastPlacedPos = this.placePos.immutable();
-        this.clear();
+        BlockPos occupiedSupport = this.placePos.immutable();
+        this.placedSupports.add(occupiedSupport);
+        this.beginSupportSettlement(occupiedSupport);
         return true;
     }
 
@@ -403,6 +424,9 @@ public final class PillarUpAi {
     }
 
     private TickResult fail(String detail, BlockPos blockerPos) {
+        if (blockerPos == null) {
+            blockerPos = this.observedJumpBlockerPos;
+        }
         this.lastFailureDetail = detail == null ? "pillar failed" : detail;
         this.lastFailureBlockerPos = blockerPos == null ? null : blockerPos.immutable();
         this.lookAtFailureBlocker();
@@ -412,6 +436,42 @@ public final class PillarUpAi {
 
     private BlockPos findCurrentCollisionBlocker(ServerLevel serverLevel) {
         return this.findCollisionBlocker(serverLevel, this.playerNpc.getBoundingBox(), 0.08D, 0.35D);
+    }
+
+    /**
+     * Remember a ceiling hit throughout the airborne placement window. After the NPC falls, the
+     * live bounding box no longer intersects that block and callers would otherwise receive a null
+     * failure target and be unable to clear the obstruction.
+     */
+    private void rememberJumpBlocker(ServerLevel serverLevel) {
+        BlockPos blocker = this.findCurrentOverheadCollisionBlocker(serverLevel);
+        if (blocker != null && this.placePos != null && blocker.getY() > this.placePos.getY()) {
+            this.observedJumpBlockerPos = blocker.immutable();
+        }
+    }
+
+    private BlockPos bestFailureBlocker(ServerLevel serverLevel) {
+        if (this.observedJumpBlockerPos != null) {
+            BlockState observedState = serverLevel.getBlockState(this.observedJumpBlockerPos);
+            if (!observedState.getCollisionShape(serverLevel, this.observedJumpBlockerPos).isEmpty()) {
+                return this.observedJumpBlockerPos.immutable();
+            }
+            this.observedJumpBlockerPos = null;
+        }
+        return this.findCurrentCollisionBlocker(serverLevel);
+    }
+
+    private BlockPos findCurrentOverheadCollisionBlocker(ServerLevel serverLevel) {
+        AABB box = this.playerNpc.getBoundingBox();
+        AABB topSweep = new AABB(
+                box.minX + 0.02D,
+                Math.max(box.minY + 0.5D, box.maxY - 0.12D),
+                box.minZ + 0.02D,
+                box.maxX - 0.02D,
+                box.maxY + 0.35D,
+                box.maxZ - 0.02D
+        );
+        return this.findCollisionBlocker(serverLevel, topSweep);
     }
 
     private BlockPos findCollisionBlocker(ServerLevel serverLevel, AABB box, double horizontalPadding, double topPadding) {
@@ -424,6 +484,10 @@ public final class PillarUpAi {
                 box.maxZ + horizontalPadding
         );
 
+        return this.findCollisionBlocker(serverLevel, checkBox);
+    }
+
+    private BlockPos findCollisionBlocker(ServerLevel serverLevel, AABB checkBox) {
         int minX = Mth.floor(checkBox.minX);
         int minY = Mth.floor(checkBox.minY);
         int minZ = Mth.floor(checkBox.minZ);
@@ -445,16 +509,100 @@ public final class PillarUpAi {
         return null;
     }
 
-    private void snapAbovePillarIfNeeded(BlockPos pos) {
-        double topY = pos.getY() + 1.0D;
-        if (this.playerNpc.getBoundingBox().minY >= topY) {
-            return;
+    private void beginSupportSettlement(BlockPos supportPos) {
+        this.placePos = null;
+        this.observedJumpBlockerPos = null;
+        this.jumpDelayTicks = 0;
+        this.placeWaitTicks = 0;
+        this.placingBlockAi.resetDelay();
+        this.settlingSupportPos = supportPos.immutable();
+        this.settleTicks = 0;
+        this.settleWaitTicks = 0;
+    }
+
+    private TickResult tickSupportSettlement(ServerLevel serverLevel) {
+        BlockPos supportPos = this.settlingSupportPos;
+        if (supportPos == null) {
+            return TickResult.IDLE;
         }
 
-        Vec3 motion = this.playerNpc.getDeltaMovement();
-        this.playerNpc.setPos(this.playerNpc.getX(), topY, this.playerNpc.getZ());
-        this.playerNpc.setDeltaMovement(motion.x, Math.max(0.0D, motion.y), motion.z);
-        this.playerNpc.fallDistance = 0.0F;
+        BlockPos missingSupport = this.findMissingPlacedSupport(serverLevel, this.playerNpc.blockPosition());
+        if (missingSupport != null) {
+            return this.fail("missing pillar support @ " + posText(missingSupport), missingSupport);
+        }
+
+        this.playerNpc.getNavigation().stop();
+        this.lookDownAt(supportPos);
+        this.settleWaitTicks++;
+        if (!this.isStandingOnPillarSupport(serverLevel, supportPos)) {
+            this.settleTicks = 0;
+            if (this.settleWaitTicks > MAX_SETTLE_WAIT_TICKS) {
+                return this.fail("did not land on placed pillar support", supportPos);
+            }
+            return TickResult.RUNNING;
+        }
+
+        if (this.settleTicks <= 0) {
+            this.settleTicks = PILLAR_SETTLE_TICKS;
+        }
+        this.settleTicks--;
+        if (this.settleTicks > 0) {
+            return TickResult.RUNNING;
+        }
+
+        this.lastPlacedPos = supportPos.immutable();
+        this.settlingSupportPos = null;
+        this.settleWaitTicks = 0;
+        return TickResult.PLACED;
+    }
+
+    private boolean isStandingOnPillarSupport(ServerLevel serverLevel, BlockPos supportPos) {
+        if (!this.playerNpc.onGround() || !this.isStablePillarSupport(serverLevel, supportPos)) {
+            return false;
+        }
+        if (!this.playerNpc.blockPosition().below().equals(supportPos)) {
+            return false;
+        }
+
+        BlockState state = serverLevel.getBlockState(supportPos);
+        double supportTop = supportPos.getY() + state.getCollisionShape(serverLevel, supportPos).bounds().maxY;
+        return Math.abs(this.playerNpc.getBoundingBox().minY - supportTop) <= 0.12D;
+    }
+
+    private boolean isStablePillarSupport(ServerLevel serverLevel, BlockPos supportPos) {
+        if (supportPos == null
+                || !serverLevel.isInWorldBounds(supportPos)
+                || !serverLevel.getWorldBorder().isWithinBounds(supportPos)) {
+            return false;
+        }
+        BlockState state = serverLevel.getBlockState(supportPos);
+        return !state.canBeReplaced()
+                && !state.getCollisionShape(serverLevel, supportPos).isEmpty()
+                && state.getFluidState().isEmpty();
+    }
+
+    private BlockPos findMissingPlacedSupport(ServerLevel serverLevel, BlockPos feet) {
+        for (BlockPos supportPos : this.placedSupports) {
+            if (!this.isStablePillarSupport(serverLevel, supportPos)) {
+                return supportPos.immutable();
+            }
+        }
+        return this.findMissingTemporarySupportLink(serverLevel, feet);
+    }
+
+    private BlockPos findMissingTemporarySupportLink(ServerLevel serverLevel, BlockPos feet) {
+        BlockPos cursor = feet.below();
+        int checked = 0;
+        while (this.playerNpc.isTemporaryPillarSupport(cursor) && checked++ < 128) {
+            if (!this.isStablePillarSupport(serverLevel, cursor)) {
+                return cursor.immutable();
+            }
+            cursor = cursor.below();
+        }
+        if (checked > 0 && !this.isStablePillarSupport(serverLevel, cursor)) {
+            return cursor.immutable();
+        }
+        return null;
     }
 
     private boolean hasOtherEntityInBlock(ServerLevel serverLevel, BlockPos pos) {

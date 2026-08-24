@@ -4,6 +4,7 @@ import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.PlayerNpcFishingBobberEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.init.SmartNpcModEntities;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
@@ -102,14 +103,12 @@ public class PlayerNpcFishingGoal extends Goal {
 
     @Override
     public boolean canUse() {
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
-                || !this.playerNpc.isAlive()
-                || this.playerNpc.isNoAi()
-                || this.playerNpc.isPassenger()
-                || this.playerNpc.isHealing()
-                || this.playerNpc.getTarget() != null
-                || this.playerNpc.getUpwardEscapeTarget() != null
-                || !isReadyForFishingWork(this.playerNpc, serverLevel)) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        String blockedReason = fishingWorkBlockedReason(this.playerNpc, serverLevel);
+        if (blockedReason != null) {
+            this.traceCanUseBlocked(blockedReason);
             return false;
         }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
@@ -117,6 +116,12 @@ public class PlayerNpcFishingGoal extends Goal {
         }
 
         this.fishingSpot = findFishingSpot(this.playerNpc, serverLevel, true);
+        if (this.fishingSpot == null) {
+            this.traceCanUseBlocked("fishing blocked: no reachable surface water; rod="
+                    + fishingRodLocation(this.playerNpc)
+                    + " pos="
+                    + posText(this.playerNpc.blockPosition()));
+        }
         return this.fishingSpot != null;
     }
 
@@ -351,15 +356,82 @@ public class PlayerNpcFishingGoal extends Goal {
     }
 
     private static boolean isReadyForFishingWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        return playerNpc != null
-                && serverLevel != null
-                && playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING)
-                && !serverLevel.isNight()
-                && playerNpc.getFishingCooldown() <= 0
-                && playerNpc.getUpwardEscapeTarget() == null
-                && hasFishingRod(playerNpc)
-                && !playerNpc.shouldPrioritizeLogGathering()
-                && !playerNpc.shouldPrioritizeCobblestoneGathering();
+        return fishingWorkBlockedReason(playerNpc, serverLevel) == null;
+    }
+
+    private static String fishingWorkBlockedReason(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null || serverLevel == null) {
+            return "fishing blocked: missing npc or server level";
+        }
+        if (!playerNpc.isAlive()) {
+            return "fishing blocked: npc not alive";
+        }
+        if (playerNpc.isNoAi()) {
+            return "fishing blocked: no-ai enabled";
+        }
+        if (playerNpc.isPassenger()) {
+            return "fishing blocked: passenger";
+        }
+        if (playerNpc.isHealing()) {
+            return "fishing blocked: healing";
+        }
+        if (playerNpc.getTarget() != null) {
+            return "fishing blocked: combat target";
+        }
+        if (!playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING)) {
+            return "fishing blocked: fishing job inactive";
+        }
+        if (serverLevel.isNight()) {
+            return "fishing blocked: night camp active";
+        }
+        if (playerNpc.getFishingCooldown() > 0) {
+            return "fishing blocked: cooldown=" + playerNpc.getFishingCooldown();
+        }
+        if (playerNpc.getUpwardEscapeTarget() != null) {
+            return "fishing blocked: upward escape active";
+        }
+        if (!hasFishingRod(playerNpc)) {
+            return "fishing blocked: no usable carried rod; string="
+                    + PlayerNpcCraftingUtil.countItem(playerNpc.getInventory(), stack -> stack.is(Items.STRING));
+        }
+        if (playerNpc.shouldPrioritizeLogGathering()
+                && (GatherLogsGoal.isLogGatheringEpisodeActive(playerNpc)
+                || playerNpc.getGatherCooldown() <= 0)) {
+            return "fishing blocked: log support="
+                    + ResourceAi.countLogs(playerNpc)
+                    + "/"
+                    + playerNpc.getLogSupplyGoal()
+                    + (GatherLogsGoal.isLogGatheringEpisodeActive(playerNpc) ? " active" : " ready");
+        }
+        if (playerNpc.shouldPrioritizeCobblestoneGathering()
+                && playerNpc.getGatherCooldown() <= 0) {
+            return "fishing blocked: stone support="
+                    + ResourceAi.countStone(playerNpc)
+                    + "/"
+                    + playerNpc.getStoneSupplyGoal()
+                    + " ready";
+        }
+        return null;
+    }
+
+    private static String fishingRodLocation(PlayerNpcEntity playerNpc) {
+        if (playerNpc == null) {
+            return "none";
+        }
+        if (isFishingRod(playerNpc.getMainHandItem())) {
+            return "mainhand";
+        }
+        if (isFishingRod(playerNpc.getOffhandItem())) {
+            return "offhand";
+        }
+        if (InventoryUtils.hasItem(playerNpc, PlayerNpcFishingGoal::isFishingRod)) {
+            return "inventory";
+        }
+        return "none";
+    }
+
+    private void traceCanUseBlocked(String detail) {
+        this.playerNpc.setIdleTraceDetail(detail, 20 * 2);
     }
 
     private static FishingSpot findFishingSpot(PlayerNpcEntity playerNpc, ServerLevel serverLevel, boolean randomizeCastDistance) {

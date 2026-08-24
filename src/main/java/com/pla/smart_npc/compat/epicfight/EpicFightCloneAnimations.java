@@ -10,6 +10,7 @@ import yesman.epicfight.model.armature.HumanoidArmature;
 
 public final class EpicFightCloneAnimations {
     public static AnimationManager.AnimationAccessor<StaticAnimation> DIG_MAINHAND;
+    public static AnimationManager.AnimationAccessor<StaticAnimation> USE_MAINHAND;
 
     private EpicFightCloneAnimations() {
     }
@@ -23,6 +24,10 @@ public final class EpicFightCloneAnimations {
         Armatures.ArmatureAccessor<HumanoidArmature> humanoidArmature = Armatures.BIPED;
         DIG_MAINHAND = builder.nextAccessor("biped/living/dig_mainhand",
                 accessor -> new StaticAnimation(0.1F, true, accessor, humanoidArmature)
+                        .addState(EntityState.CAN_BASIC_ATTACK, false));
+        USE_MAINHAND = builder.nextAccessor("biped/living/use_mainhand",
+                accessor -> new StaticAnimation(0.1F, false, accessor, humanoidArmature)
+                        .setResourceLocation(SmartNpc.MODID, "biped/living/dig_mainhand")
                         .addState(EntityState.CAN_BASIC_ATTACK, false));
     }
 }

@@ -2,11 +2,18 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.FurnaceAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.ReturnPositionAi;
 import com.pla.smart_npc.entity.ai.SneakingAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
+import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
+import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.Registries;
@@ -16,7 +23,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
-import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -35,6 +42,7 @@ import java.util.Locale;
 
 public class MiningNightCampGoal extends Goal {
     public static final String AI_STATE = "ai.player_npc.mining_night_camp";
+    public static final String BUILDING_BOOTSTRAP_AI_STATE = "ai.player_npc.building_night_camp";
 
     private static final int FURNACE_SCAN_RADIUS = 6;
     private static final int FURNACE_PLACEMENT_RADIUS = 3;
@@ -49,6 +57,16 @@ public class MiningNightCampGoal extends Goal {
     private static final int TORCH_CHECK_INTERVAL_TICKS = 20 * 5;
     private static final int TORCH_NEARBY_RADIUS = 6;
     private static final int TORCH_LOW_LIGHT_LEVEL = 7;
+    private static final int TORCH_STAND_PATH_CHECKS = 8;
+    private static final int TORCH_REPATH_TICKS = 20;
+    private static final double TORCH_STAND_REACHED_SQR = 1.25D * 1.25D;
+    private static final double TORCH_USE_DISTANCE_SQR = 4.0D * 4.0D;
+    private static final int FARM_FENCE_CLEAR_TICKS = 12;
+    private static final int MAX_FARM_FENCE_CLEAR_ATTEMPTS = 6;
+    private static final int FARM_FENCE_CLEAR_HORIZONTAL_RADIUS = 2;
+    private static final int FARM_FENCE_CLEAR_VERTICAL_ABOVE = 2;
+    private static final double FARM_FENCE_CLEAR_DISTANCE_SQR = 6.5D * 6.5D;
+    private static final double FARM_CAMP_REACHED_SQR = 3.5D * 3.5D;
     private static final int MIN_ACTIVITY_TICKS = 20 * 4;
     private static final int RANDOM_ACTIVITY_TICKS = 20 * 6;
     private static final int MIN_STATIONARY_TICKS = 20 * 2;
@@ -65,18 +83,25 @@ public class MiningNightCampGoal extends Goal {
     private final PlayerNpcEntity playerNpc;
     private final FurnaceAi furnaceAi;
     private final PlacingBlockAi placingBlockAi;
+    private final ToolAi farmFenceClearToolAi;
+    private final ClearBlockAi farmFenceClearBlockAi;
+    private final ReturnPositionAi returnPositionAi;
     private final SneakingAi sneakingAi;
     private final double speed;
     private BlockPos campCenter;
     private BlockPos furnacePos;
     private BlockPos furnaceStandPos;
     private BlockPos walkTarget;
+    private BlockPos torchPos;
+    private BlockPos torchStandPos;
     private FurnaceMode furnaceMode = FurnaceMode.NONE;
     private ActivityMode activityMode = ActivityMode.LOOK;
     private ItemStack previousMainHand = ItemStack.EMPTY;
     private int actionDelayTicks;
     private int furnaceCooldownTicks;
     private int torchCheckTicks;
+    private int torchRepathTicks;
+    private int farmFenceClearAttempts;
     private int activityTicks;
     private int stationaryTicks;
     private int lookTicks;
@@ -84,6 +109,8 @@ public class MiningNightCampGoal extends Goal {
     private int furnaceRecoveryTicks;
     private boolean finished;
     private boolean placedTorch;
+    private boolean farmingCamp;
+    private boolean buildingBootstrapCamp;
     private boolean walkSneaking;
     private boolean usingTemporaryMainHand;
     private boolean returnTemporaryMainHandOnRestore;
@@ -92,6 +119,12 @@ public class MiningNightCampGoal extends Goal {
         this.playerNpc = playerNpc;
         this.furnaceAi = new FurnaceAi(playerNpc);
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
+        this.farmFenceClearToolAi = new ToolAi(playerNpc);
+        this.farmFenceClearBlockAi = new ClearBlockAi(
+                playerNpc,
+                new BreakingBlockAi(playerNpc, this.farmFenceClearToolAi)
+        );
+        this.returnPositionAi = new ReturnPositionAi(playerNpc, Math.min(speed, 1.0D));
         this.sneakingAi = new SneakingAi(playerNpc);
         this.speed = Math.min(speed, 1.0D);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
@@ -101,19 +134,48 @@ public class MiningNightCampGoal extends Goal {
         if (playerNpc == null || serverLevel == null) {
             return false;
         }
+        if (isBuildingBootstrapNightCamp(playerNpc, serverLevel)) {
+            return true;
+        }
+        // Once a build area exists, Building interest owns night shelter behavior. A
+        // previously placed temporary furnace is still recovered by canUse before this
+        // normal-camp gate is consulted.
+        if (playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
+            return false;
+        }
 
         boolean miningJob = GatherStoneGoal.isMiningJobActive(playerNpc);
         boolean fishingJob = isFishingNightCampJob(playerNpc);
+        boolean farmingJob = isFarmingNightCampJob(playerNpc, serverLevel);
         return miningJob
                 && (serverLevel.isNight() || serverLevel.isThundering())
                 && !serverLevel.canSeeSky(playerNpc.blockPosition().above())
-                || fishingJob && serverLevel.isNight();
+                || fishingJob && serverLevel.isNight()
+                || farmingJob && serverLevel.isNight();
+    }
+
+    private static boolean isBuildingBootstrapNightCamp(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return playerNpc != null
+                && serverLevel != null
+                && serverLevel.isNight()
+                && playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && PlayerNpcHomeUtil.getHome(playerNpc).isEmpty()
+                && PlayerNpcHomeUtil.getHomeLayoutId(playerNpc).isEmpty()
+                && playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING);
     }
 
     private static boolean isFishingNightCampJob(PlayerNpcEntity playerNpc) {
         return playerNpc != null
                 && playerNpc.hasInterest(PlayerNpcInterest.FISHING)
                 && playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING);
+    }
+
+    private static boolean isFarmingNightCampJob(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return playerNpc != null
+                && serverLevel != null
+                && !playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && FarmAi.isFarmingJobActive(playerNpc)
+                && FarmAi.getPlan(playerNpc, serverLevel).isPresent();
     }
 
     @Override
@@ -129,7 +191,14 @@ public class MiningNightCampGoal extends Goal {
         }
 
         this.resetPlan();
-        this.campCenter = this.playerNpc.blockPosition().immutable();
+        this.buildingBootstrapCamp = isBuildingBootstrapNightCamp(this.playerNpc, serverLevel);
+        this.farmingCamp = isFarmingNightCampJob(this.playerNpc, serverLevel);
+        this.campCenter = this.farmingCamp
+                ? this.resolveFarmCampCenter(serverLevel)
+                : this.playerNpc.blockPosition().immutable();
+        if (this.buildingBootstrapCamp) {
+            return true;
+        }
         this.adoptNearbyLegacyTemporaryFurnace(serverLevel);
         CampFurnaceRef ownedFurnace = this.resolveOwnedCampFurnace();
         if (ownedFurnace != null) {
@@ -146,7 +215,7 @@ public class MiningNightCampGoal extends Goal {
         if (!shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
             return false;
         }
-        return true;
+        return !this.farmingCamp || this.campCenter != null;
     }
 
     @Override
@@ -159,9 +228,11 @@ public class MiningNightCampGoal extends Goal {
                 && this.playerNpc.getTarget() == null
                 && this.playerNpc.getUpwardEscapeTarget() == null
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
-                && (this.furnaceMode == FurnaceMode.RECOVER
-                || shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
-                || this.hasOwnedCampFurnaceReference());
+                && (this.buildingBootstrapCamp
+                ? isBuildingBootstrapNightCamp(this.playerNpc, serverLevel)
+                : this.furnaceMode == FurnaceMode.RECOVER
+                        || shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
+                        || this.hasOwnedCampFurnaceReference());
     }
 
     @Override
@@ -183,8 +254,13 @@ public class MiningNightCampGoal extends Goal {
         this.walkTarget = null;
         this.walkSneaking = false;
         this.playerNpc.getNavigation().stop();
-        this.playerNpc.setCurrentAiState(AI_STATE);
-        this.playerNpc.setCurrentAiDetail("setting up mining camp");
+        if (this.farmingCamp && this.campCenter != null) {
+            this.returnPositionAi.start(this.campCenter);
+        }
+        this.playerNpc.setCurrentAiState(this.activeAiState());
+        this.playerNpc.setCurrentAiDetail(this.buildingBootstrapCamp
+                ? "camping before choosing build area"
+                : this.farmingCamp ? "returning to farm camp" : "setting up night camp");
     }
 
     @Override
@@ -194,7 +270,15 @@ public class MiningNightCampGoal extends Goal {
             return;
         }
 
-        this.playerNpc.setCurrentAiState(AI_STATE);
+        this.playerNpc.setCurrentAiState(this.activeAiState());
+        if (this.buildingBootstrapCamp) {
+            if (!isBuildingBootstrapNightCamp(this.playerNpc, serverLevel)) {
+                this.finished = true;
+                return;
+            }
+            this.tickCampActivity(serverLevel);
+            return;
+        }
         if (this.furnaceMode == FurnaceMode.RECOVER) {
             this.tickRecoverFurnace(serverLevel);
             return;
@@ -214,6 +298,26 @@ public class MiningNightCampGoal extends Goal {
             this.tickRecoverFurnace(serverLevel);
             return;
         }
+        boolean activeFarmFenceLight = this.hasActiveFarmFenceLightAction();
+        if (this.farmingCamp && !this.isWithinFarmCamp() && !activeFarmFenceLight) {
+            this.returnPositionAi.tick(
+                    serverLevel,
+                    this.campCenter,
+                    pos -> PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                            || FarmAi.isProtectedFarmBlock(this.playerNpc, pos),
+                    "returning to farm camp",
+                    "clearing farm camp route",
+                    false
+            );
+            this.playerNpc.setCurrentAiDetail(this.returnPositionAi.detail("returning to farm camp"));
+            return;
+        }
+        // A farm fence stand may lie just across the camp boundary. Once lighting owns
+        // movement, do not let the outside-camp return branch replace its path mid-step.
+        if (activeFarmFenceLight) {
+            this.tickTorchPlacement(serverLevel);
+            return;
+        }
         if (this.tickFurnaceWork(serverLevel)) {
             return;
         }
@@ -226,8 +330,10 @@ public class MiningNightCampGoal extends Goal {
 
     @Override
     public void stop() {
+        this.stopFarmFenceClear();
         this.restorePreviousMainHand();
         this.sneakingAi.stopSneaking();
+        this.returnPositionAi.stop();
         this.playerNpc.getNavigation().stop();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
@@ -372,37 +478,98 @@ public class MiningNightCampGoal extends Goal {
     }
 
     private boolean tickTorchPlacement(ServerLevel serverLevel) {
-        if (this.placedTorch) {
+        if (this.placedTorch && !this.farmingCamp) {
             return false;
         }
-        if (this.torchCheckTicks > 0) {
-            this.torchCheckTicks--;
-            return false;
+        if (this.farmFenceClearBlockAi.isRunning()) {
+            this.tickFarmFenceClear(serverLevel);
+            return true;
         }
-        this.torchCheckTicks = TORCH_CHECK_INTERVAL_TICKS;
+        if (this.torchPos == null) {
+            if (this.torchCheckTicks > 0) {
+                this.torchCheckTicks--;
+                return false;
+            }
+            this.torchCheckTicks = TORCH_CHECK_INTERVAL_TICKS;
+            this.torchPos = this.findTorchPlacement(serverLevel);
+            this.torchStandPos = this.findTorchStand(serverLevel, this.torchPos);
+            this.actionDelayTicks = 0;
+            this.torchRepathTicks = 0;
+            this.farmFenceClearAttempts = 0;
+            if (this.torchPos == null || this.torchStandPos == null) {
+                this.clearTorchAction();
+                return false;
+            }
+        }
 
-        BlockPos torchPos = this.findTorchPlacement(serverLevel);
-        if (torchPos == null) {
+        if (!this.canPlaceTorchAt(serverLevel, this.torchPos)) {
+            if (this.tryStartFarmFenceClear(serverLevel)) {
+                return true;
+            }
+            this.clearTorchAction();
             return false;
         }
-
-        ItemStack torch = this.takeOrCraftTorch();
-        if (torch.isEmpty()) {
-            return false;
+        this.lookAt(this.torchPos);
+        if (!this.isAtTorchStand()) {
+            this.playerNpc.setCurrentAiDetail(this.detail(
+                    this.farmingCamp ? "walking to farm fence light" : "walking to camp light",
+                    this.torchPos
+            ));
+            boolean navigationActive = !this.playerNpc.getNavigation().isDone()
+                    && !this.playerNpc.getNavigation().isStuck();
+            if (navigationActive && this.torchRepathTicks-- > 0) {
+                return true;
+            }
+            boolean routeFailure = this.playerNpc.getNavigation().isStuck()
+                    || !PathNavigationAi.canStandAt(serverLevel, this.torchStandPos);
+            Path path = routeFailure ? null : this.playerNpc.getNavigation().createPath(this.torchStandPos, 0);
+            boolean usablePath = path != null
+                    && path.canReach()
+                    && path.getEndNode() != null
+                    && path.getEndNode().asBlockPos().equals(this.torchStandPos);
+            boolean moved = usablePath && this.playerNpc.getNavigation().moveTo(path, this.speed);
+            if (!moved && this.tryStartFarmFenceClear(serverLevel)) {
+                return true;
+            }
+            if (!moved) {
+                this.clearTorchAction();
+                return false;
+            }
+            this.torchRepathTicks = TORCH_REPATH_TICKS;
+            return true;
         }
 
         this.playerNpc.getNavigation().stop();
-        this.lookAt(torchPos);
+        if (this.actionDelayTicks++ < ACTION_DELAY_TICKS) {
+            this.playerNpc.setCurrentAiDetail(this.detail(
+                    this.farmingCamp ? "preparing farm fence light" : "preparing camp light",
+                    this.torchPos
+            ));
+            return true;
+        }
+        this.actionDelayTicks = 0;
+        ItemStack torch = this.takeOrCraftTorch();
+        if (torch.isEmpty()) {
+            this.clearTorchAction();
+            return false;
+        }
+
         this.showPlacementItem(torch);
-        if (!this.placingBlockAi.placeBlock(serverLevel, torchPos, Blocks.TORCH.defaultBlockState())) {
+        BlockPos placedPos = this.torchPos.immutable();
+        if (!this.placingBlockAi.placeBlock(serverLevel, placedPos, Blocks.TORCH.defaultBlockState())) {
             this.returnStack(torch);
             this.restorePreviousMainHand();
+            this.clearTorchAction();
             return false;
         }
 
         this.finishPlacementMainHand();
-        this.placedTorch = true;
-        this.playerNpc.setCurrentAiDetail(this.detail("placing mining camp torch", torchPos));
+        this.placedTorch = !this.farmingCamp;
+        this.playerNpc.setCurrentAiDetail(this.detail(
+                this.farmingCamp ? "placing farm fence torch" : "placing night camp torch",
+                placedPos
+        ));
+        this.clearTorchAction();
         return true;
     }
 
@@ -416,12 +583,16 @@ public class MiningNightCampGoal extends Goal {
         } else if (this.activityMode == ActivityMode.SNEAK) {
             this.playerNpc.getNavigation().stop();
             this.sneakingAi.setSneaking(true);
-            this.playerNpc.setCurrentAiDetail("sneaking around mining camp");
+            this.playerNpc.setCurrentAiDetail(this.buildingBootstrapCamp
+                    ? "sneaking around temporary night camp"
+                    : "sneaking around mining camp");
             this.lookAroundCamp();
         } else {
             this.playerNpc.getNavigation().stop();
             this.sneakingAi.setSneaking(false);
-            this.playerNpc.setCurrentAiDetail("watching mining camp");
+            this.playerNpc.setCurrentAiDetail(this.buildingBootstrapCamp
+                    ? "watching temporary night camp"
+                    : "watching mining camp");
             this.lookAroundCamp();
         }
     }
@@ -433,7 +604,9 @@ public class MiningNightCampGoal extends Goal {
         if (this.walkTarget == null || this.hasReachedWalkTarget()) {
             this.walkTarget = null;
             this.playerNpc.getNavigation().stop();
-            this.playerNpc.setCurrentAiDetail("walking around mining camp");
+            this.playerNpc.setCurrentAiDetail(this.buildingBootstrapCamp
+                    ? "walking around temporary night camp"
+                    : "walking around mining camp");
             if (this.stationaryTicks-- > 0) {
                 return;
             }
@@ -447,7 +620,10 @@ public class MiningNightCampGoal extends Goal {
             }
         }
 
-        this.playerNpc.setCurrentAiDetail(this.detail("walking around mining camp", this.walkTarget));
+        this.playerNpc.setCurrentAiDetail(this.detail(
+                this.buildingBootstrapCamp ? "walking around temporary night camp" : "walking around mining camp",
+                this.walkTarget
+        ));
         if (this.repathTicks-- > 0 && !this.playerNpc.getNavigation().isDone()) {
             return;
         }
@@ -606,6 +782,7 @@ public class MiningNightCampGoal extends Goal {
         BlockState furnaceState = Blocks.FURNACE.defaultBlockState();
         return serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
+                && !this.isInsideOwnedFarmFurnaceExclusion(pos)
                 && serverLevel.getBlockState(pos).canBeReplaced()
                 && serverLevel.getFluidState(pos).isEmpty()
                 && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below())
@@ -631,7 +808,10 @@ public class MiningNightCampGoal extends Goal {
                 return immutable;
             }
             Path path = this.playerNpc.getNavigation().createPath(immutable, 0);
-            if (path != null && path.canReach()) {
+            if (path != null
+                    && path.canReach()
+                    && path.getEndNode() != null
+                    && path.getEndNode().asBlockPos().equals(immutable)) {
                 return immutable;
             }
         }
@@ -661,7 +841,11 @@ public class MiningNightCampGoal extends Goal {
             return false;
         }
         Path path = this.playerNpc.getNavigation().createPath(this.furnaceStandPos, 0);
-        return path != null && path.canReach() && this.playerNpc.getNavigation().moveTo(path, this.speed);
+        return path != null
+                && path.canReach()
+                && path.getEndNode() != null
+                && path.getEndNode().asBlockPos().equals(this.furnaceStandPos)
+                && this.playerNpc.getNavigation().moveTo(path, this.speed);
     }
 
     private double distanceToFurnaceSqr(BlockPos standPos, BlockPos pos) {
@@ -675,6 +859,25 @@ public class MiningNightCampGoal extends Goal {
     }
 
     private BlockPos findTorchPlacement(ServerLevel serverLevel) {
+        if (this.farmingCamp) {
+            BlockPos pending = FarmAi.findPendingFarmTorchPlacement(serverLevel, this.playerNpc).orElse(null);
+            if (pending != null) {
+                return pending;
+            }
+            Plan plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+            if (plan == null) {
+                return null;
+            }
+            // A leaf/log in the placement cell is itself a recoverable obstruction. Keep
+            // this fallback limited to planned torch cells over this NPC's existing fence.
+            return FarmAi.farmTorchTargets(plan).stream()
+                    .filter(pos -> this.isOwnedFarmFenceLightTarget(serverLevel, plan, pos))
+                    .filter(pos -> serverLevel.getBrightness(LightLayer.BLOCK, pos) <= TORCH_LOW_LIGHT_LEVEL)
+                    .filter(pos -> this.isSafeFarmFenceClearTarget(serverLevel, plan, pos, pos, null))
+                    .findFirst()
+                    .map(BlockPos::immutable)
+                    .orElse(null);
+        }
         BlockPos center = this.playerNpc.blockPosition();
         if (serverLevel.getBrightness(LightLayer.BLOCK, center) > TORCH_LOW_LIGHT_LEVEL || this.hasNearbyTorch(serverLevel, center)) {
             return null;
@@ -698,11 +901,310 @@ public class MiningNightCampGoal extends Goal {
 
     private boolean canPlaceTorchAt(ServerLevel serverLevel, BlockPos pos) {
         BlockState torchState = Blocks.TORCH.defaultBlockState();
-        return serverLevel.isInWorldBounds(pos)
+        boolean ownedFarmFenceTarget = !this.farmingCamp || FarmAi.getPlan(this.playerNpc, serverLevel)
+                .map(plan -> FarmAi.farmTorchTargets(plan).contains(pos)
+                        && serverLevel.getBlockState(pos.below()).getBlock() instanceof net.minecraft.world.level.block.FenceBlock
+                        && !pos.below().equals(plan.gatePos()))
+                .orElse(false);
+        return ownedFarmFenceTarget
+                && serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
                 && serverLevel.getBlockState(pos).canBeReplaced()
                 && serverLevel.getFluidState(pos).isEmpty()
                 && torchState.canSurvive(serverLevel, pos);
+    }
+
+    private BlockPos findTorchStand(ServerLevel serverLevel, BlockPos pos) {
+        if (pos == null) {
+            return null;
+        }
+        List<BlockPos> candidates = new ArrayList<>();
+        candidates.add(this.playerNpc.blockPosition());
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            candidates.add(pos.relative(direction).below());
+            candidates.add(pos.relative(direction));
+            candidates.add(pos.relative(direction, 2).below());
+        }
+        BlockPos feet = this.playerNpc.blockPosition();
+        candidates.sort(Comparator.comparingDouble(feet::distSqr));
+        Plan farmPlan = this.farmingCamp ? FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null) : null;
+        BlockPos blockedFarmStand = null;
+        int pathChecks = 0;
+        for (BlockPos candidate : candidates) {
+            BlockPos immutable = candidate.immutable();
+            if (this.distanceToTorchSqr(immutable, pos) > TORCH_USE_DISTANCE_SQR
+                    || farmPlan != null && !this.isFarmFenceTorchStandGeometry(serverLevel, farmPlan, immutable)) {
+                continue;
+            }
+            boolean canStand = PathNavigationAi.canStandAt(serverLevel, immutable);
+            if (canStand && immutable.equals(feet)) {
+                return immutable;
+            }
+            if (canStand && pathChecks++ < TORCH_STAND_PATH_CHECKS) {
+                Path path = this.playerNpc.getNavigation().createPath(immutable, 0);
+                if (path != null
+                        && path.canReach()
+                        && path.getEndNode() != null
+                        && path.getEndNode().asBlockPos().equals(immutable)) {
+                    return immutable;
+                }
+            }
+            if (farmPlan != null
+                    && blockedFarmStand == null
+                    && this.canPrepareFarmFenceTorchStand(serverLevel, farmPlan, immutable)) {
+                blockedFarmStand = immutable;
+            }
+        }
+        return blockedFarmStand;
+    }
+
+    private boolean isAtTorchStand() {
+        return this.torchStandPos != null
+                && this.playerNpc.blockPosition().getY() == this.torchStandPos.getY()
+                && this.playerNpc.distanceToSqr(
+                this.torchStandPos.getX() + 0.5D,
+                this.torchStandPos.getY(),
+                this.torchStandPos.getZ() + 0.5D
+        ) <= TORCH_STAND_REACHED_SQR;
+    }
+
+    private double distanceToTorchSqr(BlockPos stand, BlockPos torch) {
+        double dx = stand.getX() + 0.5D - (torch.getX() + 0.5D);
+        double dy = stand.getY() + 1.62D - (torch.getY() + 0.5D);
+        double dz = stand.getZ() + 0.5D - (torch.getZ() + 0.5D);
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private void clearTorchAction() {
+        this.stopFarmFenceClear();
+        this.torchPos = null;
+        this.torchStandPos = null;
+        this.actionDelayTicks = 0;
+        this.torchRepathTicks = 0;
+        this.farmFenceClearAttempts = 0;
+    }
+
+    private boolean hasActiveFarmFenceLightAction() {
+        return this.farmingCamp
+                && (this.torchPos != null || this.farmFenceClearBlockAi.isRunning());
+    }
+
+    private boolean tryStartFarmFenceClear(ServerLevel serverLevel) {
+        if (!this.farmingCamp
+                || this.torchPos == null
+                || this.torchStandPos == null
+                || this.farmFenceClearBlockAi.isRunning()
+                || this.farmFenceClearAttempts >= MAX_FARM_FENCE_CLEAR_ATTEMPTS) {
+            return false;
+        }
+        Plan plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        if (plan == null || !this.isOwnedFarmFenceLightTarget(serverLevel, plan, this.torchPos)) {
+            return false;
+        }
+
+        List<BlockPos> candidates = new ArrayList<>(ClearBlockAi.gatherObstructionCandidates(
+                this.playerNpc.blockPosition(),
+                this.torchStandPos,
+                this.torchPos
+        ));
+        candidates.add(this.torchPos);
+        candidates.add(this.torchStandPos);
+        candidates.add(this.torchStandPos.above());
+        candidates.removeIf(pos -> !this.isSafeFarmFenceClearTarget(
+                serverLevel,
+                plan,
+                pos,
+                this.torchPos,
+                this.torchStandPos
+        ));
+        BlockPos clearTarget = ClearBlockAi.findNearestClearable(
+                serverLevel,
+                this.playerNpc.blockPosition(),
+                candidates,
+                MiningNightCampGoal::isFarmFenceObstructionState,
+                FARM_FENCE_CLEAR_DISTANCE_SQR
+        ).orElse(null);
+        if (clearTarget == null) {
+            return false;
+        }
+
+        boolean started = this.farmFenceClearBlockAi.start(
+                serverLevel,
+                clearTarget,
+                MiningNightCampGoal::isFarmFenceObstructionState,
+                "clearing farm fence light route",
+                FARM_FENCE_CLEAR_TICKS,
+                FARM_FENCE_CLEAR_DISTANCE_SQR,
+                true,
+                true
+        );
+        if (!started || !this.isSafeActiveFarmFenceClearTarget(serverLevel)) {
+            this.stopFarmFenceClear();
+            return false;
+        }
+        this.farmFenceClearAttempts++;
+        this.torchRepathTicks = 0;
+        this.playerNpc.setCurrentAiDetail(this.farmFenceClearBlockAi.detail());
+        return true;
+    }
+
+    private void tickFarmFenceClear(ServerLevel serverLevel) {
+        if (!this.isSafeActiveFarmFenceClearTarget(serverLevel)) {
+            this.clearTorchAction();
+            this.playerNpc.setCurrentAiDetail("farm fence light clear cancelled: protected or out of bounds");
+            return;
+        }
+
+        ClearBlockAi.TickResult result = this.farmFenceClearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            if (!this.isSafeActiveFarmFenceClearTarget(serverLevel)) {
+                this.clearTorchAction();
+                this.playerNpc.setCurrentAiDetail("farm fence light clear cancelled after blocker retarget");
+                return;
+            }
+            this.playerNpc.setCurrentAiDetail(this.farmFenceClearBlockAi.detail());
+            return;
+        }
+
+        this.stopFarmFenceClear();
+        this.torchRepathTicks = 0;
+        this.torchStandPos = this.findTorchStand(serverLevel, this.torchPos);
+        if (this.torchStandPos == null
+                || result == ClearBlockAi.TickResult.FAILED
+                && this.farmFenceClearAttempts >= MAX_FARM_FENCE_CLEAR_ATTEMPTS) {
+            this.clearTorchAction();
+        }
+    }
+
+    private boolean isSafeActiveFarmFenceClearTarget(ServerLevel serverLevel) {
+        Plan plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        return plan != null
+                && this.isOwnedFarmFenceLightTarget(serverLevel, plan, this.torchPos)
+                && this.isSafeFarmFenceClearTarget(
+                serverLevel,
+                plan,
+                this.farmFenceClearBlockAi.targetPos(),
+                this.torchPos,
+                this.torchStandPos
+        );
+    }
+
+    private boolean isSafeFarmFenceClearTarget(
+            ServerLevel serverLevel,
+            Plan plan,
+            BlockPos pos,
+            BlockPos selectedTorchPos,
+            BlockPos selectedStandPos
+    ) {
+        if (serverLevel == null
+                || plan == null
+                || pos == null
+                || selectedTorchPos == null
+                || !this.isOwnedFarmFenceLightTarget(serverLevel, plan, selectedTorchPos)
+                || !serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+            return false;
+        }
+
+        BlockPos fencePos = selectedTorchPos.below();
+        boolean nearFence = Math.abs(pos.getX() - fencePos.getX()) <= FARM_FENCE_CLEAR_HORIZONTAL_RADIUS
+                && Math.abs(pos.getZ() - fencePos.getZ()) <= FARM_FENCE_CLEAR_HORIZONTAL_RADIUS;
+        boolean nearStand = selectedStandPos != null
+                && Math.abs(pos.getX() - selectedStandPos.getX()) <= 1
+                && Math.abs(pos.getZ() - selectedStandPos.getZ()) <= 1;
+        if ((!nearFence && !nearStand)
+                || pos.getY() < fencePos.getY()
+                || pos.getY() > selectedTorchPos.getY() + FARM_FENCE_CLEAR_VERTICAL_ABOVE) {
+            return false;
+        }
+
+        BlockState state = serverLevel.getBlockState(pos);
+        return isFarmFenceObstructionState(state)
+                && serverLevel.getBlockEntity(pos) == null
+                && !pos.equals(fencePos)
+                && !pos.equals(plan.gatePos())
+                && !pos.equals(plan.gatePos().above())
+                && !plan.isFencePosition(pos)
+                && !plan.containsGround(pos)
+                && !pos.equals(plan.waterPos())
+                && !this.playerNpc.isTemporaryPillarSupport(pos)
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
+                && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                && PlayerNpcHomeUtil.getHome(this.playerNpc)
+                .map(home -> !PlayerNpcHomeUtil.isInside(home, pos))
+                .orElse(true)
+                && ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, state, true);
+    }
+
+    private boolean isOwnedFarmFenceLightTarget(ServerLevel serverLevel, Plan plan, BlockPos pos) {
+        return serverLevel != null
+                && plan != null
+                && pos != null
+                && plan.phase().isReady()
+                && FarmAi.farmTorchTargets(plan).contains(pos)
+                && !pos.below().equals(plan.gatePos())
+                && serverLevel.getBlockState(pos.below()).getBlock() instanceof net.minecraft.world.level.block.FenceBlock;
+    }
+
+    private boolean isFarmFenceTorchStandGeometry(ServerLevel serverLevel, Plan plan, BlockPos pos) {
+        if (serverLevel == null
+                || plan == null
+                || pos == null
+                || !serverLevel.isInWorldBounds(pos)
+                || !serverLevel.isInWorldBounds(pos.above())
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || pos.equals(plan.gatePos())
+                || plan.isFencePosition(pos)
+                || plan.containsGround(pos.below())
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                || PlayerNpcHomeUtil.getHome(this.playerNpc)
+                .map(home -> PlayerNpcHomeUtil.isInside(home, pos))
+                .orElse(false)) {
+            return false;
+        }
+        return serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below())
+                && serverLevel.getFluidState(pos).isEmpty()
+                && serverLevel.getFluidState(pos.above()).isEmpty()
+                && serverLevel.getBlockEntity(pos) == null
+                && serverLevel.getBlockEntity(pos.above()) == null;
+    }
+
+    private boolean canPrepareFarmFenceTorchStand(ServerLevel serverLevel, Plan plan, BlockPos pos) {
+        if (!this.isFarmFenceTorchStandGeometry(serverLevel, plan, pos)) {
+            return false;
+        }
+        for (BlockPos bodyPos : List.of(pos, pos.above())) {
+            BlockState state = serverLevel.getBlockState(bodyPos);
+            if (!state.getCollisionShape(serverLevel, bodyPos).isEmpty()
+                    && !this.isSafeFarmFenceClearTarget(serverLevel, plan, bodyPos, this.torchPos, pos)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isFarmFenceObstructionState(BlockState state) {
+        return state != null
+                && (state.is(BlockTags.LEAVES)
+                || state.is(BlockTags.LOGS)
+                || state.is(Blocks.VINE)
+                || state.is(Blocks.CAVE_VINES)
+                || state.is(Blocks.CAVE_VINES_PLANT)
+                || state.is(Blocks.WEEPING_VINES)
+                || state.is(Blocks.WEEPING_VINES_PLANT)
+                || state.is(Blocks.TWISTING_VINES)
+                || state.is(Blocks.TWISTING_VINES_PLANT)
+                || state.is(Blocks.GRASS)
+                || state.is(Blocks.TALL_GRASS)
+                || state.is(Blocks.FERN)
+                || state.is(Blocks.LARGE_FERN)
+                || state.is(Blocks.DEAD_BUSH)
+                || state.is(Blocks.SNOW));
+    }
+
+    private void stopFarmFenceClear() {
+        this.farmFenceClearBlockAi.stop();
+        this.farmFenceClearToolAi.restoreMainHand();
     }
 
     private boolean hasNearbyTorch(ServerLevel serverLevel, BlockPos center) {
@@ -721,16 +1223,20 @@ public class MiningNightCampGoal extends Goal {
         BlockPos center = this.campCenter != null ? this.campCenter : this.playerNpc.blockPosition();
         boolean keepUnderground = GatherStoneGoal.isMiningJobActive(this.playerNpc)
                 && !serverLevel.canSeeSky(center.above());
-        List<BlockPos> candidates = new ArrayList<>();
-        for (int dy = -CAMP_WALK_VERTICAL_RADIUS; dy <= CAMP_WALK_VERTICAL_RADIUS; dy++) {
-            for (int dx = -CAMP_WALK_RADIUS; dx <= CAMP_WALK_RADIUS; dx++) {
-                for (int dz = -CAMP_WALK_RADIUS; dz <= CAMP_WALK_RADIUS; dz++) {
-                    if (dx * dx + dz * dz > CAMP_WALK_RADIUS * CAMP_WALK_RADIUS) {
-                        continue;
-                    }
-                    BlockPos candidate = center.offset(dx, dy, dz);
-                    if (!candidate.equals(this.playerNpc.blockPosition())) {
-                        candidates.add(candidate);
+        List<BlockPos> candidates = this.farmingCamp
+                ? new ArrayList<>(this.farmCampWalkCandidates(serverLevel))
+                : new ArrayList<>();
+        if (!this.farmingCamp) {
+            for (int dy = -CAMP_WALK_VERTICAL_RADIUS; dy <= CAMP_WALK_VERTICAL_RADIUS; dy++) {
+                for (int dx = -CAMP_WALK_RADIUS; dx <= CAMP_WALK_RADIUS; dx++) {
+                    for (int dz = -CAMP_WALK_RADIUS; dz <= CAMP_WALK_RADIUS; dz++) {
+                        if (dx * dx + dz * dz > CAMP_WALK_RADIUS * CAMP_WALK_RADIUS) {
+                            continue;
+                        }
+                        BlockPos candidate = center.offset(dx, dy, dz);
+                        if (!candidate.equals(this.playerNpc.blockPosition())) {
+                            candidates.add(candidate);
+                        }
                     }
                 }
             }
@@ -745,11 +1251,135 @@ public class MiningNightCampGoal extends Goal {
                 continue;
             }
             Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
-            if (path != null && path.canReach()) {
+            if (path != null
+                    && path.canReach()
+                    && path.getEndNode() != null
+                    && path.getEndNode().asBlockPos().equals(candidate)) {
                 return candidate;
             }
         }
         return null;
+    }
+
+    private List<BlockPos> farmCampWalkCandidates(ServerLevel serverLevel) {
+        Plan plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        if (plan == null) {
+            return List.of();
+        }
+        List<BlockPos> candidates = new ArrayList<>();
+        int minX = plan.origin().getX() - 2;
+        int maxX = plan.origin().getX() + plan.width() + 1;
+        int minZ = plan.origin().getZ() - 2;
+        int maxZ = plan.origin().getZ() + plan.depth() + 1;
+        int baseFeetY = plan.origin().getY() + 1;
+        for (int dy = -CAMP_WALK_VERTICAL_RADIUS; dy <= CAMP_WALK_VERTICAL_RADIUS; dy++) {
+            int feetY = baseFeetY + dy;
+            for (int x = minX; x <= maxX; x++) {
+                candidates.add(new BlockPos(x, feetY, minZ));
+                candidates.add(new BlockPos(x, feetY, maxZ));
+            }
+            for (int z = minZ + 1; z < maxZ; z++) {
+                candidates.add(new BlockPos(minX, feetY, z));
+                candidates.add(new BlockPos(maxX, feetY, z));
+            }
+        }
+        return candidates.stream()
+                .distinct()
+                .filter(pos -> this.isSafeFarmExteriorStand(serverLevel, plan, pos))
+                .map(BlockPos::immutable)
+                .toList();
+    }
+
+    private BlockPos resolveFarmCampCenter(ServerLevel serverLevel) {
+        Plan plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        if (plan == null) {
+            return null;
+        }
+        // Camp is outside only.  Returning to one of these targets makes the normal
+        // route cross the open gate; a bounded route failure may then use the explicit
+        // outside return request handled by farm gate egress.
+        List<BlockPos> candidates = new ArrayList<>();
+        List<BlockPos> pathPositions = plan.pathPositions();
+        if (pathPositions.isEmpty()) {
+            return null;
+        }
+        BlockPos insideGateFeet = pathPositions.get(0).above();
+        int outwardX = Integer.compare(plan.gatePos().getX(), insideGateFeet.getX());
+        int outwardZ = Integer.compare(plan.gatePos().getZ(), insideGateFeet.getZ());
+        if (Math.abs(outwardX) + Math.abs(outwardZ) != 1) {
+            return null;
+        }
+        int lateralX = -outwardZ;
+        int lateralZ = outwardX;
+        int baseY = plan.gatePos().getY();
+        for (int dy : new int[]{0, 1, -1, 2, -2}) {
+            for (int forward = 1; forward <= 3; forward++) {
+                for (int lateral = -2; lateral <= 2; lateral++) {
+                    candidates.add(new BlockPos(
+                            plan.gatePos().getX() + outwardX * forward + lateralX * lateral,
+                            baseY + dy,
+                            plan.gatePos().getZ() + outwardZ * forward + lateralZ * lateral
+                    ));
+                }
+            }
+        }
+        List<BlockPos> safeCandidates = candidates.stream()
+                .distinct()
+                .filter(pos -> this.isSafeFarmExteriorStand(serverLevel, plan, pos))
+                .map(BlockPos::immutable)
+                .toList();
+        if (safeCandidates.isEmpty()) {
+            return null;
+        }
+
+        int pathChecks = 0;
+        for (BlockPos candidate : safeCandidates) {
+            if (this.playerNpc.blockPosition().equals(candidate)) {
+                return candidate.immutable();
+            }
+            if (pathChecks++ >= 24) {
+                break;
+            }
+            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            if (path != null
+                    && path.canReach()
+                    && path.getEndNode() != null
+                    && path.getEndNode().asBlockPos().equals(candidate)) {
+                return candidate.immutable();
+            }
+        }
+        // Keep the outside destination even when the current navigation snapshot is
+        // blocked. ReturnPositionAi will retry/relocate, and only that explicit outside
+        // target is allowed to authorize farm gate egress.
+        return safeCandidates.get(0).immutable();
+    }
+
+    private boolean isSafeFarmExteriorStand(ServerLevel serverLevel, Plan plan, BlockPos candidate) {
+        return candidate != null
+                && !candidate.equals(plan.gatePos())
+                && !plan.isFencePosition(candidate)
+                && !plan.containsGround(candidate.below())
+                && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)
+                && PathNavigationAi.canStandAt(serverLevel, candidate);
+    }
+
+    private boolean isWithinFarmCamp() {
+        if (!this.farmingCamp || this.campCenter == null) {
+            return true;
+        }
+        if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            Plan plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+            BlockPos feet = this.playerNpc.blockPosition();
+            if (plan != null && (plan.containsGround(feet.below())
+                    || feet.equals(plan.gatePos())
+                    || plan.isFencePosition(feet))) {
+                return false;
+            }
+        }
+        double dx = this.playerNpc.getX() - (this.campCenter.getX() + 0.5D);
+        double dz = this.playerNpc.getZ() - (this.campCenter.getZ() + 0.5D);
+        return dx * dx + dz * dz <= FARM_CAMP_REACHED_SQR
+                && Math.abs(this.playerNpc.getY() - this.campCenter.getY()) <= CAMP_WALK_VERTICAL_RADIUS + 1;
     }
 
     private boolean hasReachedWalkTarget() {
@@ -811,6 +1441,10 @@ public class MiningNightCampGoal extends Goal {
         this.lookTicks = MIN_LOOK_TICKS + this.playerNpc.getRandom().nextInt(RANDOM_LOOK_TICKS + 1);
     }
 
+    private String activeAiState() {
+        return this.buildingBootstrapCamp ? BUILDING_BOOTSTRAP_AI_STATE : AI_STATE;
+    }
+
     private void lookAtFurnace() {
         this.lookAt(this.furnacePos);
     }
@@ -844,14 +1478,17 @@ public class MiningNightCampGoal extends Goal {
         if (!torch.isEmpty()) {
             return torch;
         }
-        if (!PlayerNpcCraftingUtil.tryCraftTorches(this.playerNpc.getInventory(), this.playerNpc.getRawLogReserveTarget())) {
+        int rawLogReserve = this.farmingCamp ? 0 : this.playerNpc.getRawLogReserveTarget();
+        if (!PlayerNpcCraftingUtil.tryCraftTorches(this.playerNpc.getInventory(), rawLogReserve)) {
             return ItemStack.EMPTY;
         }
         return this.playerNpc.consumeInventoryItem(Items.TORCH, 1).orElse(ItemStack.EMPTY);
     }
 
     private BlockPos getTemporaryFurnacePos() {
-        if (!this.playerNpc.getPersistentData().contains(FurnaceAi.TEMP_FURNACE_X)) {
+        if (FurnaceAi.TEMP_FURNACE_KIND_COOKING.equals(
+                this.playerNpc.getPersistentData().getString(FurnaceAi.TEMP_FURNACE_KIND))
+                || !this.playerNpc.getPersistentData().contains(FurnaceAi.TEMP_FURNACE_X)) {
             return null;
         }
 
@@ -874,6 +1511,7 @@ public class MiningNightCampGoal extends Goal {
         data.putInt(FurnaceAi.TEMP_FURNACE_X, pos.getX());
         data.putInt(FurnaceAi.TEMP_FURNACE_Y, pos.getY());
         data.putInt(FurnaceAi.TEMP_FURNACE_Z, pos.getZ());
+        data.putString(FurnaceAi.TEMP_FURNACE_KIND, FurnaceAi.TEMP_FURNACE_KIND_NIGHT_CAMP);
         data.putInt(CAMP_FURNACE_X, pos.getX());
         data.putInt(CAMP_FURNACE_Y, pos.getY());
         data.putInt(CAMP_FURNACE_Z, pos.getZ());
@@ -885,6 +1523,7 @@ public class MiningNightCampGoal extends Goal {
         this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_X);
         this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Y);
         this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Z);
+        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_KIND);
     }
 
     private boolean hasOwnedCampFurnaceReference() {
@@ -936,11 +1575,26 @@ public class MiningNightCampGoal extends Goal {
         if (ownedFurnace.level() != currentLevel) {
             return false;
         }
-        return this.isWithinLocalFurnaceScan(ownedFurnace.pos());
+        return !this.isInsideOwnedFarmFurnaceExclusion(ownedFurnace.pos())
+                && this.isWithinLocalFurnaceScan(ownedFurnace.pos());
+    }
+
+    private boolean isInsideOwnedFarmFurnaceExclusion(BlockPos pos) {
+        return FarmAi.isProtectedFarmBlock(this.playerNpc, pos)
+                || FarmAi.isInsideOwnedFarmWorkOrEntranceFootprint(this.playerNpc, pos);
     }
 
     private void adoptNearbyLegacyTemporaryFurnace(ServerLevel currentLevel) {
         if (this.hasOwnedCampFurnaceReference()) {
+            return;
+        }
+        String temporaryKind = this.playerNpc.getPersistentData().getString(FurnaceAi.TEMP_FURNACE_KIND);
+        boolean explicitCamp = FurnaceAi.TEMP_FURNACE_KIND_NIGHT_CAMP.equals(temporaryKind);
+        // Kindless records may be genuine old camp furnaces, but adopting them in
+        // daytime also steals old CookFoodGoal furnaces. Migrate only while camping.
+        if (!explicitCamp
+                && (!temporaryKind.isBlank()
+                || !shouldPauseMiningForNightCamp(this.playerNpc, currentLevel))) {
             return;
         }
         BlockPos legacyPos = this.getTemporaryFurnacePos();
@@ -1055,7 +1709,7 @@ public class MiningNightCampGoal extends Goal {
 
         ItemStack held = stack.copy();
         held.setCount(Math.min(1, held.getCount()));
-        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, held);
+        this.playerNpc.setMainHandItemForAi(held);
     }
 
     private void restorePreviousMainHand() {
@@ -1070,7 +1724,7 @@ public class MiningNightCampGoal extends Goal {
             this.returnStack(currentMainHand);
         }
 
-        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
+        this.playerNpc.setMainHandItemForAi(this.previousMainHand.copy());
         this.previousMainHand = ItemStack.EMPTY;
         this.usingTemporaryMainHand = false;
         this.returnTemporaryMainHandOnRestore = false;
@@ -1102,11 +1756,15 @@ public class MiningNightCampGoal extends Goal {
         this.furnacePos = null;
         this.furnaceStandPos = null;
         this.walkTarget = null;
+        this.torchPos = null;
+        this.torchStandPos = null;
         this.furnaceMode = FurnaceMode.NONE;
         this.previousMainHand = ItemStack.EMPTY;
         this.actionDelayTicks = 0;
         this.furnaceCooldownTicks = 0;
         this.torchCheckTicks = 0;
+        this.torchRepathTicks = 0;
+        this.farmFenceClearAttempts = 0;
         this.activityTicks = 0;
         this.stationaryTicks = 0;
         this.lookTicks = 0;
@@ -1114,6 +1772,8 @@ public class MiningNightCampGoal extends Goal {
         this.furnaceRecoveryTicks = 0;
         this.finished = false;
         this.placedTorch = false;
+        this.farmingCamp = false;
+        this.buildingBootstrapCamp = false;
         this.walkSneaking = false;
         this.usingTemporaryMainHand = false;
         this.returnTemporaryMainHandOnRestore = false;

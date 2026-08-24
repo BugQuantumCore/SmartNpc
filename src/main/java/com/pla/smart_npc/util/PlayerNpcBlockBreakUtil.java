@@ -1,6 +1,7 @@
 package com.pla.smart_npc.util;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.item.ItemStack;
@@ -17,6 +18,21 @@ public final class PlayerNpcBlockBreakUtil {
     }
 
     public static boolean destroyBlock(ServerLevel serverLevel, BlockPos pos, BlockState state, PlayerNpcEntity playerNpc) {
+        return destroyBlock(serverLevel, pos, state, playerNpc, false);
+    }
+
+    public static boolean destroyBlock(
+            ServerLevel serverLevel,
+            BlockPos pos,
+            BlockState state,
+            PlayerNpcEntity playerNpc,
+            boolean allowOwnedFarmDestruction
+    ) {
+        if (!allowOwnedFarmDestruction && FarmAi.isOwnedFarmDestructionProtected(playerNpc, pos)) {
+            playerNpc.setIdleTraceDetail("block break protected by owned farm @ "
+                    + pos.getX() + " " + pos.getY() + " " + pos.getZ(), 40);
+            return false;
+        }
         ItemStack heldStack = playerNpc.getMainHandItem();
         if (!shouldDropResources(state, heldStack)) {
             return serverLevel.destroyBlock(pos, false, playerNpc);
@@ -30,19 +46,11 @@ public final class PlayerNpcBlockBreakUtil {
 
         awardExperienceDrop(serverLevel, pos, state, playerNpc, heldStack);
 
-        boolean insertedDrop = false;
         for (ItemStack drop : drops) {
             if (drop.isEmpty()) {
                 continue;
             }
-            if (InventoryUtils.addItem(playerNpc, drop)) {
-                insertedDrop = true;
-            } else {
-                Block.popResource(serverLevel, pos, drop);
-            }
-        }
-        if (insertedDrop) {
-            playerNpc.playInventoryPickupSound();
+            Block.popResource(serverLevel, pos, drop);
         }
         return true;
     }

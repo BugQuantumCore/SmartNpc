@@ -6,6 +6,7 @@ import com.pla.smart_npc.clazz.FakePlayer;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.ResourceAi;
@@ -32,6 +33,8 @@ import com.pla.smart_npc.entity.goal.ExploreAroundGoal;
 import com.pla.smart_npc.entity.goal.ExploreCaveOreGoal;
 import com.pla.smart_npc.entity.goal.FillWaterBucketGoal;
 import com.pla.smart_npc.entity.goal.FarmCropGoal;
+import com.pla.smart_npc.entity.goal.FarmSetupGoal;
+import com.pla.smart_npc.entity.goal.FarmStrollGoal;
 import com.pla.smart_npc.entity.goal.GatherMissingBuildMaterialGoal;
 import com.pla.smart_npc.entity.goal.GatherLogsGoal;
 import com.pla.smart_npc.entity.goal.GatherStoneGoal;
@@ -71,6 +74,7 @@ import com.pla.smart_npc.init.SmartNpcModEntities;
 import com.pla.smart_npc.util.*;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.Vec3i;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
@@ -165,6 +169,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int IDLE_RESOURCE_CLEAR_TICKS = 24;
     private static final double IDLE_RESOURCE_CLEAR_DISTANCE_SQR = 4.5D * 4.5D;
     private static final int IDLE_RESOURCE_CLEAR_RANDOM_POOL = 8;
+    private static final Vec3i ITEM_PICKUP_REACH = new Vec3i(1, 1, 1);
     private static final double EXPERIENCE_PICKUP_RADIUS = 3.0D;
     private static final long DAY_LENGTH_TICKS = 24000L;
     private static final long DAILY_JOB_ROLL_TIME = 1L;
@@ -644,6 +649,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return interest == PlayerNpcInterest.BUILDING;
         }
         if (this.level() instanceof ServerLevel serverLevel) {
+            if (this.shouldForceUnfinishedBuilding(serverLevel)) {
+                return interest == PlayerNpcInterest.BUILDING;
+            }
             if (interest == PlayerNpcInterest.BUILDING && this.shouldRunBuildingHomeDuty(serverLevel)) {
                 return true;
             }
@@ -669,17 +677,18 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 && PlayerNpcHomeUtil.getHomeLayoutId(this).isEmpty();
     }
 
+    private boolean shouldForceUnfinishedBuilding(ServerLevel serverLevel) {
+        return this.hasInterest(PlayerNpcInterest.BUILDING)
+                && !BuildHouseGoal.isHomeLayoutFinished(this, serverLevel);
+    }
+
     private boolean shouldRunBuildingHomeDuty(ServerLevel serverLevel) {
         if (!this.hasInterest(PlayerNpcInterest.BUILDING)
                 || PlayerNpcHomeUtil.getHome(this).isEmpty()
                 || (!serverLevel.isNight() && !serverLevel.isThundering())) {
             return false;
         }
-
-        long day = serverLevel.getDayTime() / DAY_LENGTH_TICKS;
-        return this.selectedDailyJobDay != day
-                || this.selectedDailyJobInterest == null
-                || this.selectedDailyJobInterest == PlayerNpcInterest.BUILDING;
+        return true;
     }
 
     public String getInterestsDisplayText() {
@@ -1551,11 +1560,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     protected void registerGoals() {
         GatherLogsGoal gatherLogsGoal = new GatherLogsGoal(this, 1.0D);
         GatherMissingBuildMaterialGoal gatherMissingBuildMaterialGoal = new GatherMissingBuildMaterialGoal(this, 1.0D);
+        TerraformBuildSiteGoal terraformBuildSiteGoal = new TerraformBuildSiteGoal(this, 1.0D);
         this.goalSelector.addGoal(0, new FloatGoal(this));
         this.goalSelector.addGoal(0, new EscapeWaterCurrentGoal(this));
         this.registerVanillaCombatReplacementGoals();
         this.goalSelector.addGoal(1, new EscapeHoleWithBlockGoal(this));
-        this.goalSelector.addGoal(1, new DescendHighColumnGoal(this));
+        this.goalSelector.addGoal(1, new DescendHighColumnGoal(this, terraformBuildSiteGoal));
         this.goalSelector.addGoal(1, new CallForHelpGoal(this));
         this.goalSelector.addGoal(2, this.gated(new SleepAtHomeGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(2, this.gated(new ScaredHideGoal(this), PlayerNpcInterest.CAUTIOUS));
@@ -1563,11 +1573,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(3, new RecoverWeaponInCombatGoal(this, 1.0D, 8.0D));
         this.goalSelector.addGoal(3, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS));
         this.goalSelector.addGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(5, this.gated(new TerraformBuildSiteGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
+        this.goalSelector.addGoal(5, this.gated(terraformBuildSiteGoal, PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new MeleeAttackGoal(this, 1.0D, true));
         this.goalSelector.addGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(4, new MiningNightCampGoal(this, 1.0D));
         this.goalSelector.addGoal(5, new CookFoodGoal(this));
+        this.goalSelector.addGoal(5, this.gated(new FarmSetupGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new CraftCropFoodGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new PlayerNpcFishingGoal(this), PlayerNpcInterest.FISHING));
@@ -1585,26 +1596,28 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(5, this.gated(new BoatStockpileGoal(this), PlayerNpcInterest.FISHING, PlayerNpcInterest.EXPLORING));
         this.goalSelector.addGoal(5, this.gated(new PlantSaplingGoal(this), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(5, this.gated(new UseSpyglassGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.CAUTIOUS));
-        this.goalSelector.addGoal(6, this.gated(gatherLogsGoal, PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
-        this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
+        this.goalSelector.addGoal(6, this.gated(gatherLogsGoal, PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
+        this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
-        this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
+        this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(6, gatherMissingBuildMaterialGoal);
         this.goalSelector.addGoal(7, this.gated(new MiningCaveStrollGoal(this, 1.0D), PlayerNpcInterest.MINING));
+        this.goalSelector.addGoal(7, this.gated(new FarmStrollGoal(this, 1.0D), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for logs",
-                level -> (this.shouldPrioritizeLogGathering()
-                        || CraftBasicGearGoal.needsFishingRodCraftingLogs(this, level)
-                        || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(level, this))
-                        && this.getGatherCooldown() <= 0
+                level -> GatherLogsGoal.hasLogSupplyDemand(this, level)
                         && !GatherStoneGoal.isStoneSupplyPhaseActive(this, level)
+                        && !FarmCropGoal.shouldExploreForFarmSupplies(this, level)
                         && this.canExploreForLogSupply(level)
                         && !this.shouldStayHomeForWeather(level)
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
-                gatherLogsGoal::hasNearbyUsableLogTarget
-        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
+                gatherLogsGoal::hasNearbyUsableLogTarget,
+                true,
+                true,
+                true
+        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
@@ -1615,7 +1628,25 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> GatherStoneGoal.hasNearbyStoneTarget(this, level),
                 false
-        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING));
+        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+                this,
+                1.0D,
+                "exploring for a farm area",
+                level -> FarmSetupGoal.shouldExploreForFarmArea(this, level),
+                level -> PlayerNpcFarmPlan.get(this).isPresent(),
+                true,
+                false
+        ), PlayerNpcInterest.FARMING));
+        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+                this,
+                1.0D,
+                "exploring for seeds and crops",
+                level -> FarmCropGoal.shouldExploreForFarmSupplies(this, level),
+                level -> FarmCropGoal.hasNearbyFarmSupplyTarget(this, level),
+                true,
+                false
+        ), PlayerNpcInterest.FARMING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
@@ -1635,7 +1666,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && !this.shouldStayHomeForWeather(level)
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> false,
-                true,
+                false,
                 true
         ), PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
@@ -2239,7 +2270,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private void pickupNearbyItems() {
         if (!isAlive() || isRemoved() || this.isDeadOrDying()) return;
 
-        var box = getBoundingBox().inflate(1.5D);
+        AABB box = this.getBoundingBox().inflate(
+                ITEM_PICKUP_REACH.getX(),
+                ITEM_PICKUP_REACH.getY(),
+                ITEM_PICKUP_REACH.getZ());
         List<ItemEntity> items = level().getEntitiesOfClass(
                 ItemEntity.class,
                 box,
@@ -2249,9 +2283,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         );
 
         for (ItemEntity itemEntity : items) {
-            tryPickup(itemEntity);
+            this.tryPickupItemEntity(itemEntity);
         }
-        this.equipBetterGearFromInventory();
     }
 
     private void pickupNearbyExperienceOrbs() {
@@ -2285,6 +2318,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || itemEntity.isRemoved()
                 || itemEntity.hasPickUpDelay()
                 || itemEntity.getItem().isEmpty()
+                || !this.isWithinPlayerLikeItemPickupReach(itemEntity)
                 || !shouldCustomInventoryPickup(itemEntity.getItem())) {
             return false;
         }
@@ -2294,6 +2328,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.equipBetterGearFromInventory();
         }
         return pickedUp;
+    }
+
+    public boolean isWithinPlayerLikeItemPickupReach(@Nullable ItemEntity itemEntity) {
+        return itemEntity != null
+                && itemEntity.level() == this.level()
+                && this.getBoundingBox()
+                .inflate(ITEM_PICKUP_REACH.getX(), ITEM_PICKUP_REACH.getY(), ITEM_PICKUP_REACH.getZ())
+                .intersects(itemEntity.getBoundingBox());
     }
 
     private boolean tryPickup(ItemEntity itemEntity) {
@@ -2332,16 +2374,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
 
         this.inventory.setChanged();
-        this.swing(InteractionHand.MAIN_HAND, true);
-        this.playInventoryPickupSound();
+        int pickedUpCount = originalCount - remaining.getCount();
+        this.onItemPickup(itemEntity);
+        this.take(itemEntity, pickedUpCount);
 
         if (remaining.isEmpty()) {
-            itemEntity.setDeltaMovement(
-                    (this.getX() - itemEntity.getX()) * 0.25,
-                    (this.getY() + 1.0 - itemEntity.getY()) * 0.25,
-                    (this.getZ() - itemEntity.getZ()) * 0.25
-            );
-            itemEntity.setPickUpDelay(0);
             itemEntity.discard();
         } else {
             itemEntity.setItem(remaining);
@@ -2403,13 +2440,16 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.pickupNearbyExperienceOrbs();
         }
 
-        if ((tickCount + getId()) % 20 != 0) {
-            return;
+        if (!isInventoryFull()) {
+            this.pickupNearbyItems();
         }
+    }
 
-        if (isInventoryFull()) return;
-
-        pickupNearbyItems();
+    @Override
+    protected Vec3i getPickupReach() {
+        // Include each adjacent block horizontally and vertically, forming the
+        // requested 3x3x3 pickup neighborhood around the NPC.
+        return ITEM_PICKUP_REACH;
     }
 
     private void tickAiCooldowns() {
@@ -3156,7 +3196,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.lastSupplyGoalRerollDay = day;
         this.gatherCooldown = 0;
         this.biomeExploreCooldown = 0;
-        this.setCurrentAiDetail("new daily supply goals logs="
+        this.setSchedulerTraceDetail("new daily supply goals logs="
                 + this.rawLogReserveTarget
                 + " stone="
                 + this.cobblestoneSupplyTarget);
@@ -3167,8 +3207,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         long day = dayTime / DAY_LENGTH_TICKS;
         long timeOfDay = dayTime % DAY_LENGTH_TICKS;
 
-        if (this.isBuildingBaseSelectionLocked()) {
-            this.selectDailyJob(day, PlayerNpcInterest.BUILDING, "building base selection locked");
+        if (this.shouldForceUnfinishedBuilding(serverLevel)) {
+            this.selectDailyJob(day, PlayerNpcInterest.BUILDING, "unfinished building locked");
             return;
         }
 
@@ -3223,10 +3263,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.selectedDailyJobInterest = interest;
         this.gatherCooldown = 0;
         this.biomeExploreCooldown = 0;
-        this.setCurrentAiDetail("daily job="
+        this.setSchedulerTraceDetail("daily job="
                 + (interest == null ? "none" : interest.displayName())
                 + " reason="
                 + reason);
+    }
+
+    private void setSchedulerTraceDetail(String detail) {
+        this.setIdleTraceDetail(detail, 40);
+        if (AI_IDLE.equals(this.getCurrentAiState())) {
+            this.setCurrentAiDetail("");
+        }
     }
 
     private static Optional<PlayerNpcInterest> parseSavedDailyJobInterest(String name) {
@@ -3487,6 +3534,15 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (this.hasInterest(PlayerNpcInterest.FISHING)) {
             InventoryUtils.addItem(this.inventory, new ItemStack(Items.STRING, new Random().nextInt(3, 8)));
         }
+        if (this.hasInterest(PlayerNpcInterest.FARMING)) {
+            InventoryUtils.addItem(this.inventory, new ItemStack(Items.WATER_BUCKET));
+            if (random.nextFloat() < 0.72F) {
+                ItemLike starterCrop = random.nextBoolean() ? Items.CARROT : Items.POTATO;
+                InventoryUtils.addItem(this.inventory, new ItemStack(starterCrop, random.nextInt(2, 6)));
+            } else if (random.nextFloat() < 0.65F) {
+                InventoryUtils.addItem(this.inventory, new ItemStack(Items.WHEAT_SEEDS, random.nextInt(2, 6)));
+            }
+        }
 
         int goldenAppleCount = isHard ? random.nextInt(6, 12)
                 : isMedium ? random.nextInt(2, 6)
@@ -3522,7 +3578,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             InventoryUtils.addItem(this.inventory, new ItemStack(Items.ENDER_PEARL, enderPearlCount));
         }
 
-        if (isMedium) {
+        if (isMedium && !InventoryUtils.hasItem(this.inventory, Items.WATER_BUCKET)) {
             InventoryUtils.addItem(this.inventory, new ItemStack(Items.WATER_BUCKET));
         }
         if ((isHard && random.nextFloat() < 0.50F) || (!isHard && isMedium && random.nextFloat() < 0.30F)) {

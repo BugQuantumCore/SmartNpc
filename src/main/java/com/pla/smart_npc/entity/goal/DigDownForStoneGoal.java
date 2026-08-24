@@ -4,6 +4,7 @@ import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
@@ -44,6 +45,7 @@ public class DigDownForStoneGoal extends Goal {
     private static final int FAILED_WALK_COOLDOWN_TICKS = 20 * 2;
     private static final int MINING_JOB_DIG_BLOCKS = 16;
     private static final int MINING_PROSPECT_COOLDOWN_TICKS = 20;
+    private static final int FISHING_SUPPORT_RETRY_COOLDOWN_TICKS = 20;
     private static final int ORE_SEARCH_INTERVAL_TICKS = 20 * 2;
     private static final int MAX_DIG_SITE_WALK_TICKS = 20 * 25;
     private static final int LOCAL_PROSPECT_STUCK_TICKS = 20 * 2;
@@ -150,10 +152,17 @@ public class DigDownForStoneGoal extends Goal {
 
         this.digOrigin = this.findDigOrigin(serverLevel);
         if (this.digOrigin == null) {
+            if (stoneSupplyActive && GatherStoneGoal.isFishingSupportJob(this.playerNpc)) {
+                // GatherStoneGoal has already found no usable nearby target at this point.
+                // Back off only after the dig-down fallback also fails, otherwise this
+                // shared cooldown would prevent a valid dig route from starting.
+                this.playerNpc.setGatherCooldown(FISHING_SUPPORT_RETRY_COOLDOWN_TICKS);
+            }
             this.traceCanUseBlocked("digdown blocked: no dig origin logsNeed="
                     + this.playerNpc.shouldPrioritizeLogGathering()
                     + " stoneNeed=" + this.playerNpc.shouldPrioritizeCobblestoneGathering()
-                    + " prepared=" + this.hasPreparedBaseForStone(serverLevel));
+                    + " prepared=" + this.hasPreparedBaseForStone(serverLevel)
+                    + " gatherCooldown=" + this.playerNpc.getGatherCooldown());
             return false;
         }
         this.digStepOffset = this.chooseDigStepOffset();
@@ -235,6 +244,8 @@ public class DigDownForStoneGoal extends Goal {
         this.activeClearTargetTicks = 0;
         this.stoneBlocksNeeded = GatherStoneGoal.isMiningJobActive(this.playerNpc)
                 ? MINING_JOB_DIG_BLOCKS
+                : GatherStoneGoal.isFarmingSupportJob(this.playerNpc)
+                ? Math.max(1, FarmAi.REQUIRED_STONE - this.countStone())
                 : Math.max(1, this.playerNpc.getCobblestoneSupplyTarget() - this.countStone());
         this.targetPos = null;
         this.lastLocalProspectWalkPos = null;
@@ -432,6 +443,7 @@ public class DigDownForStoneGoal extends Goal {
                 BlockPos candidate = new BlockPos(x, y, z);
                 if (this.canStandAt(serverLevel, candidate)
                         && this.isAwayFromHome(candidate)
+                        && !this.isProtectedStoneWorkPosition(candidate)
                         && this.isInsideResourceRadius(candidate)) {
                     candidates.add(candidate.immutable());
                 }
@@ -477,7 +489,7 @@ public class DigDownForStoneGoal extends Goal {
 
     private boolean isValidLocalProspectingOrigin(ServerLevel serverLevel, BlockPos pos) {
         return this.canStandAt(serverLevel, pos)
-                && !this.isProtectedHomeBlock(pos)
+                && !this.isProtectedStoneWorkPosition(pos)
                 && this.isInsideResourceRadius(pos)
                 && (this.isAwayFromHome(pos) || !serverLevel.canSeeSky(pos.above()));
     }
@@ -677,8 +689,15 @@ public class DigDownForStoneGoal extends Goal {
         }
 
         BlockPos clearTarget = this.clearBlockAi.targetPos();
+        if (this.abortProtectedClearTarget(clearTarget)) {
+            return true;
+        }
         this.trackActiveClearTarget(clearTarget);
         ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
+        BlockPos resolvedTarget = this.clearBlockAi.targetPos();
+        if (this.abortProtectedClearTarget(resolvedTarget)) {
+            return true;
+        }
         if (result == ClearBlockAi.TickResult.RUNNING) {
             if (this.prospectingOre && this.activeClearTargetTicks >= LOCAL_PROSPECT_CLEAR_STUCK_TICKS) {
                 this.abortSlowProspectClearTarget(clearTarget);
@@ -694,6 +713,24 @@ public class DigDownForStoneGoal extends Goal {
         this.activeClearTargetTicks = 0;
         this.repathTicks = 0;
         return false;
+    }
+
+    private boolean abortProtectedClearTarget(BlockPos clearTarget) {
+        if (clearTarget == null || !this.isProtectedHomeBlock(clearTarget)) {
+            return false;
+        }
+
+        BlockPos immutable = clearTarget.immutable();
+        this.skippedClearTargets.add(immutable);
+        this.playerNpc.clearBlockBreakProgress(immutable);
+        this.clearBlockAi.stop();
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
+        this.activeClearTarget = null;
+        this.activeClearTargetTicks = 0;
+        this.repathTicks = 0;
+        this.recoverFromProspectRouteFailure();
+        return true;
     }
 
     private void trackActiveClearTarget(BlockPos clearTarget) {
@@ -946,13 +983,21 @@ public class DigDownForStoneGoal extends Goal {
     }
 
     private boolean isProtectedHomeBlock(BlockPos pos) {
-        return PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos);
+        return PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                || FarmAi.isProtectedFarmBlock(this.playerNpc, pos)
+                || FarmAi.isBelowOwnedFarmFootprint(this.playerNpc, pos);
+    }
+
+    private boolean isProtectedStoneWorkPosition(BlockPos pos) {
+        return this.isProtectedHomeBlock(pos)
+                || FarmAi.isInsideOwnedFarmWorkOrEntranceFootprint(this.playerNpc, pos);
     }
 
     private boolean hasPreparedBaseForStone(ServerLevel serverLevel) {
         if (GatherStoneGoal.isMiningJobActive(this.playerNpc)
                 && !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
-                || GatherStoneGoal.isFishingSupportJob(this.playerNpc)) {
+                || GatherStoneGoal.isFishingSupportJob(this.playerNpc)
+                || GatherStoneGoal.isFarmingSupportJob(this.playerNpc)) {
             return true;
         }
 

@@ -13,7 +13,7 @@ Lets idle Player NPCs use furnaces for basic cooking, ore smelting, and cobblest
 
 `CookFoodGoal` is baseline AI, not interest-gated.
 
-During safe daytime it defers while `GatherStoneGoal.isStoneSupplyPhaseActive(...)` is true. This prevents furnace work from consuming or holding cobblestone/logs and causing the scheduler to abandon the active connected-stone gathering phase before `stoneSupplyGoal` or the current stone build need is closed.
+During safe daytime it defers while `GatherStoneGoal.isStoneSupplyPhaseActive(...)` or `GatherLogsGoal.hasLogSupplyDemand(...)` is true. An already-active log-gathering episode keeps ownership in any weather until it has finished its current tree/pillar route or pillar descent, so furnace walking cannot pull an NPC off a temporary column. This prevents furnace work from consuming or holding cobblestone/logs and causing the scheduler to abandon an active primary-resource pass before its supply target or current build need is closed.
 
 If the NPC has a home and no furnace, it can place a furnace from inventory or craft one from eight cobblestone/cobbled deepslate when it has food or smeltables plus fuel.
 

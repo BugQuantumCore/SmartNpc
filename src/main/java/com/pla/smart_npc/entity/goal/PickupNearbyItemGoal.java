@@ -1,38 +1,34 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
-import com.pla.smart_npc.entity.ai.PlacingBlockAi;
-import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
+import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
+import com.pla.smart_npc.entity.ai.PillarUpAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
-import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
-import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.SimpleContainer;
-import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.animal.Animal;
 import net.minecraft.world.entity.item.ItemEntity;
-import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.PickaxeItem;
-import net.minecraft.world.item.ShovelItem;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -53,48 +49,55 @@ public class PickupNearbyItemGoal extends Goal {
     private static final int REPATH_INTERVAL_TICKS = 10;
     private static final int MAX_FAILED_PATH_TICKS = 20 * 5;
     private static final int MAX_CLOSE_PICKUP_WAIT_TICKS = 24;
-    private static final int MAX_OBSTRUCTION_BREAK_TICKS = 20 * 4;
+    private static final int MAX_OBSTRUCTION_CLEAR_TICKS = 20 * 4;
     private static final double OBSTRUCTION_BREAK_DISTANCE_SQR = 3.2D * 3.2D;
     private static final double ACTIVE_APPROACH_HORIZONTAL_RANGE_SQR = 4.5D * 4.5D;
     private static final double ACTIVE_APPROACH_VERTICAL_RANGE = 3.0D;
     private static final double ACTIVE_APPROACH_PUSH_SPEED = 0.22D;
     private static final double ACTIVE_APPROACH_JUMP_Y = 0.42D;
     private static final int ACTIVE_APPROACH_JUMP_COOLDOWN_TICKS = 10;
+    private static final int NO_PROGRESS_RECOVERY_TICKS = 20;
+    private static final double PROGRESS_DISTANCE_EPSILON = 0.08D;
+    private static final int CLOSE_OBSTRUCTION_CHECK_TICKS = 8;
+    private static final int RECOVERY_RETRY_COOLDOWN_TICKS = 12;
+    private static final int MAX_STUCK_RECOVERY_ATTEMPTS = 3;
+    private static final int RECOVERY_DIRECTION_ATTEMPTS = 12;
+    private static final int RECOVERY_DIRECTION_RADIUS = 4;
     private static final int HIGH_ITEM_VERTICAL_BLOCK_GAP = 2;
-    private static final double PICKUP_PILLAR_BASE_REACHED_SQR = 1.2D * 1.2D;
     private static final int PICKUP_PILLAR_SEARCH_RADIUS = 2;
-    private static final int PICKUP_PILLAR_PLACE_DELAY_TICKS = 6;
-    private static final int PICKUP_PILLAR_MAX_PLACE_WAIT_TICKS = 32;
-    private static final int PICKUP_PILLAR_FORCE_PLACE_TICKS = 10;
-    private static final double PICKUP_PILLAR_PLACE_CLEARANCE_Y = 0.95D;
-    private static final double PICKUP_PILLAR_FALLBACK_PLACE_CLEARANCE_Y = 0.78D;
 
     private final PlayerNpcEntity playerNpc;
-    private final PlacingBlockAi placingBlockAi;
+    private final ToolAi helperToolAi;
+    private final BreakingBlockAi breakingBlockAi;
+    private final ClearBlockAi clearBlockAi;
+    private final PathStuckFallbackAi pathStuckFallbackAi;
     private final double speed;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private final Set<BlockPos> skippedObstructions = new HashSet<>();
     private ItemEntity targetItem;
     private BlockPos prioritySearchCenter;
-    private BlockPos pathObstructionPos;
     private BlockPos pickupPillarBasePos;
-    private BlockPos pickupPillarPlacePos;
-    private ItemStack previousMainHand = ItemStack.EMPTY;
+    private PillarUpAi pickupPillarAi;
+    private BlockPos progressTargetPos;
+    private double bestProgressDistance = Double.POSITIVE_INFINITY;
     private int pickupTicks;
     private int repathTicks;
     private int failedPathTicks;
     private int closePickupWaitTicks;
-    private int obstructionMineTicks;
-    private int pickupPillarPlaceDelayTicks;
-    private int pickupPillarPlaceWaitTicks;
+    private int obstructionClearTicks;
     private int activeApproachTicks;
     private int activeApproachJumpCooldown;
+    private int noProgressTicks;
+    private int recoveryRetryCooldownTicks;
+    private int stuckRecoveryAttempts;
     private int giveUpCooldownTicks;
-    private boolean usingTemporaryTool;
 
     public PickupNearbyItemGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
-        this.placingBlockAi = new PlacingBlockAi(playerNpc);
+        this.helperToolAi = new ToolAi(playerNpc);
+        this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.helperToolAi);
+        this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
+        this.pathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
         this.speed = Math.min(speed, 1.0D);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
@@ -140,14 +143,18 @@ public class PickupNearbyItemGoal extends Goal {
         repathTicks = 0;
         failedPathTicks = 0;
         closePickupWaitTicks = 0;
-        obstructionMineTicks = 0;
+        obstructionClearTicks = 0;
         activeApproachTicks = 0;
         activeApproachJumpCooldown = 0;
-        pathObstructionPos = null;
+        noProgressTicks = 0;
+        recoveryRetryCooldownTicks = 0;
+        stuckRecoveryAttempts = 0;
+        resetProgressWatch();
+        clearBlockAi.stop();
+        breakingBlockAi.stop();
+        pathStuckFallbackAi.stop();
         clearPickupPillar();
-        previousMainHand = ItemStack.EMPTY;
         skippedObstructions.clear();
-        usingTemporaryTool = false;
         prioritySearchCenter = playerNpc.getAnimalLootPriorityPos();
         playerNpc.setCurrentAiState(AI_STATE);
         updateDetail();
@@ -165,11 +172,13 @@ public class PickupNearbyItemGoal extends Goal {
                 playerNpc.getNavigation().stop();
                 return;
             }
-            clearPickupPillar();
-            activeApproachTicks = 0;
+            resetForNewPickupTarget();
         }
 
         pickupTicks++;
+        if (recoveryRetryCooldownTicks > 0) {
+            recoveryRetryCooldownTicks--;
+        }
         if (activeApproachJumpCooldown > 0) {
             activeApproachJumpCooldown--;
         }
@@ -192,10 +201,17 @@ public class PickupNearbyItemGoal extends Goal {
                     targetItem = findTargetItem();
                     if (targetItem == null) {
                         playerNpc.clearAnimalLootPriority();
+                    } else {
+                        resetForNewPickupTarget();
                     }
                 }
             } else {
                 closePickupWaitTicks++;
+                if (playerNpc.level() instanceof ServerLevel serverLevel
+                        && closePickupWaitTicks >= CLOSE_OBSTRUCTION_CHECK_TICKS
+                        && tryStartPathObstructionMining(targetItem.blockPosition())) {
+                    return;
+                }
                 if (playerNpc.level() instanceof ServerLevel serverLevel && tryActivePickupApproach(serverLevel)) {
                     return;
                 }
@@ -210,7 +226,18 @@ public class PickupNearbyItemGoal extends Goal {
         }
 
         closePickupWaitTicks = 0;
-        if (tickPathObstruction()) {
+        if (playerNpc.level() instanceof ServerLevel serverLevel
+                && pathStuckFallbackAi.tick(serverLevel, pickupRecoveryDetailPrefix())) {
+            playerNpc.setCurrentAiDetail(pathStuckFallbackAi.detail(pickupRecoveryDetailPrefix()));
+            return;
+        }
+        if (playerNpc.level() instanceof ServerLevel serverLevel && tickPathObstruction(serverLevel)) {
+            return;
+        }
+        if (playerNpc.level() instanceof ServerLevel serverLevel && tickRunningPickupPillar(serverLevel)) {
+            return;
+        }
+        if (playerNpc.level() instanceof ServerLevel serverLevel && tickNoProgressRecovery(serverLevel)) {
             return;
         }
         if (playerNpc.level() instanceof ServerLevel serverLevel && tickPickupPillar(serverLevel)) {
@@ -239,14 +266,20 @@ public class PickupNearbyItemGoal extends Goal {
         repathTicks = 0;
         failedPathTicks = 0;
         closePickupWaitTicks = 0;
-        obstructionMineTicks = 0;
+        obstructionClearTicks = 0;
         activeApproachTicks = 0;
         activeApproachJumpCooldown = 0;
-        playerNpc.clearBlockBreakProgress(pathObstructionPos);
-        pathObstructionPos = null;
+        noProgressTicks = 0;
+        recoveryRetryCooldownTicks = 0;
+        stuckRecoveryAttempts = 0;
+        progressTargetPos = null;
+        bestProgressDistance = Double.POSITIVE_INFINITY;
+        clearBlockAi.stop();
+        breakingBlockAi.stop();
+        pathStuckFallbackAi.stop();
         clearPickupPillar();
         skippedObstructions.clear();
-        restorePreviousMainHand();
+        helperToolAi.restoreMainHand();
         playerNpc.getNavigation().stop();
         if (AI_STATE.equals(playerNpc.getCurrentAiState())) {
             playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -383,6 +416,15 @@ public class PickupNearbyItemGoal extends Goal {
                 failedPathTicks = 0;
             } else if (tryStartPathObstructionMining(stand) || tryStartPathObstructionMining(targetItem.blockPosition())) {
                 failedPathTicks = 0;
+            } else if (playerNpc.level() instanceof ServerLevel serverLevel
+                    && tryStartStuckRecovery(
+                    serverLevel,
+                    stand == null ? targetItem.blockPosition() : stand,
+                    "no usable pickup path"
+            )) {
+                if (pathStuckFallbackAi.isRunning()) {
+                    failedPathTicks = 0;
+                }
             } else {
                 failedPathTicks += REPATH_INTERVAL_TICKS;
             }
@@ -498,11 +540,6 @@ public class PickupNearbyItemGoal extends Goal {
             return false;
         }
 
-        if (pickupPillarPlacePos != null) {
-            tickPickupPillarPlacement(serverLevel);
-            return true;
-        }
-
         if (pickupPillarBasePos == null || !canUsePickupPillarBase(serverLevel, pickupPillarBasePos, targetItem)) {
             pickupPillarBasePos = findPickupPillarBase(serverLevel, targetItem);
             if (pickupPillarBasePos == null) {
@@ -524,12 +561,126 @@ public class PickupNearbyItemGoal extends Goal {
             return true;
         }
 
-        if (!canPillarFrom(serverLevel, feet)) {
-            clearPickupPillar();
+        PillarUpAi pillarAi = preparePickupPillarAi();
+        if (pillarAi == null) {
+            return false;
+        }
+        if (!pillarAi.start(serverLevel, feet)) {
+            BlockPos blocker = pillarAi.startBlockerPos(serverLevel, feet);
+            String failure = pillarAi.startBlocker(serverLevel, feet);
+            if (tryStartPillarFailureObstruction(serverLevel, blocker)) {
+                return true;
+            }
+            return tryStartStuckRecovery(serverLevel, pickupPillarBasePos, "pillar start failed: " + failure);
+        }
+
+        updatePickupPillarDetail();
+        return true;
+    }
+
+    private boolean tickRunningPickupPillar(ServerLevel serverLevel) {
+        if (pickupPillarAi == null || !pickupPillarAi.isRunning()) {
             return false;
         }
 
-        return beginPickupPillarStep(serverLevel, feet);
+        PillarUpAi.TickResult result = pickupPillarAi.tick(serverLevel);
+        if (result == PillarUpAi.TickResult.RUNNING) {
+            updatePickupPillarDetail();
+            return true;
+        }
+        if (result == PillarUpAi.TickResult.PLACED) {
+            pickupPillarAi.consumeLastPlacedPos();
+            failedPathTicks = 0;
+            repathTicks = 0;
+            resetProgressWatch();
+            updatePickupPillarDetail();
+            return true;
+        }
+        if (result == PillarUpAi.TickResult.FAILED) {
+            BlockPos blocker = pickupPillarAi.consumeLastFailureBlockerPos();
+            String failure = pickupPillarAi.consumeLastFailureDetail();
+            pickupPillarAi = null;
+            helperToolAi.restoreMainHand();
+            if (tryStartPillarFailureObstruction(serverLevel, blocker)) {
+                return true;
+            }
+            return tryStartStuckRecovery(serverLevel, pickupPillarBasePos, failure);
+        }
+        return false;
+    }
+
+    private PillarUpAi preparePickupPillarAi() {
+        ItemStack stack = findPickupPillarStack();
+        if (stack.isEmpty() && !shouldPreserveWoodForPillar()) {
+            PlayerNpcCraftingUtil.tryConvertOneLogToPlanks(playerNpc.getInventory(), 0);
+            stack = findPickupPillarStack();
+        }
+        if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem blockItem)) {
+            helperToolAi.restoreMainHand();
+            pickupPillarAi = null;
+            return null;
+        }
+
+        if (pickupPillarAi != null && playerNpc.getMainHandItem().is(stack.getItem())) {
+            return pickupPillarAi;
+        }
+
+        helperToolAi.restoreMainHand();
+        pickupPillarAi = new PillarUpAi(
+                playerNpc,
+                helperToolAi,
+                stack.getItem(),
+                blockItem.getBlock().defaultBlockState()
+        );
+        return pickupPillarAi;
+    }
+
+    private ItemStack findPickupPillarStack() {
+        ItemStack mainHand = playerNpc.getMainHandItem();
+        if (isDirtPillarBlock(mainHand)) {
+            return mainHand;
+        }
+        ItemStack inventoryStack = findInventoryPickupPillarStack(PickupNearbyItemGoal::isDirtPillarBlock);
+        if (!inventoryStack.isEmpty()) {
+            return inventoryStack;
+        }
+
+        if (mainHand.getItem() instanceof BlockItem mainBlockItem
+                && isStonePillarBlock(mainBlockItem.getBlock().defaultBlockState())) {
+            return mainHand;
+        }
+        inventoryStack = findInventoryPickupPillarStack(stack -> stack.getItem() instanceof BlockItem blockItem
+                && isStonePillarBlock(blockItem.getBlock().defaultBlockState()));
+        if (!inventoryStack.isEmpty()) {
+            return inventoryStack;
+        }
+
+        if (isUsablePlankPillarBlock(mainHand)) {
+            return mainHand;
+        }
+        return findInventoryPickupPillarStack(this::isUsablePlankPillarBlock);
+    }
+
+    private ItemStack findInventoryPickupPillarStack(java.util.function.Predicate<ItemStack> predicate) {
+        SimpleContainer inventory = playerNpc.getInventory();
+        for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (!stack.isEmpty() && predicate.test(stack)) {
+                return stack;
+            }
+        }
+        return ItemStack.EMPTY;
+    }
+
+    private boolean tryStartPillarFailureObstruction(ServerLevel serverLevel, BlockPos blocker) {
+        if (blocker == null || !serverLevel.isInWorldBounds(blocker)) {
+            return false;
+        }
+        BlockState state = serverLevel.getBlockState(blocker);
+        if (!isPathObstructionBlock(serverLevel, blocker, state)) {
+            return false;
+        }
+        return startPickupPathClear(serverLevel, blocker);
     }
 
     private boolean tryMoveToPickupPillarBase() {
@@ -668,12 +819,7 @@ public class PickupNearbyItemGoal extends Goal {
         BlockPos feet = playerNpc.blockPosition();
         return feet.getY() >= pickupPillarBasePos.getY()
                 && feet.getX() == pickupPillarBasePos.getX()
-                && feet.getZ() == pickupPillarBasePos.getZ()
-                || playerNpc.distanceToSqr(
-                pickupPillarBasePos.getX() + 0.5D,
-                pickupPillarBasePos.getY(),
-                pickupPillarBasePos.getZ() + 0.5D
-        ) <= PICKUP_PILLAR_BASE_REACHED_SQR;
+                && feet.getZ() == pickupPillarBasePos.getZ();
     }
 
     private void moveToPickupPillarBase(BlockPos base) {
@@ -699,27 +845,9 @@ public class PickupNearbyItemGoal extends Goal {
             if (!isPathObstructionBlock(serverLevel, pos, state)) {
                 continue;
             }
-            pathObstructionPos = pos.immutable();
-            obstructionMineTicks = 0;
-            return tickPathObstruction();
+            return startPickupPathClear(serverLevel, pos);
         }
         return false;
-    }
-
-    private boolean canPillarFrom(ServerLevel serverLevel, BlockPos feet) {
-        return serverLevel.getBlockState(feet).canBeReplaced()
-                && hasOpenBodySpace(serverLevel, feet)
-                && !hasOtherEntityInBlock(serverLevel, feet)
-                && equipPickupPillarBlock();
-    }
-
-    private boolean hasOpenBodySpace(ServerLevel serverLevel, BlockPos feet) {
-        BlockState feetState = serverLevel.getBlockState(feet);
-        BlockState headState = serverLevel.getBlockState(feet.above());
-        return feetState.getCollisionShape(serverLevel, feet).isEmpty()
-                && headState.getCollisionShape(serverLevel, feet.above()).isEmpty()
-                && feetState.getFluidState().isEmpty()
-                && headState.getFluidState().isEmpty();
     }
 
     private boolean hasOpenOrClearableBodySpace(ServerLevel serverLevel, BlockPos feet) {
@@ -733,180 +861,6 @@ public class PickupNearbyItemGoal extends Goal {
             return true;
         }
         return isPathObstructionBlock(serverLevel, pos, state);
-    }
-
-    private boolean beginPickupPillarStep(ServerLevel serverLevel, BlockPos feet) {
-        if (!equipPickupPillarBlock()) {
-            return false;
-        }
-
-        pickupPillarPlacePos = feet.immutable();
-        pickupPillarPlaceDelayTicks = PICKUP_PILLAR_PLACE_DELAY_TICKS;
-        pickupPillarPlaceWaitTicks = 0;
-        playerNpc.getNavigation().stop();
-        lookDownAt(pickupPillarPlacePos);
-        playerNpc.shortPillarJump();
-        updatePickupPillarDetail();
-        return true;
-    }
-
-    private void tickPickupPillarPlacement(ServerLevel serverLevel) {
-        if (pickupPillarPlacePos == null) {
-            return;
-        }
-        if (pickupPillarPlaceDelayTicks > 0) {
-            pickupPillarPlaceDelayTicks--;
-            return;
-        }
-
-        pickupPillarPlaceWaitTicks++;
-        if (pickupPillarPlaceWaitTicks > PICKUP_PILLAR_MAX_PLACE_WAIT_TICKS) {
-            clearPickupPillarPlacement();
-            return;
-        }
-
-        if (!hasPickupPillarPlacementClearance()
-                && pickupPillarPlaceWaitTicks < PICKUP_PILLAR_FORCE_PLACE_TICKS) {
-            lookDownAt(pickupPillarPlacePos);
-            return;
-        }
-
-        if (!serverLevel.getBlockState(pickupPillarPlacePos).canBeReplaced()
-                || !equipPickupPillarBlock()) {
-            clearPickupPillarPlacement();
-            return;
-        }
-
-        ItemStack blockStack = playerNpc.getMainHandItem();
-        if (blockStack.isEmpty() || !(blockStack.getItem() instanceof BlockItem blockItem)) {
-            clearPickupPillarPlacement();
-            return;
-        }
-
-        BlockState placeState = blockItem.getBlock().defaultBlockState();
-        if (!canPlacePickupPillarWithoutClipping(serverLevel, pickupPillarPlacePos, placeState)) {
-            lookDownAt(pickupPillarPlacePos);
-            return;
-        }
-
-        lookDownAt(pickupPillarPlacePos);
-        if (!this.placingBlockAi.placeHeldBlock(serverLevel, pickupPillarPlacePos, placeState)) {
-            clearPickupPillarPlacement();
-            return;
-        }
-        snapAbovePickupPillarIfNeeded(pickupPillarPlacePos);
-
-        failedPathTicks = 0;
-        repathTicks = 0;
-        clearPickupPillarPlacement();
-        moveToTarget();
-    }
-
-    private boolean hasPickupPillarPlacementClearance() {
-        if (pickupPillarPlacePos == null) {
-            return false;
-        }
-
-        double clearedY = playerNpc.getBoundingBox().minY - pickupPillarPlacePos.getY();
-        if (clearedY >= PICKUP_PILLAR_PLACE_CLEARANCE_Y) {
-            return true;
-        }
-
-        return pickupPillarPlaceWaitTicks >= 6
-                && clearedY >= PICKUP_PILLAR_FALLBACK_PLACE_CLEARANCE_Y
-                && playerNpc.getDeltaMovement().y <= 0.05D;
-    }
-
-    private boolean canPlacePickupPillarWithoutClipping(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        if (hasOtherEntityInBlock(serverLevel, pos)) {
-            return false;
-        }
-
-        List<AABB> boxes = state.getCollisionShape(serverLevel, pos)
-                .toAabbs()
-                .stream()
-                .map(box -> box.move(pos))
-                .toList();
-        if (boxes.stream().noneMatch(box -> box.intersects(playerNpc.getBoundingBox().inflate(0.02D)))) {
-            return true;
-        }
-
-        double snapUp = pos.getY() + 1.0D - playerNpc.getBoundingBox().minY;
-        if (snapUp < -0.05D || snapUp > 0.35D) {
-            return false;
-        }
-
-        AABB snappedBox = playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
-        return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
-                && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, playerNpc, snappedBox);
-    }
-
-    private boolean hasOtherEntityInBlock(ServerLevel serverLevel, BlockPos pos) {
-        return !PlayerNpcCollisionUtil.blockingEntitiesInBox(serverLevel, playerNpc, new AABB(pos).inflate(0.05D)).isEmpty();
-    }
-
-    private void snapAbovePickupPillarIfNeeded(BlockPos pos) {
-        double topY = pos.getY() + 1.0D;
-        if (playerNpc.getBoundingBox().minY >= topY) {
-            return;
-        }
-
-        Vec3 motion = playerNpc.getDeltaMovement();
-        playerNpc.setPos(playerNpc.getX(), topY, playerNpc.getZ());
-        playerNpc.setDeltaMovement(motion.x, Math.max(0.0D, motion.y), motion.z);
-        playerNpc.fallDistance = 0.0F;
-    }
-
-    private boolean equipPickupPillarBlock() {
-        ItemStack mainHand = playerNpc.getMainHandItem();
-        if (isDirtPillarBlock(mainHand)) {
-            return true;
-        }
-
-        ItemStack block = playerNpc.consumeInventoryItem(PickupNearbyItemGoal::isDirtPillarBlock, 1)
-                .orElse(ItemStack.EMPTY);
-        if (!block.isEmpty()) {
-            setTemporaryMainHand(block);
-            return true;
-        }
-
-        if (mainHand.getItem() instanceof BlockItem mainBlockItem
-                && isStonePillarBlock(mainBlockItem.getBlock().defaultBlockState())) {
-            return true;
-        }
-
-        block = playerNpc.consumeInventoryItem(stack -> {
-            if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem blockItem)) {
-                return false;
-            }
-            return isStonePillarBlock(blockItem.getBlock().defaultBlockState());
-        }, 1).orElse(ItemStack.EMPTY);
-        if (!block.isEmpty()) {
-            setTemporaryMainHand(block);
-            return true;
-        }
-
-        if (isUsablePlankPillarBlock(mainHand)) {
-            return true;
-        }
-
-        block = playerNpc.consumeInventoryItem(this::isUsablePlankPillarBlock, 1)
-                .orElse(ItemStack.EMPTY);
-        if (!block.isEmpty()) {
-            setTemporaryMainHand(block);
-            return true;
-        }
-
-        if (!shouldPreserveWoodForPillar() && !InventoryUtils.hasItem(playerNpc, this::isPickupPillarBlock)) {
-            PlayerNpcCraftingUtil.tryConvertOneLogToPlanks(playerNpc.getInventory(), 0);
-            block = playerNpc.consumeInventoryItem(this::isUsablePlankPillarBlock, 1)
-                    .orElse(ItemStack.EMPTY);
-            if (!block.isEmpty()) {
-                setTemporaryMainHand(block);
-                return true;
-            }
-        }
-        return false;
     }
 
     private boolean isPickupPillarBlock(ItemStack stack) {
@@ -986,25 +940,170 @@ public class PickupNearbyItemGoal extends Goal {
                 : PlayerNpcCraftingUtil.countLogs(playerNpc.getInventory()) * 4);
     }
 
-    private void lookDownAt(BlockPos pos) {
-        playerNpc.getLookControl().setLookAt(
-                pos.getX() + 0.5D,
-                pos.getY() - 0.5D,
-                pos.getZ() + 0.5D,
-                60.0F,
-                60.0F
-        );
+    private boolean tickNoProgressRecovery(ServerLevel serverLevel) {
+        if (targetItem == null || !targetItem.isAlive()) {
+            resetProgressWatch();
+            return false;
+        }
+        if (!playerNpc.onGround()) {
+            return false;
+        }
+
+        BlockPos targetPos = targetItem.blockPosition();
+        BlockPos routeTarget = pickupPillarBasePos == null
+                ? targetPos
+                : pickupPillarBasePos;
+        if (progressTargetPos == null || !progressTargetPos.equals(routeTarget)) {
+            resetProgressWatch();
+            return false;
+        }
+
+        double currentDistance = progressDistanceTo(routeTarget);
+        if (currentDistance + PROGRESS_DISTANCE_EPSILON < bestProgressDistance) {
+            bestProgressDistance = currentDistance;
+            noProgressTicks = 0;
+            return false;
+        }
+
+        noProgressTicks++;
+        if (noProgressTicks < NO_PROGRESS_RECOVERY_TICKS || recoveryRetryCooldownTicks > 0) {
+            return false;
+        }
+
+        if (tryStartPathObstructionMining(routeTarget)) {
+            resetProgressWatch();
+            return true;
+        }
+        if (isHighPickupTarget(targetItem)
+                && pickupPillarBasePos != null
+                && isAtPickupPillarBase()) {
+            return false;
+        }
+        return tryStartStuckRecovery(serverLevel, routeTarget, "no movement progress");
+    }
+
+    private boolean tryStartStuckRecovery(ServerLevel serverLevel, BlockPos routeTarget, String reason) {
+        if (targetItem == null || !targetItem.isAlive() || !playerNpc.onGround()) {
+            return false;
+        }
+        if (recoveryRetryCooldownTicks > 0) {
+            return false;
+        }
+        if (stuckRecoveryAttempts >= MAX_STUCK_RECOVERY_ATTEMPTS) {
+            failedPathTicks = MAX_FAILED_PATH_TICKS;
+            playerNpc.getNavigation().stop();
+            playerNpc.setCurrentAiDetail(pickupRecoveryDetailPrefix() + " recovery exhausted: " + reason);
+            return true;
+        }
+
+        stuckRecoveryAttempts++;
+        recoveryRetryCooldownTicks = RECOVERY_RETRY_COOLDOWN_TICKS;
+        resetProgressWatch();
+        BlockPos directionTarget = findRandomSafeRecoveryDirection(serverLevel, routeTarget);
+        if (directionTarget == null) {
+            directionTarget = routeTarget == null ? targetItem.blockPosition() : routeTarget;
+        }
+        if (pathStuckFallbackAi.start(
+                serverLevel,
+                directionTarget,
+                pickupRecoveryDetailPrefix(),
+                this::isProtectedHomeBlock
+        )) {
+            playerNpc.setCurrentAiDetail(pathStuckFallbackAi.detail(pickupRecoveryDetailPrefix()));
+            return true;
+        }
+
+        failedPathTicks += REPATH_INTERVAL_TICKS;
+        playerNpc.setCurrentAiDetail(pathStuckFallbackAi.detail(
+                pickupRecoveryDetailPrefix() + " recovery blocked: " + reason
+        ));
+        return true;
+    }
+
+    private BlockPos findRandomSafeRecoveryDirection(ServerLevel serverLevel, BlockPos routeTarget) {
+        BlockPos feet = playerNpc.blockPosition();
+        BlockPos fallback = null;
+        for (int attempt = 0; attempt < RECOVERY_DIRECTION_ATTEMPTS; attempt++) {
+            int dx = playerNpc.getRandom().nextInt(RECOVERY_DIRECTION_RADIUS * 2 + 1) - RECOVERY_DIRECTION_RADIUS;
+            int dz = playerNpc.getRandom().nextInt(RECOVERY_DIRECTION_RADIUS * 2 + 1) - RECOVERY_DIRECTION_RADIUS;
+            int dy = playerNpc.getRandom().nextInt(5) - 2;
+            if (dx == 0 && dz == 0) {
+                continue;
+            }
+
+            BlockPos candidate = feet.offset(dx, dy, dz);
+            if (isProtectedHomeBlock(candidate)
+                    || !canStandAt(serverLevel, candidate)
+                    || !canReachExact(candidate)) {
+                continue;
+            }
+            if (fallback == null) {
+                fallback = candidate.immutable();
+            }
+            if (routeTarget == null || candidate.distSqr(routeTarget) < feet.distSqr(routeTarget)) {
+                return candidate.immutable();
+            }
+        }
+        return fallback;
+    }
+
+    private boolean canReachExact(BlockPos pos) {
+        Path path = playerNpc.getNavigation().createPath(pos, 0);
+        return path != null
+                && path.canReach()
+                && path.getEndNode() != null
+                && path.getEndNode().asBlockPos().equals(pos);
+    }
+
+    private void resetProgressWatch() {
+        progressTargetPos = targetItem == null
+                ? null
+                : (pickupPillarBasePos == null
+                ? targetItem.blockPosition().immutable()
+                : pickupPillarBasePos.immutable());
+        bestProgressDistance = progressTargetPos == null
+                ? Double.POSITIVE_INFINITY
+                : progressDistanceTo(progressTargetPos);
+        noProgressTicks = 0;
+    }
+
+    private double progressDistanceTo(BlockPos routeTarget) {
+        if (routeTarget == null) {
+            return Double.POSITIVE_INFINITY;
+        }
+        double dx = routeTarget.getX() + 0.5D - playerNpc.getX();
+        double dy = routeTarget.getY() - playerNpc.getY();
+        double dz = routeTarget.getZ() + 0.5D - playerNpc.getZ();
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    private void resetForNewPickupTarget() {
+        stopPickupPathClear();
+        pathStuckFallbackAi.stop();
+        clearPickupPillar();
+        skippedObstructions.clear();
+        playerNpc.getNavigation().stop();
+        repathTicks = 0;
+        activeApproachTicks = 0;
+        recoveryRetryCooldownTicks = 0;
+        stuckRecoveryAttempts = 0;
+        resetProgressWatch();
+    }
+
+    private String pickupRecoveryDetailPrefix() {
+        if (targetItem == null || targetItem.getItem().isEmpty()) {
+            return "pickup";
+        }
+        return "pickup " + targetItem.getItem().getHoverName().getString();
     }
 
     private void clearPickupPillar() {
         pickupPillarBasePos = null;
-        clearPickupPillarPlacement();
-    }
-
-    private void clearPickupPillarPlacement() {
-        pickupPillarPlacePos = null;
-        pickupPillarPlaceDelayTicks = 0;
-        pickupPillarPlaceWaitTicks = 0;
+        if (pickupPillarAi != null) {
+            pickupPillarAi.clear();
+            pickupPillarAi = null;
+        }
+        helperToolAi.restoreMainHand();
     }
 
     private void updatePickupPillarDetail() {
@@ -1020,93 +1119,104 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private boolean tryStartPathObstructionMining(BlockPos destination) {
-        if (!(playerNpc.level() instanceof ServerLevel) || destination == null) {
+        if (!(playerNpc.level() instanceof ServerLevel serverLevel) || destination == null) {
             return false;
         }
-
-        BlockPos obstruction = findPathObstructionToward(destination);
-        if (obstruction == null) {
-            return false;
-        }
-
-        if (obstruction.equals(pathObstructionPos)) {
-            return tickPathObstruction();
-        }
-        pathObstructionPos = obstruction;
-        obstructionMineTicks = 0;
-        playerNpc.getNavigation().stop();
-        return tickPathObstruction();
-    }
-
-    private boolean tickPathObstruction() {
-        if (pathObstructionPos == null || !(playerNpc.level() instanceof ServerLevel serverLevel)) {
-            return false;
-        }
-
-        BlockState state = serverLevel.getBlockState(pathObstructionPos);
-        if (!isPathObstructionBlock(serverLevel, pathObstructionPos, state)) {
-            clearPathObstruction();
-            return false;
-        }
-        if (playerNpc.distanceToSqr(
-                pathObstructionPos.getX() + 0.5D,
-                pathObstructionPos.getY() + 0.5D,
-                pathObstructionPos.getZ() + 0.5D
-        ) > OBSTRUCTION_BREAK_DISTANCE_SQR) {
-            skippedObstructions.add(pathObstructionPos.immutable());
-            clearPathObstruction();
-            return false;
-        }
-        if (!equipToolFor(state)) {
-            skippedObstructions.add(pathObstructionPos.immutable());
-            clearPathObstruction();
-            return false;
-        }
-
-        playerNpc.getNavigation().stop();
-        playerNpc.getLookControl().setLookAt(
-                pathObstructionPos.getX() + 0.5D,
-                pathObstructionPos.getY() + 0.5D,
-                pathObstructionPos.getZ() + 0.5D,
-                40.0F,
-                40.0F
-        );
-        if (obstructionMineTicks % 8 == 0) {
-            playerNpc.triggerMainHandAttackAnimation();
-            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, pathObstructionPos, state, playerNpc);
-        }
-
-        obstructionMineTicks++;
-        int requiredMineTicks = getRequiredMineTicks(serverLevel, pathObstructionPos, state);
-        playerNpc.showBlockBreakProgress(pathObstructionPos, obstructionMineTicks, requiredMineTicks);
-        updateObstructionDetail(state, requiredMineTicks);
-        if (obstructionMineTicks < requiredMineTicks && obstructionMineTicks < MAX_OBSTRUCTION_BREAK_TICKS) {
+        if (clearBlockAi.isRunning()) {
             return true;
         }
 
-        BlockPos clearedPos = pathObstructionPos;
-        if (obstructionMineTicks >= requiredMineTicks && PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, clearedPos, state, playerNpc)) {
-            playerNpc.hurtMainHandItem(1);
+        BlockPos obstruction = findPathObstructionToward(destination);
+        return obstruction != null && startPickupPathClear(serverLevel, obstruction);
+    }
+
+    private boolean startPickupPathClear(ServerLevel serverLevel, BlockPos obstruction) {
+        if (!isSafePickupClearTarget(serverLevel, obstruction)) {
+            return false;
+        }
+
+        helperToolAi.restoreMainHand();
+        obstructionClearTicks = 0;
+        return clearBlockAi.start(
+                serverLevel,
+                obstruction,
+                this::isPickupPathObstructionState,
+                "clearing pickup path",
+                1,
+                OBSTRUCTION_BREAK_DISTANCE_SQR
+        );
+    }
+
+    private boolean tickPathObstruction(ServerLevel serverLevel) {
+        if (!clearBlockAi.isRunning()) {
+            return false;
+        }
+
+        BlockPos attempted = clearBlockAi.targetPos();
+        if (!isSafePickupClearTarget(serverLevel, attempted)
+                || ++obstructionClearTicks > MAX_OBSTRUCTION_CLEAR_TICKS) {
+            skipPickupObstruction(attempted);
+            stopPickupPathClear();
+            failedPathTicks += REPATH_INTERVAL_TICKS;
+            resetProgressWatch();
+            return true;
+        }
+
+        ClearBlockAi.TickResult result = clearBlockAi.tick(serverLevel);
+        BlockPos resolvedTarget = clearBlockAi.targetPos();
+        if (clearBlockAi.isRunning() && !isSafePickupClearTarget(serverLevel, resolvedTarget)) {
+            skipPickupObstruction(resolvedTarget);
+            stopPickupPathClear();
+            failedPathTicks += REPATH_INTERVAL_TICKS;
+            resetProgressWatch();
+            return true;
+        }
+
+        String detail = clearBlockAi.detail();
+        if (!detail.isBlank()) {
+            playerNpc.setCurrentAiDetail(detail + "\ngiving up in " + getRemainingPickupSeconds() + "s");
+        }
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            return true;
+        }
+
+        if (result == ClearBlockAi.TickResult.DONE) {
             failedPathTicks = 0;
             repathTicks = 0;
+            stopPickupPathClear();
+            resetProgressWatch();
             moveToTarget();
+            return true;
         } else {
-            skippedObstructions.add(clearedPos.immutable());
+            skipPickupObstruction(attempted);
             failedPathTicks += REPATH_INTERVAL_TICKS;
         }
-        clearPathObstruction();
+        stopPickupPathClear();
+        resetProgressWatch();
         return true;
     }
 
-    private void clearPathObstruction() {
-        playerNpc.clearBlockBreakProgress(pathObstructionPos);
-        pathObstructionPos = null;
-        obstructionMineTicks = 0;
+    private void stopPickupPathClear() {
+        clearBlockAi.stop();
+        breakingBlockAi.stop();
+        helperToolAi.restoreMainHand();
+        obstructionClearTicks = 0;
+    }
+
+    private void skipPickupObstruction(BlockPos pos) {
+        if (pos != null) {
+            skippedObstructions.add(pos.immutable());
+        }
     }
 
     private BlockPos findPathObstructionToward(BlockPos destination) {
         if (!(playerNpc.level() instanceof ServerLevel serverLevel) || destination == null) {
             return null;
+        }
+
+        BlockPos navigationCollision = findNavigationPathCollision(serverLevel, destination);
+        if (navigationCollision != null) {
+            return navigationCollision;
         }
 
         BlockPos feet = playerNpc.blockPosition();
@@ -1115,14 +1225,6 @@ public class PickupNearbyItemGoal extends Goal {
         candidates.add(feet.above(2));
         candidates.add(destination);
         candidates.add(destination.above());
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            BlockPos side = feet.relative(direction);
-            candidates.add(side);
-            candidates.add(side.above());
-            if (destination.getY() > feet.getY()) {
-                candidates.add(side.above(2));
-            }
-        }
         addLineObstructionCandidates(candidates, feet, destination);
 
         Set<BlockPos> seen = new HashSet<>();
@@ -1151,6 +1253,89 @@ public class PickupNearbyItemGoal extends Goal {
         return null;
     }
 
+    /**
+     * Minecraft can keep an accepted path in the running/not-stuck state even when the NPC's body
+     * makes no useful progress toward its next node. Inspect the live collision volume swept toward
+     * the next two nodes so recovery clears the real body/head blocker instead of guessing from the
+     * dropped item's block position.
+     */
+    private BlockPos findNavigationPathCollision(ServerLevel serverLevel, BlockPos destination) {
+        Path path = playerNpc.getNavigation().getPath();
+        if (path == null
+                || path.isDone()
+                || path.getNodeCount() <= 0
+                || path.getEndNode() == null
+                || path.getEndNode().asBlockPos().distSqr(destination) > 2.0D) {
+            return null;
+        }
+
+        int firstNode = Math.max(0, path.getNextNodeIndex());
+        int endNode = Math.min(path.getNodeCount(), firstNode + 2);
+        Set<BlockPos> routeSupports = new HashSet<>();
+        routeSupports.add(playerNpc.blockPosition().below().immutable());
+        for (int index = firstNode; index < endNode; index++) {
+            BlockPos node = path.getNode(index).asBlockPos();
+            routeSupports.add(node.below().immutable());
+            BlockPos blocker = findSweptBodyCollision(serverLevel, node, routeSupports);
+            if (blocker != null) {
+                return blocker;
+            }
+        }
+        return null;
+    }
+
+    private BlockPos findSweptBodyCollision(
+            ServerLevel serverLevel,
+            BlockPos node,
+            Set<BlockPos> routeSupports
+    ) {
+        AABB currentBox = playerNpc.getBoundingBox();
+        AABB nodeBox = currentBox.move(
+                node.getX() + 0.5D - playerNpc.getX(),
+                node.getY() - playerNpc.getY(),
+                node.getZ() + 0.5D - playerNpc.getZ()
+        );
+        AABB sweptBody = new AABB(
+                Math.min(currentBox.minX, nodeBox.minX) - 0.04D,
+                Math.min(currentBox.minY, nodeBox.minY) + 0.02D,
+                Math.min(currentBox.minZ, nodeBox.minZ) - 0.04D,
+                Math.max(currentBox.maxX, nodeBox.maxX) + 0.04D,
+                Math.max(currentBox.maxY, nodeBox.maxY) + 0.04D,
+                Math.max(currentBox.maxZ, nodeBox.maxZ) + 0.04D
+        );
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (BlockPos mutable : BlockPos.betweenClosed(
+                Mth.floor(sweptBody.minX),
+                Mth.floor(sweptBody.minY),
+                Mth.floor(sweptBody.minZ),
+                Mth.floor(sweptBody.maxX),
+                Mth.floor(sweptBody.maxY),
+                Mth.floor(sweptBody.maxZ))) {
+            BlockPos pos = mutable.immutable();
+            if (routeSupports.contains(pos)) {
+                continue;
+            }
+            BlockState state = serverLevel.getBlockState(pos);
+            if (!isPathObstructionBlock(serverLevel, pos, state)
+                    || state.getCollisionShape(serverLevel, pos).toAabbs().stream()
+                    .map(box -> box.move(pos))
+                    .noneMatch(box -> box.intersects(sweptBody))) {
+                continue;
+            }
+            double distance = playerNpc.distanceToSqr(
+                    pos.getX() + 0.5D,
+                    pos.getY() + 0.5D,
+                    pos.getZ() + 0.5D
+            );
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = pos;
+            }
+        }
+        return best == null ? null : best.immutable();
+    }
+
     private void addLineObstructionCandidates(List<BlockPos> candidates, BlockPos feet, BlockPos destination) {
         double dx = destination.getX() - feet.getX();
         double dy = destination.getY() - feet.getY();
@@ -1170,14 +1355,28 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private boolean isPathObstructionBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        boolean blocksMovement = !state.getCollisionShape(serverLevel, pos).isEmpty();
-        return !state.isAir()
-                && state.getDestroySpeed(serverLevel, pos) >= 0.0F
-                && blocksMovement
-                && state.getFluidState().isEmpty()
+        return isPickupPathObstructionState(state)
+                && ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, state)
+                && !playerNpc.isTemporaryPillarSupport(pos)
+                && !FarmAi.isOwnedFarmDestructionProtected(playerNpc, pos)
                 && !CraftBasicGearGoal.isTemporaryCraftingTable(playerNpc, serverLevel, pos)
                 && !isProtectedHomeBlock(pos)
-                && serverLevel.getBlockEntity(pos) == null
+                && !skippedObstructions.contains(pos);
+    }
+
+    private boolean isSafePickupClearTarget(ServerLevel serverLevel, BlockPos pos) {
+        return pos != null
+                && serverLevel.isInWorldBounds(pos)
+                && serverLevel.getWorldBorder().isWithinBounds(pos)
+                && playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D)
+                <= OBSTRUCTION_BREAK_DISTANCE_SQR
+                && isPathObstructionBlock(serverLevel, pos, serverLevel.getBlockState(pos));
+    }
+
+    private boolean isPickupPathObstructionState(BlockState state) {
+        return state != null
+                && !state.isAir()
+                && state.getFluidState().isEmpty()
                 && hasRequiredToolFor(state);
     }
 
@@ -1198,140 +1397,16 @@ public class PickupNearbyItemGoal extends Goal {
 
     private boolean isProtectedHomeBlock(BlockPos pos) {
         Optional<PlayerNpcHomeUtil.HomeArea> homeArea = PlayerNpcHomeUtil.getHome(playerNpc);
-        return homeArea.isPresent() && PlayerNpcHomeUtil.isInside(homeArea.get(), pos);
+        return PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos)
+                || homeArea.isPresent() && PlayerNpcHomeUtil.isInside(homeArea.get(), pos);
     }
 
     private boolean hasRequiredToolFor(BlockState state) {
-        return !isPickaxeBlock(state) || hasTool(PickaxeItem.class);
+        return !isPickaxeBlock(state) || helperToolAi.hasTool(PickaxeItem.class);
     }
 
     private boolean isPickaxeBlock(BlockState state) {
         return state.is(BlockTags.MINEABLE_WITH_PICKAXE);
-    }
-
-    private boolean equipToolFor(BlockState state) {
-        if (state.is(BlockTags.MINEABLE_WITH_AXE)) {
-            if (!equipTool(AxeItem.class)) {
-                equipEmptyHandForMining();
-            }
-            return true;
-        }
-        if (state.is(BlockTags.MINEABLE_WITH_PICKAXE)) {
-            return equipTool(PickaxeItem.class);
-        }
-        if (state.is(BlockTags.MINEABLE_WITH_SHOVEL)) {
-            if (!equipTool(ShovelItem.class)) {
-                equipEmptyHandForMining();
-            }
-            return true;
-        }
-        return true;
-    }
-
-    private boolean equipTool(Class<?> toolClass) {
-        if (toolClass.isInstance(playerNpc.getMainHandItem().getItem())) {
-            return true;
-        }
-        if (restorePreviousMainHandForTool(toolClass)) {
-            return true;
-        }
-
-        ItemStack tool = playerNpc.consumeInventoryItem(stack -> toolClass.isInstance(stack.getItem()), 1)
-                .orElse(ItemStack.EMPTY);
-        if (tool.isEmpty()) {
-            return false;
-        }
-
-        setTemporaryMainHand(tool);
-        return true;
-    }
-
-    private void equipEmptyHandForMining() {
-        if (playerNpc.getMainHandItem().isEmpty()) {
-            return;
-        }
-
-        setTemporaryMainHand(ItemStack.EMPTY);
-    }
-
-    private void setTemporaryMainHand(ItemStack stack) {
-        ItemStack currentMainHand = playerNpc.getMainHandItem().copy();
-        if (!usingTemporaryTool) {
-            previousMainHand = currentMainHand;
-            usingTemporaryTool = true;
-        } else if (!currentMainHand.isEmpty()
-                && !ItemStack.isSameItemSameTags(currentMainHand, previousMainHand)
-                && !InventoryUtils.addItem(playerNpc, currentMainHand)) {
-            playerNpc.spawnAtLocation(currentMainHand);
-        }
-
-        playerNpc.setItemSlot(EquipmentSlot.MAINHAND, stack);
-    }
-
-    private boolean restorePreviousMainHandForTool(Class<?> toolClass) {
-        if (!usingTemporaryTool || !toolClass.isInstance(previousMainHand.getItem())) {
-            return false;
-        }
-
-        ItemStack currentMainHand = playerNpc.getMainHandItem().copy();
-        if (!currentMainHand.isEmpty()
-                && !ItemStack.isSameItemSameTags(currentMainHand, previousMainHand)
-                && !InventoryUtils.addItem(playerNpc, currentMainHand)) {
-            playerNpc.spawnAtLocation(currentMainHand);
-        }
-
-        playerNpc.setItemSlot(EquipmentSlot.MAINHAND, previousMainHand.copy());
-        previousMainHand = ItemStack.EMPTY;
-        usingTemporaryTool = false;
-        return true;
-    }
-
-    private void restorePreviousMainHand() {
-        if (!usingTemporaryTool) {
-            return;
-        }
-
-        ItemStack currentMainHand = playerNpc.getMainHandItem().copy();
-        if (!currentMainHand.isEmpty()
-                && !ItemStack.isSameItemSameTags(currentMainHand, previousMainHand)
-                && !InventoryUtils.addItem(playerNpc, currentMainHand)) {
-            playerNpc.spawnAtLocation(currentMainHand);
-        }
-
-        playerNpc.setItemSlot(EquipmentSlot.MAINHAND, previousMainHand.copy());
-        previousMainHand = ItemStack.EMPTY;
-        usingTemporaryTool = false;
-    }
-
-    private boolean hasTool(Class<?> toolClass) {
-        if (toolClass.isInstance(playerNpc.getMainHandItem().getItem())) {
-            return true;
-        }
-        if (usingTemporaryTool && toolClass.isInstance(previousMainHand.getItem())) {
-            return true;
-        }
-        return InventoryUtils.hasItem(playerNpc, stack -> toolClass.isInstance(stack.getItem()));
-    }
-
-    private int getRequiredMineTicks(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        float hardness = state.getDestroySpeed(serverLevel, pos);
-        if (hardness < 0.0F) {
-            return MAX_OBSTRUCTION_BREAK_TICKS;
-        }
-
-        ItemStack heldStack = playerNpc.getMainHandItem();
-        float toolSpeed = heldStack.isEmpty() ? 1.0F : heldStack.getDestroySpeed(state);
-        if (toolSpeed <= 0.0F) {
-            toolSpeed = 1.0F;
-        }
-
-        boolean correctTool = !state.requiresCorrectToolForDrops() || heldStack.isCorrectToolForDrops(state);
-        float progressPerTick = toolSpeed / hardness / (correctTool ? 30.0F : 100.0F);
-        if (progressPerTick <= 0.0F) {
-            return MAX_OBSTRUCTION_BREAK_TICKS;
-        }
-
-        return Math.max(1, (int) Math.ceil(1.0F / progressPerTick));
     }
 
     private void updateDetail() {
@@ -1362,26 +1437,6 @@ public class PickupNearbyItemGoal extends Goal {
                 targetItem.blockPosition().getX(),
                 targetItem.blockPosition().getY(),
                 targetItem.blockPosition().getZ(),
-                getRemainingPickupSeconds()
-        ));
-    }
-
-    private void updateObstructionDetail(BlockState state, int requiredMineTicks) {
-        if (pathObstructionPos == null) {
-            return;
-        }
-
-        ResourceLocation blockId = ForgeRegistries.BLOCKS.getKey(state.getBlock());
-        String blockName = blockId == null ? state.getBlock().getDescriptionId() : blockId.toString();
-        playerNpc.setCurrentAiDetail(String.format(
-                java.util.Locale.ROOT,
-                "clearing pickup path %s\n@ %d %d %d %d/%dt\ngiving up in %ds",
-                blockName,
-                pathObstructionPos.getX(),
-                pathObstructionPos.getY(),
-                pathObstructionPos.getZ(),
-                Math.min(obstructionMineTicks, requiredMineTicks),
-                requiredMineTicks,
                 getRemainingPickupSeconds()
         ));
     }

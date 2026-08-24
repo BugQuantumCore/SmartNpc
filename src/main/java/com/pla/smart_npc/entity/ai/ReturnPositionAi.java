@@ -87,7 +87,7 @@ public final class ReturnPositionAi {
     }
 
     public void tick(ServerLevel serverLevel, BlockPos target, Predicate<BlockPos> protectedBlock, String moveDetail, String clearDetail) {
-        this.tick(serverLevel, target, protectedBlock, moveDetail, clearDetail, false);
+        this.tickInternal(serverLevel, target, protectedBlock, moveDetail, clearDetail, false, false);
     }
 
     public void tick(
@@ -97,6 +97,28 @@ public final class ReturnPositionAi {
             String moveDetail,
             String clearDetail,
             boolean allowPathStuckFallback
+    ) {
+        this.tickInternal(serverLevel, target, protectedBlock, moveDetail, clearDetail, allowPathStuckFallback, false);
+    }
+
+    public void tickBuilderHomeReturn(
+            ServerLevel serverLevel,
+            BlockPos target,
+            Predicate<BlockPos> protectedBlock,
+            String moveDetail,
+            String clearDetail
+    ) {
+        this.tickInternal(serverLevel, target, protectedBlock, moveDetail, clearDetail, false, true);
+    }
+
+    private void tickInternal(
+            ServerLevel serverLevel,
+            BlockPos target,
+            Predicate<BlockPos> protectedBlock,
+            String moveDetail,
+            String clearDetail,
+            boolean allowPathStuckFallback,
+            boolean useHistoricalBuilderFallback
     ) {
         if (target == null) {
             return;
@@ -117,7 +139,21 @@ public final class ReturnPositionAi {
         }
 
         if (this.clearBlockAi.isRunning()) {
+            if (this.isResolvedClearTargetProtected(protectedBlock)) {
+                this.lastClearDebug = "clear stopped: resolved target protected @ " + posText(this.clearBlockAi.targetPos());
+                this.clearBlockAi.stop();
+                this.repathTicks = 0;
+                this.detail = moveDetail + " (protected route blocker; searching alternate route)";
+                return;
+            }
             this.clearBlockAi.tick(serverLevel);
+            if (this.clearBlockAi.isRunning() && this.isResolvedClearTargetProtected(protectedBlock)) {
+                this.lastClearDebug = "clear stopped after retarget: protected @ " + posText(this.clearBlockAi.targetPos());
+                this.clearBlockAi.stop();
+                this.repathTicks = 0;
+                this.detail = moveDetail + " (protected route blocker; searching alternate route)";
+                return;
+            }
             this.detail = this.clearBlockAi.detail();
             if (!this.clearBlockAi.isRunning()) {
                 this.repathTicks = 0;
@@ -207,12 +243,26 @@ public final class ReturnPositionAi {
             return;
         }
 
+        if (useHistoricalBuilderFallback
+                && this.tryStartDirectPillar(
+                serverLevel,
+                target,
+                protectedBlock,
+                "clearing return pillar space",
+                this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_BREAKING)) {
+            this.detail = this.pillarUpAi.detail();
+            return;
+        }
+
         if (verticalEscapeNeeded && this.startClearingRoute(serverLevel, protectedBlock, clearDetail)) {
             this.detail = this.clearBlockAi.detail();
             return;
         }
 
-        if (verticalEscapeNeeded && this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_ESCAPE) {
+        boolean requestUpwardEscape = useHistoricalBuilderFallback
+                ? this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_ESCAPE || verticalEscapeNeeded
+                : verticalEscapeNeeded && this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_ESCAPE;
+        if (requestUpwardEscape) {
             this.playerNpc.requestForcedUpwardEscapeTo(target, UPWARD_ESCAPE_REQUEST_TICKS, MAX_RETURN_PILLAR_BLOCKS);
             this.detail = moveDetail + " (escaping upward)";
             this.routeAttempts = 0;
@@ -237,6 +287,17 @@ public final class ReturnPositionAi {
         }
 
         this.detail = moveDetail + " (" + this.debugText("searching route") + ")";
+    }
+
+    private boolean isResolvedClearTargetProtected(Predicate<BlockPos> protectedBlock) {
+        return this.isReturnClearProtected(this.clearBlockAi.targetPos(), protectedBlock);
+    }
+
+    private boolean isReturnClearProtected(BlockPos pos, Predicate<BlockPos> protectedBlock) {
+        return pos != null
+                && (pos.equals(this.playerNpc.blockPosition().below())
+                || this.playerNpc.isTemporaryPillarSupport(pos)
+                || protectedBlock != null && protectedBlock.test(pos));
     }
 
     public String detail(String fallback) {
@@ -285,7 +346,7 @@ public final class ReturnPositionAi {
         }
 
         BlockPos blocker = this.pillarUpAi.startBlockerPos(serverLevel, feet);
-        if (blocker == null || protectedBlock.test(blocker)) {
+        if (blocker == null || this.isReturnClearProtected(blocker, protectedBlock)) {
             this.lastPillarDebug = blocker == null
                     ? "pillar blocked: " + blockerText
                     : "pillar blocker protected @ " + posText(blocker) + " reason=" + blockerText;
@@ -306,7 +367,7 @@ public final class ReturnPositionAi {
 
     private void tryClearPillarBlocker(ServerLevel serverLevel, Predicate<BlockPos> protectedBlock) {
         BlockPos blocker = this.pillarUpAi.consumeLastFailureBlockerPos();
-        if (blocker == null || protectedBlock.test(blocker)) {
+        if (blocker == null || this.isReturnClearProtected(blocker, protectedBlock)) {
             this.lastPillarDebug = blocker == null ? "pillar failed without blocker" : "pillar failed protected blocker @ " + posText(blocker);
             return;
         }
@@ -331,7 +392,7 @@ public final class ReturnPositionAi {
                 this.playerNpc.blockPosition(),
                 this.target,
                 this.target);
-        candidates.removeIf(pos -> pos.equals(this.target) || protectedBlock.test(pos));
+        candidates.removeIf(pos -> pos.equals(this.target) || this.isReturnClearProtected(pos, protectedBlock));
         if (candidates.isEmpty()) {
             this.lastClearDebug = "clear skipped candidates=0";
             return false;

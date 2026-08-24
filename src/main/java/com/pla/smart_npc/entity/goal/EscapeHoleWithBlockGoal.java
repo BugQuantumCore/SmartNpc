@@ -5,15 +5,19 @@ import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
+import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.util.Mth;
@@ -27,8 +31,13 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.PickaxeItem;
 import net.minecraft.world.item.ShovelItem;
+import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.CropBlock;
+import net.minecraft.world.level.block.FenceBlock;
+import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
@@ -38,8 +47,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
@@ -50,8 +62,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int COOLDOWN_TICKS = 40;
     private static final int PLACE_DELAY_TICKS = 2;
     private static final int MAX_PLACE_WAIT_TICKS = 24;
-    private static final double PLACE_CLEARANCE_Y = 0.95D;
-    private static final double FALLBACK_PLACE_CLEARANCE_Y = 0.78D;
+    private static final int PILLAR_SETTLE_TICKS = 12;
+    private static final int MAX_PILLAR_SETTLE_WAIT_TICKS = 30;
     private static final int MIN_ROUTE_ESCAPE_BLOCKS = 16;
     private static final int MAX_ROUTE_ESCAPE_BLOCKS = 96;
     private static final int MAX_GOAL_TICKS = 20 * 120;
@@ -80,12 +92,30 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final double ROUTE_NAV_REACHED_SQR = 2.0D * 2.0D;
     private static final int EXPLORATION_CLIMB_CLEAR_TICKS = 24;
     private static final int EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS = 20 * 20;
+    private static final int FAILED_EXPLORATION_CLIMB_RETRY_TICKS = 20 * 30;
     private static final double EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
     private static final int EXPLORATION_CLIMB_STEP_OFF_STUCK_TICKS = PILLAR_STUCK_MIN_TICKS;
     private static final int EXPLORATION_CLIMB_STEP_OFF_TICKS = 20;
     private static final int EXPLORATION_CLIMB_STEP_OFF_RADIUS = 5;
     private static final int EXPLORATION_CLIMB_STEP_OFF_MAX_FALL = 16;
     private static final double EXPLORATION_CLIMB_STEP_OFF_SPEED = 0.28D;
+    private static final int FARM_EGRESS_PENDING_TICKS = 20 * 45;
+    private static final int FARM_EGRESS_MAX_ACTION_TICKS = 20 * 12;
+    private static final int FARM_EGRESS_RETRY_TICKS = 40;
+    private static final int FARM_EGRESS_FAILED_COOLDOWN_TICKS = 20 * 30;
+    private static final int FARM_EGRESS_MAX_ATTEMPTS = 3;
+    private static final int FARM_EGRESS_REPATH_TICKS = 10;
+    private static final int FARM_EGRESS_MAX_ROUTE_FAILURE_TICKS = 20 * 4;
+    private static final int FARM_EGRESS_CLEAR_TICKS = 18;
+    private static final double FARM_EGRESS_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
+    private static final double FARM_EGRESS_WAYPOINT_REACHED_SQR = 0.85D * 0.85D;
+    private static final double FARM_GATE_USE_DISTANCE_SQR = 3.75D * 3.75D;
+    private static final int FARM_EGRESS_NO_PROGRESS_TICKS = 20;
+    private static final double FARM_EGRESS_PROGRESS_EPSILON_SQR = 0.25D;
+    private static final int FARM_EGRESS_CORRIDOR_MAX_STEPS = 16;
+    private static final int FARM_EGRESS_MAX_CLEAR_CANDIDATES = 48;
+    private static final int FARM_EGRESS_FAILED_CLEAR_COOLDOWN_TICKS = 40;
+    private static final int FARM_EGRESS_MAX_FAILED_CLEAR_TARGETS = 16;
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
@@ -100,6 +130,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private BlockPos climbTargetPos;
     private BlockPos pillarBasePos;
     private BlockPos pillarClearPos;
+    private BlockPos settlingPillarSupportPos;
+    private BlockPos lastConfirmedPillarSupportPos;
     private BlockPos pillarStuckWatchPos;
     private BlockPos exitClearPos;
     private BlockPos explorationClimbStepOffWatchPos;
@@ -107,11 +139,37 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private BlockPos explorationClimbStepOffWatchBase;
     private BlockPos explorationClimbStepOffStartPos;
     private BlockPos explorationClimbStepOffTargetPos;
+    private BlockPos failedExplorationClimbTarget;
+    private int failedExplorationClimbUntilTick;
+    private BlockPos farmEgressOriginalTarget;
+    private BlockPos farmEgressInsideFeet;
+    private BlockPos farmEgressOutsideFeet;
+    private BlockPos farmEgressWaypoint;
+    private BlockPos farmEgressNavigationWaypoint;
+    private BlockPos farmEgressProgressTarget;
+    private BlockPos farmEgressClearRequestedTarget;
+    private List<BlockPos> farmEgressActiveClearCorridor = List.of();
+    private final Map<BlockPos, Integer> farmEgressFailedClearUntil = new HashMap<>();
+    private double farmEgressBestNavigationDistanceSqr = Double.MAX_VALUE;
+    private int farmEgressLastProgressTick;
+    private boolean farmEgressNavigationBlockedThisTick;
+    private int farmEgressOriginalMaxPillarBlocks;
+    private boolean farmEgressOriginalForcedRequest;
+    private boolean farmEgressOriginalExplorationRequest;
+    private int farmEgressPendingUntilTick;
+    private int farmEgressNextAttemptTick;
+    private int farmEgressFailedUntilTick;
+    private BlockPos farmEgressBypassTarget;
+    private int farmEgressBypassUntilTick;
+    private int farmEgressAttempts;
+    private int farmEgressRouteFailureTicks;
     private int pillarExitY;
     private ItemStack previousMainHand = ItemStack.EMPTY;
     private ItemStack previousPillarMainHand = ItemStack.EMPTY;
     private int placeDelayTicks;
     private int placeWaitTicks;
+    private int pillarSettleTicks;
+    private int pillarSettleWaitTicks;
     private int mineTicks;
     private int repathTicks;
     private int failedPathTicks;
@@ -126,8 +184,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private int pillarStuckWatchPillarsPlaced;
     private int explorationClimbStepOffWatchStartTick;
     private int explorationClimbStepOffTicks;
+    private final Set<BlockPos> placedPillarSupports = new LinkedHashSet<>();
     private boolean usingTemporaryPickaxe;
     private boolean usingTemporaryBlock;
+    private boolean explorationClimbEpisode;
     private boolean finished;
 
     public EscapeHoleWithBlockGoal(PlayerNpcEntity playerNpc) {
@@ -165,6 +225,31 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         BlockPos feet = this.playerNpc.blockPosition();
         BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+        FarmEgressDecision farmEgressDecision = this.tryResumeOrStartFarmGateEgress(serverLevel, feet, requestedTarget);
+        if (farmEgressDecision == FarmEgressDecision.START) {
+            return true;
+        }
+        if (farmEgressDecision == FarmEgressDecision.BLOCK) {
+            return false;
+        }
+        if (requestedTarget != null
+                && this.playerNpc.isExplorationUpwardEscapeRequested()
+                && requestedTarget.equals(this.failedExplorationClimbTarget)
+                && this.playerNpc.tickCount < this.failedExplorationClimbUntilTick) {
+            ExploreAroundGoal.requestSafeWalkAfterFailedClimb(this.playerNpc, requestedTarget);
+            this.playerNpc.clearUpwardEscapeTarget();
+            this.playerNpc.setHoleEscapeCooldown(Math.max(
+                    this.playerNpc.getHoleEscapeCooldown(),
+                    this.failedExplorationClimbUntilTick - this.playerNpc.tickCount
+            ));
+            this.playerNpc.setIdleTraceDetail("exploration climb route cooling down after failed clear @ "
+                    + requestedTarget.getX() + " " + requestedTarget.getY() + " " + requestedTarget.getZ(), 40);
+            return false;
+        }
+        if (this.playerNpc.tickCount >= this.failedExplorationClimbUntilTick) {
+            this.failedExplorationClimbTarget = null;
+            this.failedExplorationClimbUntilTick = 0;
+        }
         if (requestedTarget != null && this.hasSatisfiedRequestedRoute(serverLevel, feet, requestedTarget)) {
             this.playerNpc.clearUpwardEscapeTarget();
             return false;
@@ -211,6 +296,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         this.resetPlan();
+        this.explorationClimbEpisode = explorationRequestedClimb;
         this.climbTargetPos = routeNeedsClimb ? routeTarget : null;
         this.requiredEscapeBlocks = 1;
 
@@ -235,6 +321,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 if (this.tryStartExplorationClimbClear(serverLevel, feet, routeTarget, null)) {
                     return true;
                 }
+                this.abandonExplorationClimb(routeTarget, "no viable pillar or clear route");
             }
             this.nextPillarPlanTick = this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
             return false;
@@ -243,7 +330,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
             if (explorationRequestedClimb && this.tryStartExplorationClimbClear(serverLevel, feet, routeTarget, pillarPlan)) {
                 return true;
             }
-            this.playerNpc.clearUpwardEscapeTarget();
+            if (explorationRequestedClimb) {
+                this.abandonExplorationClimb(routeTarget, "route exceeds pillar limit");
+            } else {
+                this.playerNpc.clearUpwardEscapeTarget();
+            }
             this.nextPillarPlanTick = this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
             return false;
         }
@@ -299,6 +390,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (this.mode == EscapeMode.CLEAR_EXIT) {
             return this.exitClearPos != null || this.findExitClearTarget(serverLevel, this.playerNpc.blockPosition(), this.climbTargetPos) != null;
         }
+        if (this.mode == EscapeMode.FARM_GATE_EGRESS) {
+            return this.farmEgressPendingUntilTick > this.playerNpc.tickCount
+                    && this.goalTicks < FARM_EGRESS_MAX_ACTION_TICKS;
+        }
         if (this.mode == EscapeMode.CLEAR_ROUTE) {
             return this.clearBlockAi.isRunning();
         }
@@ -308,6 +403,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         if (this.mode == EscapeMode.PILLAR && this.placePos != null) {
+            return true;
+        }
+
+        if (this.mode == EscapeMode.PILLAR && this.settlingPillarSupportPos != null) {
             return true;
         }
 
@@ -335,6 +434,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.goalTicks = 0;
         this.placeDelayTicks = 0;
         this.placeWaitTicks = 0;
+        this.pillarSettleTicks = 0;
+        this.pillarSettleWaitTicks = 0;
+        this.settlingPillarSupportPos = null;
+        this.lastConfirmedPillarSupportPos = null;
+        this.placedPillarSupports.clear();
         this.mineTicks = 0;
         this.repathTicks = 0;
         this.failedPathTicks = 0;
@@ -373,6 +477,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
             }
         } else if (this.mode == EscapeMode.CLEAR_ROUTE) {
             this.playerNpc.getNavigation().stop();
+        } else if (this.mode == EscapeMode.FARM_GATE_EGRESS) {
+            this.repathTicks = 0;
+            this.farmEgressRouteFailureTicks = 0;
+            this.playerNpc.getNavigation().stop();
         }
     }
 
@@ -391,6 +499,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.tickClearExit(serverLevel);
         } else if (this.mode == EscapeMode.CLEAR_ROUTE) {
             this.tickExplorationClimbClear(serverLevel);
+        } else if (this.mode == EscapeMode.FARM_GATE_EGRESS) {
+            this.tickFarmGateEgress(serverLevel);
         } else if (this.mode == EscapeMode.PILLAR) {
             this.tickPillar(serverLevel);
         }
@@ -398,6 +508,15 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     @Override
     public void stop() {
+        BlockPos failedExplorationTarget = this.explorationClimbEpisode && this.climbTargetPos != null
+                ? this.climbTargetPos.immutable()
+                : null;
+        boolean explorationClimbCompleted = failedExplorationTarget != null
+                && this.playerNpc.level() instanceof ServerLevel serverLevel
+                && this.hasReachedRequestedSurfaceExit(serverLevel, this.playerNpc.blockPosition(), failedExplorationTarget)
+                && this.hasReachedOpenSky(serverLevel, this.playerNpc.blockPosition())
+                && !this.isActuallyTrapped(serverLevel, this.playerNpc.blockPosition());
+        boolean explorationRequestEnded = this.playerNpc.getUpwardEscapeTarget() == null;
         this.playerNpc.clearBlockBreakProgress(this.minePos);
         this.playerNpc.clearBlockBreakProgress(this.pillarClearPos);
         this.playerNpc.clearBlockBreakProgress(this.exitClearPos);
@@ -407,10 +526,13 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.restorePreviousMainHand();
         this.restorePreviousPillarMainHand();
         if (!this.playerNpc.level().isClientSide) {
-            this.playerNpc.setHoleEscapeCooldown(COOLDOWN_TICKS);
+            this.playerNpc.setHoleEscapeCooldown(Math.max(this.playerNpc.getHoleEscapeCooldown(), COOLDOWN_TICKS));
         }
         if (this.shouldClearUpwardEscapeTargetOnStop()) {
             this.playerNpc.clearUpwardEscapeTarget();
+        }
+        if (failedExplorationTarget != null && explorationRequestEnded && !explorationClimbCompleted) {
+            ExploreAroundGoal.requestSafeWalkAfterFailedClimb(this.playerNpc, failedExplorationTarget);
         }
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
@@ -418,6 +540,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean shouldClearUpwardEscapeTargetOnStop() {
+        if (this.mode == EscapeMode.FARM_GATE_EGRESS && this.farmEgressPendingUntilTick > this.playerNpc.tickCount) {
+            return false;
+        }
         BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
         if (requestedTarget == null) {
             return true;
@@ -426,6 +551,608 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
         return this.hasReachedRequestedRoute(serverLevel, this.playerNpc.blockPosition(), requestedTarget);
+    }
+
+    private FarmEgressDecision tryResumeOrStartFarmGateEgress(
+            ServerLevel serverLevel,
+            BlockPos feet,
+            @Nullable BlockPos requestedTarget
+    ) {
+        Plan plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        if (plan == null || !this.isInsideOwnedFarm(plan, feet)) {
+            if (this.farmEgressPendingUntilTick > 0) {
+                this.clearFarmEgressMemory();
+            }
+            return FarmEgressDecision.NONE;
+        }
+
+        boolean outsideRequest = requestedTarget != null
+                && !FarmAi.isInsideFarmFootprint(plan, requestedTarget);
+        if (requestedTarget != null
+                && requestedTarget.equals(this.farmEgressBypassTarget)
+                && this.playerNpc.tickCount < this.farmEgressBypassUntilTick) {
+            return FarmEgressDecision.NONE;
+        }
+        if (this.playerNpc.tickCount >= this.farmEgressBypassUntilTick) {
+            this.farmEgressBypassTarget = null;
+            this.farmEgressBypassUntilTick = 0;
+        }
+        boolean pending = this.farmEgressPendingUntilTick > this.playerNpc.tickCount;
+        if (!pending && requestedTarget == null) {
+            // A fence is an intentional enclosure, not a hole.  Gate egress is only a
+            // continuation of an explicit route request whose destination lies beyond
+            // the owned farm; otherwise suppress generic hole-escape planning here.
+            if (this.farmEgressPendingUntilTick > 0) {
+                this.clearFarmEgressMemory();
+            }
+            return FarmEgressDecision.BLOCK;
+        }
+        if (!pending && !outsideRequest) {
+            // A request aimed at the owned footprint may still need the normal local
+            // pillar/clear logic, but it does not authorize crossing the farm gate.
+            return FarmEgressDecision.NONE;
+        }
+
+        if (this.playerNpc.tickCount < this.farmEgressFailedUntilTick && !pending) {
+            if (outsideRequest) {
+                this.playerNpc.clearUpwardEscapeTarget();
+            }
+            int remaining = this.farmEgressFailedUntilTick - this.playerNpc.tickCount;
+            this.playerNpc.setHoleEscapeCooldown(Math.max(this.playerNpc.getHoleEscapeCooldown(), remaining));
+            this.playerNpc.setIdleTraceDetail("farm gate egress cooling down after bounded failure @ "
+                    + posText(plan.gatePos()), 40);
+            return FarmEgressDecision.BLOCK;
+        }
+
+        if (!pending) {
+            this.farmEgressOriginalTarget = requestedTarget == null ? null : requestedTarget.immutable();
+            this.farmEgressOriginalMaxPillarBlocks = this.playerNpc.getUpwardEscapeMaxPillarBlocks();
+            this.farmEgressOriginalForcedRequest = this.playerNpc.isForcedUpwardEscape();
+            this.farmEgressOriginalExplorationRequest = this.playerNpc.isExplorationUpwardEscapeRequested();
+            this.farmEgressPendingUntilTick = this.playerNpc.tickCount + FARM_EGRESS_PENDING_TICKS;
+            this.farmEgressNextAttemptTick = 0;
+            this.farmEgressAttempts = 0;
+        }
+        if (outsideRequest) {
+            this.playerNpc.clearUpwardEscapeTarget();
+        }
+        if (this.playerNpc.tickCount < this.farmEgressNextAttemptTick) {
+            this.playerNpc.setIdleTraceDetail("farm gate egress retry cooling @ " + posText(plan.gatePos()), 20);
+            return FarmEgressDecision.BLOCK;
+        }
+        this.resetPlan();
+        if (!this.prepareFarmEgress(plan)) {
+            this.failFarmEgressAttempt("saved gate has no interior/outside corridor");
+            return FarmEgressDecision.BLOCK;
+        }
+        setEscapeMode(EscapeMode.FARM_GATE_EGRESS);
+        return FarmEgressDecision.START;
+    }
+
+    private boolean prepareFarmEgress(Plan plan) {
+        if (plan == null || plan.pathPositions().isEmpty()) {
+            return false;
+        }
+        BlockPos inside = plan.pathPositions().get(0).above();
+        int outwardX = Integer.compare(plan.gatePos().getX(), inside.getX());
+        int outwardZ = Integer.compare(plan.gatePos().getZ(), inside.getZ());
+        if (Math.abs(outwardX) + Math.abs(outwardZ) != 1) {
+            return false;
+        }
+        this.farmEgressInsideFeet = inside.immutable();
+        this.farmEgressOutsideFeet = plan.gatePos().offset(outwardX, 0, outwardZ).immutable();
+        this.farmEgressWaypoint = null;
+        this.resetFarmEgressNavigation();
+        this.resetFarmEgressClearContext();
+        this.farmEgressRouteFailureTicks = 0;
+        return true;
+    }
+
+    private void tickFarmGateEgress(ServerLevel serverLevel) {
+        Plan plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        if (plan == null || !this.prepareFarmEgressIfMissing(plan)) {
+            this.failFarmEgressAttempt("saved gate corridor disappeared");
+            return;
+        }
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (!this.isInsideOwnedFarm(plan, feet)
+                || this.isAtFarmEgressWaypoint(this.farmEgressOutsideFeet)) {
+            this.completeFarmEgress();
+            return;
+        }
+        if (this.goalTicks >= FARM_EGRESS_MAX_ACTION_TICKS
+                || this.farmEgressRouteFailureTicks >= FARM_EGRESS_MAX_ROUTE_FAILURE_TICKS) {
+            this.failFarmEgressAttempt("gate corridor route did not converge");
+            return;
+        }
+
+        if (this.clearBlockAi.isRunning()) {
+            if (!this.isSafeFarmEgressClearTarget(serverLevel, plan, this.clearBlockAi.targetPos())) {
+                BlockPos protectedTarget = this.clearBlockAi.targetPos();
+                this.clearBlockAi.stop();
+                this.coolFarmEgressClearTargets(this.farmEgressClearRequestedTarget, protectedTarget);
+                this.resetFarmEgressClearContext();
+                this.farmEgressRouteFailureTicks += FARM_EGRESS_REPATH_TICKS;
+                this.playerNpc.setCurrentAiDetail("farm gate clear retarget protected @ " + posText(protectedTarget));
+                return;
+            }
+            BlockPos activeTarget = this.clearBlockAi.targetPos();
+            ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
+            if (result == ClearBlockAi.TickResult.RUNNING) {
+                if (!this.isSafeFarmEgressClearTarget(serverLevel, plan, this.clearBlockAi.targetPos())) {
+                    BlockPos protectedTarget = this.clearBlockAi.targetPos();
+                    this.clearBlockAi.stop();
+                    this.coolFarmEgressClearTargets(this.farmEgressClearRequestedTarget, protectedTarget);
+                    this.resetFarmEgressClearContext();
+                    this.farmEgressRouteFailureTicks += FARM_EGRESS_REPATH_TICKS;
+                    this.playerNpc.setCurrentAiDetail("farm gate clear blocker protected @ " + posText(protectedTarget));
+                }
+                return;
+            }
+            if (result == ClearBlockAi.TickResult.FAILED) {
+                this.coolFarmEgressClearTargets(this.farmEgressClearRequestedTarget, activeTarget);
+                this.farmEgressRouteFailureTicks += FARM_EGRESS_REPATH_TICKS;
+            } else {
+                this.farmEgressRouteFailureTicks = 0;
+            }
+            this.resetFarmEgressClearContext();
+            this.repathTicks = 0;
+            return;
+        }
+
+        BlockState gateState = serverLevel.getBlockState(plan.gatePos());
+        boolean validGate = gateState.getBlock() instanceof FenceGateBlock;
+        if (validGate && gateState.hasProperty(FenceGateBlock.OPEN) && !gateState.getValue(FenceGateBlock.OPEN)) {
+            if (this.playerNpc.distanceToSqr(
+                    plan.gatePos().getX() + 0.5D,
+                    plan.gatePos().getY() + 0.5D,
+                    plan.gatePos().getZ() + 0.5D
+            ) <= FARM_GATE_USE_DISTANCE_SQR) {
+                if (serverLevel.setBlockAndUpdate(plan.gatePos(), gateState.setValue(FenceGateBlock.OPEN, true))) {
+                    this.placingBlockAi.playMainHandAction();
+                    serverLevel.playSound(null, plan.gatePos(), SoundEvents.FENCE_GATE_OPEN,
+                            SoundSource.BLOCKS, 1.0F, 1.0F);
+                }
+                this.repathTicks = 0;
+                this.playerNpc.setCurrentAiDetail("opened farm gate for egress @ " + posText(plan.gatePos()));
+                return;
+            }
+            this.setFarmEgressDesiredWaypoint(this.farmEgressInsideFeet);
+        } else {
+            this.setFarmEgressDesiredWaypoint(this.farmEgressOutsideFeet);
+        }
+
+        if (!validGate && !gateState.isAir()) {
+            if (this.tryStartFarmEgressClear(serverLevel, plan, this.farmEgressWaypoint)) {
+                return;
+            }
+            this.farmEgressRouteFailureTicks += FARM_EGRESS_REPATH_TICKS;
+        }
+
+        if (this.moveTowardFarmEgressWaypoint()) {
+            this.playerNpc.setCurrentAiDetail("leaving farm through gate @ "
+                    + posText(this.farmEgressWaypoint));
+            return;
+        }
+        if (this.tryStartFarmEgressClear(serverLevel, plan, this.farmEgressWaypoint)) {
+            return;
+        }
+        if (this.moveTowardMonotonicFarmEgressIntermediate(plan, this.farmEgressWaypoint)) {
+            this.playerNpc.setCurrentAiDetail("routing to farm gate via "
+                    + posText(this.farmEgressNavigationWaypoint) + " -> " + posText(this.farmEgressWaypoint));
+            return;
+        }
+        this.farmEgressRouteFailureTicks += FARM_EGRESS_REPATH_TICKS;
+        this.playerNpc.setCurrentAiDetail("farm gate egress blocked; retry "
+                + Math.min(FARM_EGRESS_MAX_ATTEMPTS, this.farmEgressAttempts + 1)
+                + "/" + FARM_EGRESS_MAX_ATTEMPTS + " @ " + posText(plan.gatePos()));
+    }
+
+    private boolean prepareFarmEgressIfMissing(Plan plan) {
+        return this.farmEgressInsideFeet != null
+                && this.farmEgressOutsideFeet != null
+                || this.prepareFarmEgress(plan);
+    }
+
+    private boolean moveTowardFarmEgressWaypoint() {
+        if (this.farmEgressWaypoint == null) {
+            return false;
+        }
+        if (this.isAtFarmEgressWaypoint(this.farmEgressWaypoint)) {
+            this.resetFarmEgressNavigation();
+            return true;
+        }
+        this.farmEgressNavigationBlockedThisTick = false;
+        if (this.continueFarmEgressNavigation()) {
+            return true;
+        }
+        if (this.farmEgressNavigationBlockedThisTick) {
+            return false;
+        }
+        if (this.startFarmEgressNavigation(this.farmEgressWaypoint)) {
+            return true;
+        }
+        return false;
+    }
+
+    private boolean moveTowardMonotonicFarmEgressIntermediate(Plan plan, @Nullable BlockPos desiredWaypoint) {
+        if (desiredWaypoint == null) {
+            return false;
+        }
+        BlockPos feet = this.playerNpc.blockPosition();
+        double currentDistance = feet.distSqr(desiredWaypoint);
+        BlockPos intermediate = plan.pathPositions().stream()
+                .map(BlockPos::above)
+                .filter(pos -> !pos.equals(feet))
+                .filter(pos -> pos.distSqr(desiredWaypoint) + FARM_EGRESS_PROGRESS_EPSILON_SQR < currentDistance)
+                .sorted(Comparator.comparingDouble(pos -> pos.distSqr(desiredWaypoint)))
+                .limit(10)
+                .filter(this::startFarmEgressNavigation)
+                .findFirst()
+                .orElse(null);
+        return intermediate != null;
+    }
+
+    private boolean startFarmEgressNavigation(BlockPos target) {
+        if (target == null) {
+            return false;
+        }
+        Path path = this.playerNpc.getNavigation().createPath(target, 0);
+        boolean started = path != null
+                && path.canReach()
+                && path.getEndNode() != null
+                && path.getEndNode().asBlockPos().equals(target)
+                && this.playerNpc.getNavigation().moveTo(path, 1.0D);
+        if (!started) {
+            return false;
+        }
+        this.farmEgressNavigationWaypoint = target.immutable();
+        this.farmEgressProgressTarget = this.farmEgressNavigationWaypoint;
+        this.farmEgressBestNavigationDistanceSqr = this.distanceToFarmEgressWaypointSqr(target);
+        this.farmEgressLastProgressTick = this.playerNpc.tickCount;
+        return true;
+    }
+
+    private boolean continueFarmEgressNavigation() {
+        if (this.farmEgressNavigationWaypoint == null) {
+            return false;
+        }
+        if (this.isAtFarmEgressWaypoint(this.farmEgressNavigationWaypoint)) {
+            this.resetFarmEgressNavigation();
+            return false;
+        }
+        if (this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            this.resetFarmEgressNavigation();
+            this.farmEgressNavigationBlockedThisTick = true;
+            return false;
+        }
+        double distance = this.distanceToFarmEgressWaypointSqr(this.farmEgressNavigationWaypoint);
+        if (!this.farmEgressNavigationWaypoint.equals(this.farmEgressProgressTarget)
+                || distance + FARM_EGRESS_PROGRESS_EPSILON_SQR < this.farmEgressBestNavigationDistanceSqr) {
+            this.farmEgressProgressTarget = this.farmEgressNavigationWaypoint;
+            this.farmEgressBestNavigationDistanceSqr = distance;
+            this.farmEgressLastProgressTick = this.playerNpc.tickCount;
+        }
+        if (this.playerNpc.tickCount - this.farmEgressLastProgressTick < FARM_EGRESS_NO_PROGRESS_TICKS) {
+            return true;
+        }
+        this.playerNpc.getNavigation().stop();
+        this.resetFarmEgressNavigation();
+        this.farmEgressNavigationBlockedThisTick = true;
+        return false;
+    }
+
+    private double distanceToFarmEgressWaypointSqr(BlockPos target) {
+        return this.playerNpc.distanceToSqr(target.getX() + 0.5D, target.getY(), target.getZ() + 0.5D);
+    }
+
+    private void setFarmEgressDesiredWaypoint(@Nullable BlockPos desiredWaypoint) {
+        BlockPos immutable = desiredWaypoint == null ? null : desiredWaypoint.immutable();
+        if (java.util.Objects.equals(this.farmEgressWaypoint, immutable)) {
+            return;
+        }
+        this.farmEgressWaypoint = immutable;
+        this.playerNpc.getNavigation().stop();
+        this.resetFarmEgressNavigation();
+    }
+
+    private void resetFarmEgressNavigation() {
+        this.farmEgressNavigationWaypoint = null;
+        this.farmEgressProgressTarget = null;
+        this.farmEgressBestNavigationDistanceSqr = Double.MAX_VALUE;
+        this.farmEgressLastProgressTick = 0;
+    }
+
+    private boolean tryStartFarmEgressClear(ServerLevel serverLevel, Plan plan, @Nullable BlockPos desiredWaypoint) {
+        if (desiredWaypoint == null) {
+            return false;
+        }
+        List<BlockPos> corridor = this.farmEgressCorridorPositions(
+                this.playerNpc.blockPosition(),
+                desiredWaypoint
+        );
+        Map<BlockPos, BlockPos> requestedByResolved = new HashMap<>();
+        LinkedHashSet<BlockPos> resolvedCandidates = new LinkedHashSet<>();
+        corridor.stream()
+                .filter(pos -> this.isSafeFarmEgressClearTarget(serverLevel, plan, pos, corridor))
+                .filter(pos -> !this.isFarmEgressClearTargetCooling(pos))
+                .filter(pos -> !serverLevel.getBlockState(pos).isAir())
+                .sorted(Comparator.comparingDouble(this.playerNpc.blockPosition()::distSqr))
+                .limit(FARM_EGRESS_MAX_CLEAR_CANDIDATES)
+                .forEach(requested -> ClearBlockAi.resolveInitialClearTarget(
+                                serverLevel,
+                                this.playerNpc,
+                                requested,
+                                state -> state != null && !state.isAir(),
+                                FARM_EGRESS_CLEAR_DISTANCE_SQR,
+                                true
+                        )
+                        .filter(resolved -> this.isSafeFarmEgressClearTarget(serverLevel, plan, resolved, corridor))
+                        .filter(resolved -> !this.isFarmEgressClearTargetCooling(resolved))
+                        .ifPresent(resolved -> {
+                            BlockPos immutable = resolved.immutable();
+                            resolvedCandidates.add(immutable);
+                            requestedByResolved.putIfAbsent(immutable, requested.immutable());
+                        }));
+        Optional<BlockPos> target = ClearBlockAi.findNearestAccessibleClearable(
+                serverLevel,
+                this.playerNpc,
+                resolvedCandidates,
+                state -> state != null && !state.isAir(),
+                FARM_EGRESS_CLEAR_DISTANCE_SQR,
+                true
+        );
+        if (target.isEmpty()
+                || !this.isSafeFarmEgressClearTarget(serverLevel, plan, target.get(), corridor)
+                || this.isFarmEgressClearTargetCooling(target.get())) {
+            return false;
+        }
+        this.farmEgressClearRequestedTarget = requestedByResolved
+                .getOrDefault(target.get(), target.get())
+                .immutable();
+        this.farmEgressActiveClearCorridor = List.copyOf(corridor);
+        boolean started = this.clearBlockAi.start(
+                serverLevel,
+                target.get(),
+                state -> state != null && !state.isAir(),
+                "clearing farm gate egress",
+                FARM_EGRESS_CLEAR_TICKS,
+                FARM_EGRESS_CLEAR_DISTANCE_SQR,
+                true,
+                true
+        );
+        if (started && !this.isSafeFarmEgressClearTarget(serverLevel, plan, this.clearBlockAi.targetPos())) {
+            this.coolFarmEgressClearTargets(this.farmEgressClearRequestedTarget, this.clearBlockAi.targetPos());
+            this.clearBlockAi.stop();
+            this.resetFarmEgressClearContext();
+            return false;
+        }
+        if (!started) {
+            this.coolFarmEgressClearTargets(this.farmEgressClearRequestedTarget, target.get());
+            this.resetFarmEgressClearContext();
+            return false;
+        }
+        return started;
+    }
+
+    private List<BlockPos> farmEgressCorridorPositions(BlockPos fromFeet, BlockPos desiredWaypoint) {
+        if (fromFeet == null || desiredWaypoint == null) {
+            return List.of();
+        }
+        int deltaX = desiredWaypoint.getX() - fromFeet.getX();
+        int deltaY = desiredWaypoint.getY() - fromFeet.getY();
+        int deltaZ = desiredWaypoint.getZ() - fromFeet.getZ();
+        int rawSteps = Math.max(Math.abs(deltaX), Math.max(Math.abs(deltaY), Math.abs(deltaZ)));
+        int steps = Math.min(FARM_EGRESS_CORRIDOR_MAX_STEPS, Math.max(1, rawSteps));
+        boolean xMajor = Math.abs(deltaX) >= Math.abs(deltaZ);
+        LinkedHashSet<BlockPos> positions = new LinkedHashSet<>();
+        for (int step = 0; step <= steps; step++) {
+            double progress = (double) step / (double) steps;
+            int x = Mth.floor(fromFeet.getX() + deltaX * progress + 0.5D);
+            int y = Mth.floor(fromFeet.getY() + deltaY * progress + 0.5D);
+            int z = Mth.floor(fromFeet.getZ() + deltaZ * progress + 0.5D);
+            for (int lateral = -1; lateral <= 1; lateral++) {
+                int corridorX = xMajor ? x : x + lateral;
+                int corridorZ = xMajor ? z + lateral : z;
+                positions.add(new BlockPos(corridorX, y, corridorZ));
+                positions.add(new BlockPos(corridorX, y + 1, corridorZ));
+            }
+        }
+        return List.copyOf(positions);
+    }
+
+    private boolean isSafeFarmEgressClearTarget(ServerLevel serverLevel, Plan plan, @Nullable BlockPos pos) {
+        return this.isSafeFarmEgressClearTarget(
+                serverLevel,
+                plan,
+                pos,
+                this.farmEgressActiveClearCorridor
+        );
+    }
+
+    private boolean isSafeFarmEgressClearTarget(
+            ServerLevel serverLevel,
+            Plan plan,
+            @Nullable BlockPos pos,
+            List<BlockPos> corridor
+    ) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (pos == null
+                || corridor == null
+                || !corridor.contains(pos)
+                || pos.equals(feet)
+                || pos.equals(feet.below())
+                || pos.getY() < plan.origin().getY() + 1
+                || this.playerNpc.isTemporaryPillarSupport(pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                || CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
+                || serverLevel.getBlockEntity(pos) != null) {
+            return false;
+        }
+        BlockState state = serverLevel.getBlockState(pos);
+        if (state.isAir()
+                || !state.getFluidState().isEmpty()
+                || state.getDestroySpeed(serverLevel, pos) < 0.0F
+                || state.getBlock() instanceof CropBlock
+                || state.is(Blocks.FARMLAND)
+                || pos.equals(plan.waterPos())
+                || pos.equals(plan.waterPos().above())
+                || plan.containsGround(pos)
+                || plan.pathPositions().contains(pos)) {
+            return false;
+        }
+        if (pos.equals(plan.gatePos()) && state.getBlock() instanceof FenceGateBlock) {
+            return false;
+        }
+        return !plan.isFencePosition(pos) || !(state.getBlock() instanceof FenceBlock);
+    }
+
+    private boolean isFarmEgressClearTargetCooling(BlockPos pos) {
+        if (pos == null) {
+            return false;
+        }
+        Integer until = this.farmEgressFailedClearUntil.get(pos);
+        if (until == null) {
+            return false;
+        }
+        if (until <= this.playerNpc.tickCount) {
+            this.farmEgressFailedClearUntil.remove(pos);
+            return false;
+        }
+        return true;
+    }
+
+    private void coolFarmEgressClearTargets(@Nullable BlockPos... positions) {
+        this.farmEgressFailedClearUntil.entrySet().removeIf(entry -> entry.getValue() <= this.playerNpc.tickCount);
+        for (BlockPos pos : positions) {
+            if (pos == null) {
+                continue;
+            }
+            if (this.farmEgressFailedClearUntil.size() >= FARM_EGRESS_MAX_FAILED_CLEAR_TARGETS
+                    && !this.farmEgressFailedClearUntil.containsKey(pos)) {
+                BlockPos oldest = this.farmEgressFailedClearUntil.entrySet().stream()
+                        .min(Map.Entry.comparingByValue())
+                        .map(Map.Entry::getKey)
+                        .orElse(null);
+                if (oldest != null) {
+                    this.farmEgressFailedClearUntil.remove(oldest);
+                }
+            }
+            this.farmEgressFailedClearUntil.put(
+                    pos.immutable(),
+                    this.playerNpc.tickCount + FARM_EGRESS_FAILED_CLEAR_COOLDOWN_TICKS
+            );
+        }
+    }
+
+    private void resetFarmEgressClearContext() {
+        this.farmEgressClearRequestedTarget = null;
+        this.farmEgressActiveClearCorridor = List.of();
+    }
+
+    private boolean isAtFarmEgressWaypoint(@Nullable BlockPos target) {
+        return target != null && this.playerNpc.distanceToSqr(
+                target.getX() + 0.5D,
+                target.getY(),
+                target.getZ() + 0.5D
+        ) <= FARM_EGRESS_WAYPOINT_REACHED_SQR;
+    }
+
+    private boolean isInsideOwnedFarm(Plan plan, BlockPos feet) {
+        return plan != null
+                && feet != null
+                && FarmAi.isInsideFarmFootprint(plan, feet)
+                && feet.getY() >= plan.origin().getY()
+                && feet.getY() <= plan.origin().getY() + 2;
+    }
+
+    private void completeFarmEgress() {
+        BlockPos outside = this.farmEgressOutsideFeet;
+        this.playerNpc.clearUpwardEscapeTarget();
+        this.playerNpc.setHoleEscapeCooldown(COOLDOWN_TICKS);
+        this.playerNpc.setIdleTraceDetail("farm gate egress complete @ " + posText(outside), 40);
+        this.farmEgressFailedUntilTick = 0;
+        this.farmEgressBypassTarget = null;
+        this.farmEgressBypassUntilTick = 0;
+        this.clearFarmEgressMemory();
+        this.finished = true;
+    }
+
+    private void failFarmEgressAttempt(String reason) {
+        this.clearBlockAi.stop();
+        this.playerNpc.getNavigation().stop();
+        this.farmEgressAttempts++;
+        if (this.farmEgressAttempts < FARM_EGRESS_MAX_ATTEMPTS
+                && this.playerNpc.tickCount < this.farmEgressPendingUntilTick) {
+            this.farmEgressNextAttemptTick = this.playerNpc.tickCount + FARM_EGRESS_RETRY_TICKS;
+            this.playerNpc.setIdleTraceDetail("farm gate egress paused: " + reason + " attempt="
+                    + this.farmEgressAttempts + "/" + FARM_EGRESS_MAX_ATTEMPTS, 40);
+            this.finished = true;
+            return;
+        }
+
+        BlockPos failedTarget = this.farmEgressOriginalTarget == null
+                ? null
+                : this.farmEgressOriginalTarget.immutable();
+        int failedTargetMaxPillarBlocks = this.farmEgressOriginalMaxPillarBlocks;
+        boolean failedForcedRequest = this.farmEgressOriginalForcedRequest;
+        boolean failedExplorationRequest = this.farmEgressOriginalExplorationRequest;
+        this.farmEgressFailedUntilTick = this.playerNpc.tickCount + FARM_EGRESS_FAILED_COOLDOWN_TICKS;
+        if (failedTarget != null) {
+            this.farmEgressBypassTarget = failedTarget;
+            this.farmEgressBypassUntilTick = this.farmEgressFailedUntilTick;
+            if (failedTarget.equals(this.failedExplorationClimbTarget)) {
+                this.failedExplorationClimbTarget = null;
+                this.failedExplorationClimbUntilTick = 0;
+            }
+        }
+        this.playerNpc.clearUpwardEscapeTarget();
+        if (failedTarget != null) {
+            if (failedForcedRequest) {
+                this.playerNpc.requestForcedUpwardEscapeTo(
+                        failedTarget,
+                        EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS,
+                        failedTargetMaxPillarBlocks
+                );
+            } else if (failedExplorationRequest) {
+                this.playerNpc.requestExplorationUpwardEscapeTo(
+                        failedTarget,
+                        EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS,
+                        failedTargetMaxPillarBlocks
+                );
+            } else {
+                this.playerNpc.requestUpwardEscapeTo(
+                        failedTarget,
+                        EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS,
+                        failedTargetMaxPillarBlocks
+                );
+            }
+            this.playerNpc.setIdleTraceDetail("farm gate egress exhausted; trying protected upward route: "
+                    + reason + " target=" + posText(failedTarget), 60);
+        } else {
+            this.playerNpc.setHoleEscapeCooldown(FARM_EGRESS_FAILED_COOLDOWN_TICKS);
+            this.playerNpc.setIdleTraceDetail("farm gate egress abandoned after bounded retries: " + reason
+                    + " gate=" + posText(this.farmEgressInsideFeet), 60);
+        }
+        this.clearFarmEgressMemory();
+        this.finished = true;
+    }
+
+    private void clearFarmEgressMemory() {
+        this.farmEgressOriginalTarget = null;
+        this.farmEgressInsideFeet = null;
+        this.farmEgressOutsideFeet = null;
+        this.farmEgressWaypoint = null;
+        this.resetFarmEgressNavigation();
+        this.resetFarmEgressClearContext();
+        this.farmEgressFailedClearUntil.clear();
+        this.farmEgressOriginalMaxPillarBlocks = 0;
+        this.farmEgressOriginalForcedRequest = false;
+        this.farmEgressOriginalExplorationRequest = false;
+        this.farmEgressPendingUntilTick = 0;
+        this.farmEgressNextAttemptTick = 0;
+        this.farmEgressAttempts = 0;
+        this.farmEgressRouteFailureTicks = 0;
     }
 
     private void tickRouteNavigation(ServerLevel serverLevel) {
@@ -632,6 +1359,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.restorePreviousMainHand();
         this.playerNpc.clearBlockBreakProgress(clearedPos);
         this.exitClearPos = null;
+        this.farmEgressInsideFeet = null;
+        this.farmEgressOutsideFeet = null;
+        this.farmEgressWaypoint = null;
+        this.farmEgressRouteFailureTicks = 0;
         this.mineTicks = 0;
     }
 
@@ -646,8 +1377,34 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return;
         }
 
-        this.nextPillarPlanTick = result == ClearBlockAi.TickResult.DONE ? 0 : this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
+        if (result == ClearBlockAi.TickResult.DONE) {
+            this.nextPillarPlanTick = 0;
+            if (this.climbTargetPos != null && this.climbTargetPos.equals(this.failedExplorationClimbTarget)) {
+                this.failedExplorationClimbTarget = null;
+                this.failedExplorationClimbUntilTick = 0;
+            }
+        } else {
+            BlockPos failedRoute = this.climbTargetPos != null
+                    ? this.climbTargetPos.immutable()
+                    : this.playerNpc.getUpwardEscapeTarget();
+            this.abandonExplorationClimb(failedRoute, "clear failed");
+            this.nextPillarPlanTick = this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
+        }
         this.finished = true;
+    }
+
+    private void abandonExplorationClimb(@Nullable BlockPos failedRoute, String reason) {
+        if (failedRoute == null || !this.playerNpc.isExplorationUpwardEscapeRequested()) {
+            return;
+        }
+
+        this.failedExplorationClimbTarget = failedRoute.immutable();
+        this.failedExplorationClimbUntilTick = this.playerNpc.tickCount + FAILED_EXPLORATION_CLIMB_RETRY_TICKS;
+        ExploreAroundGoal.requestSafeWalkAfterFailedClimb(this.playerNpc, failedRoute);
+        this.playerNpc.clearUpwardEscapeTarget();
+        this.playerNpc.setHoleEscapeCooldown(FAILED_EXPLORATION_CLIMB_RETRY_TICKS);
+        this.playerNpc.setIdleTraceDetail("exploration climb abandoned: " + reason + " @ "
+                + failedRoute.getX() + " " + failedRoute.getY() + " " + failedRoute.getZ(), 40);
     }
 
     private void switchToPillar(ServerLevel serverLevel) {
@@ -689,6 +1446,17 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         if (this.pillarClearPos != null) {
             this.tickPillarClearance(serverLevel);
+            return;
+        }
+
+        if (this.settlingPillarSupportPos != null) {
+            this.tickPillarSettlement(serverLevel);
+            return;
+        }
+
+        BlockPos missingSupport = this.findMissingPlacedPillarSupport(serverLevel);
+        if (missingSupport != null) {
+            this.stopForMissingPillarSupport(missingSupport);
             return;
         }
 
@@ -750,7 +1518,19 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return;
         }
 
-        if (!this.hasPillarPlacementClearance()) {
+        if (!this.equipEscapeBlockForPlacement()) {
+            this.finished = true;
+            return;
+        }
+
+        ItemStack blockStack = this.playerNpc.getMainHandItem();
+        if (blockStack.isEmpty() || !(blockStack.getItem() instanceof BlockItem blockItem)) {
+            this.finished = true;
+            return;
+        }
+        BlockState pillarState = blockItem.getBlock().defaultBlockState();
+
+        if (!this.hasPillarPlacementClearance(serverLevel, this.placePos, pillarState)) {
             BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, this.playerNpc.blockPosition());
             if (obstruction != null && this.placeWaitTicks >= PILLAR_STUCK_MIN_TICKS) {
                 this.startPillarClearance(serverLevel, obstruction);
@@ -768,18 +1548,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return;
         }
 
-        if (!this.equipEscapeBlockForPlacement()) {
-            this.finished = true;
-            return;
-        }
-
-        ItemStack blockStack = this.playerNpc.getMainHandItem();
-        if (blockStack.isEmpty() || !(blockStack.getItem() instanceof BlockItem blockItem)) {
-            this.finished = true;
-            return;
-        }
-
-        if (!this.canPlacePillarWithoutClipping(serverLevel, this.placePos, blockItem.getBlock().defaultBlockState())) {
+        if (!this.canPlacePillarWithoutClipping(serverLevel, this.placePos, pillarState)) {
             BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, this.playerNpc.blockPosition());
             if (obstruction != null) {
                 this.startPillarClearance(serverLevel, obstruction);
@@ -793,17 +1562,23 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         this.lookDownAt(this.placePos);
-        if (!this.placingBlockAi.placeHeldBlock(serverLevel, this.placePos, blockItem.getBlock().defaultBlockState())) {
+        BlockPos placedSupport = this.placePos.immutable();
+        if (!this.placingBlockAi.placeHeldBlock(serverLevel, placedSupport, pillarState)) {
             this.finished = true;
             return;
         }
-        this.playerNpc.markTemporaryPillarSupport(this.placePos);
-        this.snapAbovePillarIfNeeded(this.placePos);
+        if (!this.isStablePillarSupport(serverLevel, placedSupport)) {
+            this.stopForMissingPillarSupport(placedSupport);
+            return;
+        }
+        this.playerNpc.markTemporaryPillarSupport(placedSupport);
+        this.placedPillarSupports.add(placedSupport);
         this.pillarsPlaced++;
         this.failedPillarPlaceAttempts = 0;
         this.placePos = null;
         this.placeDelayTicks = 0;
         this.placeWaitTicks = 0;
+        this.beginPillarSettlement(placedSupport);
         this.resetPillarStuckWatch();
         this.updatePillarDetail();
     }
@@ -945,6 +1720,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.placePos = null;
             this.placeDelayTicks = 0;
             this.placeWaitTicks = 0;
+            this.settlingPillarSupportPos = null;
+            this.lastConfirmedPillarSupportPos = null;
+            this.pillarSettleTicks = 0;
+            this.pillarSettleWaitTicks = 0;
+            this.placedPillarSupports.clear();
             this.failedPillarPlaceAttempts = 0;
             this.resetPillarStuckWatch();
             this.playerNpc.getNavigation().moveTo(
@@ -1204,8 +1984,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.explorationClimbStepOffWatchStartTick = 0;
     }
 
-    private static String posText(BlockPos pos) {
-        return pos.getX() + " " + pos.getY() + " " + pos.getZ();
+    private static String posText(@Nullable BlockPos pos) {
+        return pos == null ? "none" : pos.getX() + " " + pos.getY() + " " + pos.getZ();
     }
 
     private boolean canPlacePillarWithoutClipping(ServerLevel serverLevel, BlockPos pos, BlockState state) {
@@ -1214,18 +1994,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         List<AABB> boxes = this.placingBlockAi.placementCollisionBoxes(serverLevel, pos, state);
-        if (boxes.stream().noneMatch(box -> box.intersects(this.playerNpc.getBoundingBox().inflate(0.02D)))) {
-            return true;
-        }
-
-        double snapUp = pos.getY() + 1.0D - this.playerNpc.getBoundingBox().minY;
-        if (snapUp < -0.05D || snapUp > 0.35D) {
-            return false;
-        }
-
-        AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
-        return boxes.stream().noneMatch(box -> box.intersects(snappedBox.inflate(0.001D)))
-                && PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox);
+        return boxes.stream().noneMatch(box -> box.intersects(this.playerNpc.getBoundingBox().inflate(0.02D)));
     }
 
     private boolean tryAcceptOccupiedPillarSupport(ServerLevel serverLevel) {
@@ -1241,39 +2010,21 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
 
-        BlockPos feet = this.playerNpc.blockPosition();
-        if (feet.getX() != this.placePos.getX() || feet.getZ() != this.placePos.getZ()) {
+        if (!this.isStandingOnPillarSupport(serverLevel, this.placePos)) {
             return false;
         }
 
-        double snapUp = this.placePos.getY() + 1.0D - this.playerNpc.getBoundingBox().minY;
-        if (snapUp < -0.05D || snapUp > 1.25D) {
-            return false;
-        }
-
-        AABB snappedBox = this.playerNpc.getBoundingBox().move(0.0D, snapUp + 0.01D, 0.0D);
-        if (!PlayerNpcCollisionUtil.noBlockingCollision(serverLevel, this.playerNpc, snappedBox)) {
-            BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, feet);
-            if (obstruction != null) {
-                this.startPillarClearance(serverLevel, obstruction);
-                return true;
-            }
-            return false;
-        }
-
-        this.playerNpc.markTemporaryPillarSupport(this.placePos);
-        this.snapAbovePillarIfNeeded(this.placePos);
+        BlockPos occupiedSupport = this.placePos.immutable();
+        this.placedPillarSupports.add(occupiedSupport);
         this.pillarsPlaced++;
         this.failedPillarPlaceAttempts = 0;
         this.placePos = null;
         this.placeDelayTicks = 0;
         this.placeWaitTicks = 0;
+        this.beginPillarSettlement(occupiedSupport);
         this.resetPillarStuckWatch();
         this.playerNpc.getNavigation().stop();
-        if (this.shouldContinuePillaring(serverLevel) && this.playerNpc.onGround()) {
-            this.playerNpc.shortPillarJump();
-        }
-        this.updatePillarRecoveryDetail("continuing from fallen support");
+        this.updatePillarRecoveryDetail("settling on existing support");
         return true;
     }
 
@@ -1333,6 +2084,16 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private void beginPillarStep(ServerLevel serverLevel) {
         BlockPos feet = this.playerNpc.blockPosition();
         if (!this.playerNpc.onGround()) {
+            return;
+        }
+        if (this.lastConfirmedPillarSupportPos != null
+                && !this.isStandingOnPillarSupport(serverLevel, this.lastConfirmedPillarSupportPos)) {
+            this.stopForMissingPillarSupport(this.lastConfirmedPillarSupportPos);
+            return;
+        }
+        BlockPos missingSupport = this.findMissingPlacedPillarSupport(serverLevel);
+        if (missingSupport != null) {
+            this.stopForMissingPillarSupport(missingSupport);
             return;
         }
         if (!this.isAtPillarBase()) {
@@ -1408,6 +2169,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.restorePreviousPillarMainHand();
         this.playerNpc.getNavigation().stop();
         BlockPos clearPos = this.pillarClearPos;
+        boolean clearingBed = state.getBlock() instanceof BedBlock;
+        BlockPos bedCompanionPos = clearingBed
+                ? this.findMatchingBedCompanion(serverLevel, clearPos, state)
+                : null;
         BreakingBlockAi.TickResult result = this.breakingBlockAi.tick(
                 serverLevel,
                 clearPos,
@@ -1419,7 +2184,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
                         this.pillarsPlaced,
                         this.maxPillarBlocks,
                         state.getBlock().getDescriptionId()
-                )
+                ),
+                clearingBed
         );
         if (result == BreakingBlockAi.TickResult.RUNNING) {
             return;
@@ -1427,6 +2193,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         this.toolAi.restoreMainHand();
         if (result == BreakingBlockAi.TickResult.DONE) {
+            if (bedCompanionPos != null) {
+                this.removeRemainingBedCompanion(serverLevel, state, bedCompanionPos);
+            }
             this.pillarClearPos = null;
             this.mineTicks = 0;
             this.beginPillarStep(serverLevel);
@@ -1481,30 +2250,119 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.updatePillarClearDetail(serverLevel.getBlockState(this.pillarClearPos));
     }
 
-    private void snapAbovePillarIfNeeded(BlockPos pos) {
-        double topY = pos.getY() + 1.0D;
-        if (this.playerNpc.getBoundingBox().minY >= topY) {
+    private void beginPillarSettlement(BlockPos supportPos) {
+        this.settlingPillarSupportPos = supportPos.immutable();
+        this.pillarSettleTicks = 0;
+        this.pillarSettleWaitTicks = 0;
+    }
+
+    private void tickPillarSettlement(ServerLevel serverLevel) {
+        BlockPos supportPos = this.settlingPillarSupportPos;
+        if (supportPos == null) {
             return;
         }
 
-        this.playerNpc.setPos(this.playerNpc.getX(), topY, this.playerNpc.getZ());
-        this.playerNpc.setDeltaMovement(this.playerNpc.getDeltaMovement().x, Math.max(0.0D, this.playerNpc.getDeltaMovement().y), this.playerNpc.getDeltaMovement().z);
-        this.playerNpc.fallDistance = 0.0F;
+        BlockPos missingSupport = this.findMissingPlacedPillarSupport(serverLevel);
+        if (missingSupport != null) {
+            this.stopForMissingPillarSupport(missingSupport);
+            return;
+        }
+
+        this.playerNpc.getNavigation().stop();
+        this.lookDownAt(supportPos);
+        this.pillarSettleWaitTicks++;
+        if (!this.isStandingOnPillarSupport(serverLevel, supportPos)) {
+            this.pillarSettleTicks = 0;
+            if (this.pillarSettleWaitTicks > MAX_PILLAR_SETTLE_WAIT_TICKS) {
+                this.stopForMissingPillarSupport(supportPos);
+                return;
+            }
+            this.updatePillarRecoveryDetail("waiting to land on support @ " + posText(supportPos));
+            return;
+        }
+
+        if (this.pillarSettleTicks <= 0) {
+            this.pillarSettleTicks = PILLAR_SETTLE_TICKS;
+        }
+        this.pillarSettleTicks--;
+        if (this.pillarSettleTicks > 0) {
+            this.updatePillarRecoveryDetail("settling on support "
+                    + (PILLAR_SETTLE_TICKS - this.pillarSettleTicks)
+                    + "/" + PILLAR_SETTLE_TICKS);
+            return;
+        }
+
+        this.lastConfirmedPillarSupportPos = supportPos.immutable();
+        this.settlingPillarSupportPos = null;
+        this.pillarSettleWaitTicks = 0;
+        this.updatePillarDetail();
     }
 
-    private boolean hasPillarPlacementClearance() {
-        if (this.placePos == null) {
+    private boolean isStandingOnPillarSupport(ServerLevel serverLevel, BlockPos supportPos) {
+        if (!this.playerNpc.onGround() || !this.isStablePillarSupport(serverLevel, supportPos)) {
+            return false;
+        }
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (!feet.below().equals(supportPos)) {
             return false;
         }
 
-        double clearedY = this.playerNpc.getBoundingBox().minY - this.placePos.getY();
-        if (clearedY >= PLACE_CLEARANCE_Y) {
-            return true;
+        BlockState state = serverLevel.getBlockState(supportPos);
+        double supportTop = supportPos.getY() + state.getCollisionShape(serverLevel, supportPos).bounds().maxY;
+        return Math.abs(this.playerNpc.getBoundingBox().minY - supportTop) <= 0.12D;
+    }
+
+    private boolean isStablePillarSupport(ServerLevel serverLevel, BlockPos supportPos) {
+        if (supportPos == null
+                || !serverLevel.isInWorldBounds(supportPos)
+                || !serverLevel.getWorldBorder().isWithinBounds(supportPos)) {
+            return false;
+        }
+        BlockState state = serverLevel.getBlockState(supportPos);
+        return !state.canBeReplaced()
+                && !state.getCollisionShape(serverLevel, supportPos).isEmpty()
+                && state.getFluidState().isEmpty();
+    }
+
+    @Nullable
+    private BlockPos findMissingPlacedPillarSupport(ServerLevel serverLevel) {
+        for (BlockPos supportPos : this.placedPillarSupports) {
+            if (!this.isStablePillarSupport(serverLevel, supportPos)) {
+                return supportPos.immutable();
+            }
         }
 
-        return this.placeWaitTicks >= 6
-                && clearedY >= FALLBACK_PLACE_CLEARANCE_Y
-                && this.playerNpc.getDeltaMovement().y <= 0.05D;
+        BlockPos cursor = this.playerNpc.blockPosition().below();
+        int checked = 0;
+        while (this.playerNpc.isTemporaryPillarSupport(cursor) && checked++ < MAX_ROUTE_ESCAPE_BLOCKS) {
+            if (!this.isStablePillarSupport(serverLevel, cursor)) {
+                return cursor.immutable();
+            }
+            cursor = cursor.below();
+        }
+        if (checked > 0 && !this.isStablePillarSupport(serverLevel, cursor)) {
+            return cursor.immutable();
+        }
+        return null;
+    }
+
+    private void stopForMissingPillarSupport(BlockPos supportPos) {
+        this.placePos = null;
+        this.settlingPillarSupportPos = null;
+        this.pillarSettleTicks = 0;
+        this.pillarSettleWaitTicks = 0;
+        this.finished = true;
+        this.playerNpc.getNavigation().stop();
+        this.playerNpc.setIdleTraceDetail("pillar stopped: missing solid support @ " + posText(supportPos), 60);
+    }
+
+    private boolean hasPillarPlacementClearance(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        if (pos == null || this.playerNpc.onGround()) {
+            return false;
+        }
+        return this.placingBlockAi.placementCollisionBoxes(serverLevel, pos, state)
+                .stream()
+                .noneMatch(box -> box.intersects(this.playerNpc.getBoundingBox().inflate(0.02D)));
     }
 
     private boolean shouldContinuePillaring(ServerLevel serverLevel) {
@@ -1701,8 +2559,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean canUsePillarBaseState(ServerLevel serverLevel, BlockPos base, BlockState state) {
-        return state.canBeReplaced()
-                || this.isClearablePillarObstruction(serverLevel, base, state);
+        return !FarmAi.isProtectedFarmBlock(this.playerNpc, base)
+                && (state.canBeReplaced()
+                || this.isClearablePillarObstruction(serverLevel, base, state));
     }
 
     private BlockPos findPillarObstruction(ServerLevel serverLevel, BlockPos feet) {
@@ -1936,6 +2795,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         return pos != null
                 && !pos.equals(this.playerNpc.blockPosition().below())
                 && !this.playerNpc.isTemporaryPillarSupport(pos)
+                && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)
                 && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
                 && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
                 && ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, state, true);
@@ -1978,7 +2838,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         for (BlockPos pos : BlockPos.betweenClosed(center.offset(-SEARCH_RADIUS, -2, -SEARCH_RADIUS), center.offset(SEARCH_RADIUS, 3, SEARCH_RADIUS))) {
             BlockPos immutable = pos.immutable();
-            if (immutable.equals(center.below()) || !this.canGatherEscapeMaterial(serverLevel.getBlockState(immutable))) {
+            if (immutable.equals(center.below())
+                    || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, immutable)
+                    || !this.canGatherEscapeMaterial(serverLevel.getBlockState(immutable))) {
                 continue;
             }
 
@@ -2730,15 +3592,109 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean isClearablePillarObstruction(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        boolean bedObstruction = state.getBlock() instanceof BedBlock;
         return serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
-                && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)
+                && (bedObstruction
+                || !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                || this.isForcedHomeSurfaceRecoveryObstruction(pos))
                 && !state.isAir()
                 && this.blocksPillarSpace(serverLevel, pos, state)
                 && state.getDestroySpeed(serverLevel, pos) >= 0.0F
                 && state.getFluidState().isEmpty()
                 && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
-                && serverLevel.getBlockEntity(pos) == null;
+                && (bedObstruction
+                ? this.isSafePillarBedObstruction(serverLevel, pos, state)
+                : serverLevel.getBlockEntity(pos) == null);
+    }
+
+    private boolean isForcedHomeSurfaceRecoveryObstruction(BlockPos pos) {
+        BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+        BlockPos feet = this.playerNpc.blockPosition();
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
+        if (pos == null
+                || requestedTarget == null
+                || !this.playerNpc.isForcedUpwardEscape()
+                || home.isEmpty()
+                || feet.getY() > home.get().origin().getY()
+                || !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, feet)
+                || !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, requestedTarget)) {
+            return false;
+        }
+
+        return pos.getX() == feet.getX()
+                && pos.getZ() == feet.getZ()
+                && pos.getY() >= feet.getY()
+                && pos.getY() <= requestedTarget.getY() + 1;
+    }
+
+    private boolean isSafePillarBedObstruction(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        if (!(state.getBlock() instanceof BedBlock)
+                || !state.hasProperty(BedBlock.PART)
+                || !state.hasProperty(BedBlock.FACING)
+                || (state.hasProperty(BedBlock.OCCUPIED) && state.getValue(BedBlock.OCCUPIED))) {
+            return false;
+        }
+
+        BlockPos companionPos = getBedCompanionPos(pos, state);
+        if (!serverLevel.isInWorldBounds(companionPos)
+                || !serverLevel.getWorldBorder().isWithinBounds(companionPos)) {
+            return false;
+        }
+
+        BlockState companionState = serverLevel.getBlockState(companionPos);
+        if (!isMatchingBedCompanion(state, companionState)) {
+            return true;
+        }
+        return !(companionState.hasProperty(BedBlock.OCCUPIED)
+                && companionState.getValue(BedBlock.OCCUPIED))
+                && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, companionPos);
+    }
+
+    @Nullable
+    private BlockPos findMatchingBedCompanion(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        if (!(state.getBlock() instanceof BedBlock)
+                || !state.hasProperty(BedBlock.PART)
+                || !state.hasProperty(BedBlock.FACING)) {
+            return null;
+        }
+
+        BlockPos companionPos = getBedCompanionPos(pos, state);
+        return serverLevel.isInWorldBounds(companionPos)
+                && serverLevel.getWorldBorder().isWithinBounds(companionPos)
+                && isMatchingBedCompanion(state, serverLevel.getBlockState(companionPos))
+                ? companionPos.immutable()
+                : null;
+    }
+
+    private void removeRemainingBedCompanion(
+            ServerLevel serverLevel,
+            BlockState brokenBedState,
+            BlockPos companionPos
+    ) {
+        BlockState companionState = serverLevel.getBlockState(companionPos);
+        if (isMatchingBedCompanion(brokenBedState, companionState)
+                && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, companionPos)) {
+            // Vanilla normally removes the other half during destroyBlock's neighbor update. This
+            // no-drop fallback only repairs a surviving paired half; the broken half supplied the loot.
+            serverLevel.removeBlock(companionPos, false);
+        }
+    }
+
+    private static BlockPos getBedCompanionPos(BlockPos pos, BlockState state) {
+        Direction facing = state.getValue(BedBlock.FACING);
+        return state.getValue(BedBlock.PART) == BedPart.FOOT
+                ? pos.relative(facing)
+                : pos.relative(facing.getOpposite());
+    }
+
+    private static boolean isMatchingBedCompanion(BlockState bedState, BlockState companionState) {
+        return companionState.getBlock() == bedState.getBlock()
+                && companionState.hasProperty(BedBlock.PART)
+                && companionState.hasProperty(BedBlock.FACING)
+                && companionState.getValue(BedBlock.PART) != bedState.getValue(BedBlock.PART)
+                && companionState.getValue(BedBlock.FACING) == bedState.getValue(BedBlock.FACING);
     }
 
     private boolean blocksPillarSpace(ServerLevel serverLevel, BlockPos pos, BlockState state) {
@@ -2837,7 +3793,12 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private void resetPlan() {
         setEscapeMode(EscapeMode.NONE);
         this.clearBlockAi.stop();
+        this.resetFarmEgressNavigation();
+        this.resetFarmEgressClearContext();
+        this.farmEgressNavigationBlockedThisTick = false;
         this.placePos = null;
+        this.settlingPillarSupportPos = null;
+        this.lastConfirmedPillarSupportPos = null;
         this.minePos = null;
         this.mineStandPos = null;
         this.routeNavigationTarget = null;
@@ -2856,6 +3817,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.previousPillarMainHand = ItemStack.EMPTY;
         this.placeDelayTicks = 0;
         this.placeWaitTicks = 0;
+        this.pillarSettleTicks = 0;
+        this.pillarSettleWaitTicks = 0;
         this.mineTicks = 0;
         this.repathTicks = 0;
         this.failedPathTicks = 0;
@@ -2863,6 +3826,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.requiredEscapeBlocks = 0;
         this.maxPillarBlocks = 0;
         this.pillarsPlaced = 0;
+        this.placedPillarSupports.clear();
         this.failedPillarPlaceAttempts = 0;
         this.pillarStuckWatchStartTick = 0;
         this.nextPillarStuckRecoveryTick = 0;
@@ -2871,6 +3835,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.explorationClimbStepOffTicks = 0;
         this.usingTemporaryPickaxe = false;
         this.usingTemporaryBlock = false;
+        this.explorationClimbEpisode = false;
         this.finished = false;
     }
 
@@ -2888,11 +3853,18 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     private enum EscapeMode {
         NONE,
+        FARM_GATE_EGRESS,
         NAVIGATE_ROUTE,
         GATHER_BLOCKS,
         CLEAR_EXIT,
         CLEAR_ROUTE,
         PILLAR
+    }
+
+    private enum FarmEgressDecision {
+        NONE,
+        START,
+        BLOCK
     }
 
     private record EscapeMaterialTarget(BlockPos targetPos, BlockPos standPos) {}

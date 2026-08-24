@@ -43,7 +43,9 @@ For each target block:
 3. If the target state is air, keep the space clear.
 4. If the required item can be crafted but is not already carried, walk to the build-site crafting table and craft the material into inventory first.
 5. If the NPC lacks the required item and cannot craft it, stop early with a short material retry cooldown.
-6. Otherwise consume the required item or an accepted substitute, preview it in the main hand, place the target/substitute state, apply block entity NBT if present, play the block place sound, and continue.
+6. Otherwise consume the required item or an accepted substitute, preview it in the main hand, place the target/substitute state, apply block entity NBT if present, play one placement swing and the block place sound, and continue.
+
+Placement feedback is commit-driven. Walking, delay ticks, collision recovery, material failure, and failed world placement do not swing. A successful item placement emits exactly one renderer-appropriate hand action: the normal NPC use swing without Epic Fight, or a dedicated non-repeating Epic Fight use animation when that renderer is active. It must never start the repeating digging animation used by `BreakingBlockAi`.
 
 `PlayerNpcBuildMaterialUtil` keeps the blueprint target as the canonical design while allowing biome-local substitutions. It preserves shared state properties on replacement blocks, such as stair facing/half/shape, door half/facing/hinge/open state, slab type, log axis, and bed facing/part. Multiblock second halves such as bed heads and upper door halves do not consume a second item; they derive their material from the already placed first half when possible.
 

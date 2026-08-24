@@ -31,7 +31,6 @@ public class RecoverWeaponInCombatGoal extends Goal {
     private int repathCooldown;
 
     private static final int MAX_LOCK_TICKS = 60;
-    private static final double PICKUP_DISTANCE_SQR = 2.4D * 2.4D;
 
     public RecoverWeaponInCombatGoal(Mob mob, double speed, double searchRadius) {
         this.mob = mob;
@@ -180,10 +179,10 @@ public class RecoverWeaponInCombatGoal extends Goal {
             inventory.setItem(slot, slotStack);
         }
         inventory.setChanged();
-        return equipRecoveredWeapon(equipStack);
+        return equipRecoveredWeapon(equipStack, true);
     }
 
-    private boolean equipRecoveredWeapon(ItemStack equipStack) {
+    private boolean equipRecoveredWeapon(ItemStack equipStack, boolean playEquipFeedback) {
         if (equipStack.isEmpty() || !isUsefulWeapon(equipStack)) {
             return false;
         }
@@ -195,15 +194,17 @@ public class RecoverWeaponInCombatGoal extends Goal {
             playerNpcEntity.setMainWeaponDisarmed(false);
         }
 
-        mob.swing(InteractionHand.MAIN_HAND);
-        mob.level().playSound(
-                null,
-                mob.blockPosition(),
-                SoundEvents.ITEM_PICKUP,
-                SoundSource.HOSTILE,
-                0.35F,
-                1.0F
-        );
+        if (playEquipFeedback) {
+            mob.swing(InteractionHand.MAIN_HAND);
+            mob.level().playSound(
+                    null,
+                    mob.blockPosition(),
+                    SoundEvents.ITEM_PICKUP,
+                    SoundSource.HOSTILE,
+                    0.35F,
+                    1.0F
+            );
+        }
 
         return true;
     }
@@ -251,7 +252,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
                 60.0F
         );
 
-        if (mob.distanceToSqr(targetItem) <= PICKUP_DISTANCE_SQR) {
+        if (this.isWithinItemPickupReach(targetItem)) {
             if (forceEquipWeaponFromItemEntity(targetItem)) {
                 finished = true;
             }
@@ -282,13 +283,30 @@ public class RecoverWeaponInCombatGoal extends Goal {
         if (groundStack.isEmpty() || !isUsefulWeapon(groundStack)) {
             return false;
         }
-        ItemStack equipStack = groundStack.split(1);
+        ItemStack equipStack = groundStack.copy();
+        equipStack.setCount(1);
+        if (!equipRecoveredWeapon(equipStack, false)) {
+            return false;
+        }
+        mob.onItemPickup(itemEntity);
+        mob.take(itemEntity, 1);
+        groundStack.shrink(1);
         if (groundStack.isEmpty()) {
             itemEntity.discard();
         } else {
             itemEntity.setItem(groundStack);
         }
-        return equipRecoveredWeapon(equipStack);
+        return true;
+    }
+
+    private boolean isWithinItemPickupReach(ItemEntity itemEntity) {
+        if (itemEntity == null || itemEntity.hasPickUpDelay()) {
+            return false;
+        }
+        if (mob instanceof PlayerNpcEntity playerNpcEntity) {
+            return playerNpcEntity.isWithinPlayerLikeItemPickupReach(itemEntity);
+        }
+        return mob.getBoundingBox().intersects(itemEntity.getBoundingBox());
     }
 
     @Override
@@ -313,6 +331,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
                 ItemEntity.class,
                 mob.getBoundingBox().inflate(searchRadius),
                 itemEntity -> itemEntity.isAlive()
+                        && !itemEntity.hasPickUpDelay()
                         && !itemEntity.getItem().isEmpty()
                         && isUsefulWeapon(itemEntity.getItem())
         );

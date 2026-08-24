@@ -163,7 +163,7 @@ public class PlayerNpcBuildLayoutLoader extends SimpleJsonResourceReloadListener
         if (path.endsWith(".blueprint")) {
             path = path.substring(0, path.length() - ".blueprint".length());
         }
-        return new ResourceLocation(resourceLocation.getNamespace(), path);
+        return ResourceLocation.fromNamespaceAndPath(resourceLocation.getNamespace(), path);
     }
 
     private static BlockState parseBlockState(JsonObject block) {

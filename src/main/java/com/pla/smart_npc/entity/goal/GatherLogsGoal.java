@@ -4,6 +4,7 @@ import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.PillarUpAi;
@@ -14,6 +15,7 @@ import com.pla.smart_npc.entity.ai.TreeAi.Tree;
 import com.pla.smart_npc.entity.ai.WaterEscapeAi;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -30,6 +32,7 @@ import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.Iterator;
@@ -39,9 +42,11 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.function.Predicate;
 
 public class GatherLogsGoal extends Goal {
+    private static final Set<PlayerNpcEntity> ACTIVE_LOG_GATHERERS = Collections.newSetFromMap(new WeakHashMap<>());
     private static final int TREE_SEARCH_RADIUS = 32;
     private static final int NEARBY_LOG_TARGET_SEARCH_RADIUS = 16;
     private static final int NEARBY_LOG_TARGET_CACHE_TICKS = 20 * 2;
@@ -98,6 +103,8 @@ public class GatherLogsGoal extends Goal {
     private boolean gatheringDirt;
     private boolean searchingDirtForPillar;
     private boolean descendingFromPillar;
+    private boolean clearingPillarCollision;
+    private boolean foliageRelocationAttempted;
     private String pillarTraceDetail = "";
     private String pathFallbackDetailPrefix = "gathering logs";
 
@@ -229,6 +236,7 @@ public class GatherLogsGoal extends Goal {
         if (!selected) {
             this.cacheNearbyUsableLogTarget(false);
             this.traceCanUseBlocked("gather logs blocked: no usable log target");
+            this.playerNpc.setGatherCooldown(20);
         } else {
             this.cacheNearbyUsableLogTarget(true);
         }
@@ -254,6 +262,7 @@ public class GatherLogsGoal extends Goal {
 
     @Override
     public void start() {
+        setLogGatheringEpisodeActive(this.playerNpc, true);
         this.gatherTicks = 0;
         this.repathTicks = 0;
         this.playerNpc.setCurrentAiState("ai.player_npc.gathering_logs");
@@ -378,6 +387,7 @@ public class GatherLogsGoal extends Goal {
 
     @Override
     public void stop() {
+        setLogGatheringEpisodeActive(this.playerNpc, false);
         if (!this.gatheringDirt
                 && this.gatherTicks >= MAX_GATHER_TICKS
                 && this.targetPos != null
@@ -411,6 +421,8 @@ public class GatherLogsGoal extends Goal {
         this.gatheringDirt = false;
         this.searchingDirtForPillar = false;
         this.descendingFromPillar = false;
+        this.clearingPillarCollision = false;
+        this.foliageRelocationAttempted = false;
         this.pillarTraceDetail = "";
         this.pathFallbackDetailPrefix = "gathering logs";
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -418,7 +430,12 @@ public class GatherLogsGoal extends Goal {
     }
 
     private boolean tickWaterEscape(ServerLevel serverLevel) {
-        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(serverLevel, Math.max(1.0D, this.speed));
+        BlockPos workDestination = this.standPos != null ? this.standPos : this.targetPos;
+        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(
+                serverLevel,
+                Math.min(1.0D, Math.max(0.1D, this.speed)),
+                workDestination
+        );
         if (result != WaterEscapeAi.TickResult.RUNNING && result != WaterEscapeAi.TickResult.DONE) {
             return false;
         }
@@ -492,15 +509,53 @@ public class GatherLogsGoal extends Goal {
     private boolean tickHelperAi(ServerLevel serverLevel) {
         if (this.clearBlockAi.isRunning()) {
             BlockPos clearTarget = this.clearBlockAi.targetPos();
+            boolean clearingFoliage = this.clearBlockAi.detail().startsWith("clearing foliage");
+            if (this.clearingPillarCollision
+                    && !this.isSafePillarCollisionClearTarget(serverLevel, clearTarget)) {
+                this.breakingBlockAi.stop();
+                this.clearBlockAi.stop();
+                this.clearingPillarCollision = false;
+                this.pillarTraceDetail = "pillar blocker became protected @ " + posText(clearTarget);
+                return true;
+            }
+            if (clearingFoliage && this.didClearPreviousFoliageTarget(serverLevel, clearTarget)) {
+                this.pathStuckFallbackAi.stop();
+                this.foliageRelocationAttempted = false;
+            }
             this.trackClearTarget(clearTarget);
-            if (!this.gatheringDirt && this.sameClearTargetTicks > MAX_SAME_LEAF_CLEAR_TICKS) {
+            if (clearingFoliage
+                    && !this.foliageRelocationAttempted
+                    && this.watchPathStuckFallback(
+                    serverLevel,
+                    this.targetPos,
+                    clearTarget,
+                    "clearing foliage")) {
+                this.foliageRelocationAttempted = true;
+                this.clearBlockAi.retryFromCurrentPosition();
+                return true;
+            }
+            if (!this.gatheringDirt
+                    && !this.clearingPillarCollision
+                    && this.sameClearTargetTicks > MAX_SAME_LEAF_CLEAR_TICKS) {
+                if (clearingFoliage
+                        && !this.foliageRelocationAttempted
+                        && this.tryStartPathStuckFallback(serverLevel, clearTarget, "clearing foliage")) {
+                    this.foliageRelocationAttempted = true;
+                    this.sameClearTargetTicks = 0;
+                    this.clearBlockAi.retryFromCurrentPosition();
+                    return true;
+                }
                 this.breakingBlockAi.stop();
                 this.clearBlockAi.stop();
                 this.ignoreClearBlock(clearTarget);
                 if (this.forceClearLeaf(serverLevel, clearTarget)) {
+                    this.pathStuckFallbackAi.stop();
                     this.pillarTraceDetail = "force cleared stuck leaf @ " + posText(clearTarget);
                 } else {
                     this.pillarTraceDetail = "skipped stuck leaf @ " + posText(clearTarget);
+                }
+                if (clearingFoliage) {
+                    this.foliageRelocationAttempted = false;
                 }
                 this.prepareLogQueue(serverLevel);
                 this.lastClearTargetPos = null;
@@ -510,6 +565,13 @@ public class GatherLogsGoal extends Goal {
             ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
             if (result == ClearBlockAi.TickResult.DONE || result == ClearBlockAi.TickResult.FAILED) {
                 this.breakingBlockAi.stop();
+                this.clearingPillarCollision = false;
+                if (clearingFoliage && result == ClearBlockAi.TickResult.DONE) {
+                    this.pathStuckFallbackAi.stop();
+                }
+                if (clearingFoliage) {
+                    this.foliageRelocationAttempted = false;
+                }
                 if (result == ClearBlockAi.TickResult.FAILED && !this.gatheringDirt) {
                     this.ignoreClearBlock(clearTarget);
                 }
@@ -589,6 +651,8 @@ public class GatherLogsGoal extends Goal {
         this.breakingBlockAi.stop();
         this.pathStuckFallbackAi.stop();
         this.pillarUpAi.clear();
+        this.clearingPillarCollision = false;
+        this.foliageRelocationAttempted = false;
         this.standPos = null;
         this.descentTargetPos = null;
         this.descendingFromPillar = false;
@@ -652,14 +716,18 @@ public class GatherLogsGoal extends Goal {
         this.sameClearTargetTicks++;
     }
 
+    private boolean didClearPreviousFoliageTarget(ServerLevel serverLevel, BlockPos clearTarget) {
+        return this.lastClearTargetPos != null
+                && !this.lastClearTargetPos.equals(clearTarget)
+                && !isLogClearBlock(serverLevel.getBlockState(this.lastClearTargetPos));
+    }
+
     private boolean forceClearLeaf(ServerLevel serverLevel, BlockPos clearTarget) {
         if (clearTarget == null || !isLogClearBlock(serverLevel.getBlockState(clearTarget))) {
             return false;
         }
-        boolean cleared = serverLevel.destroyBlock(clearTarget, false, this.playerNpc);
-        if (!cleared && serverLevel.getBlockEntity(clearTarget) == null) {
-            cleared = serverLevel.setBlockAndUpdate(clearTarget, Blocks.AIR.defaultBlockState());
-        }
+        BlockState state = serverLevel.getBlockState(clearTarget);
+        boolean cleared = PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, clearTarget, state, this.playerNpc);
         if (cleared) {
             this.playerNpc.clearBlockBreakProgress(clearTarget);
         }
@@ -900,6 +968,21 @@ public class GatherLogsGoal extends Goal {
             return true;
         }
 
+        if (this.isSafePillarCollisionClearTarget(serverLevel, blockerPos)
+                && this.clearBlockAi.start(
+                serverLevel,
+                blockerPos,
+                GatherLogsGoal::isPillarCollisionState,
+                "clearing pillar collision",
+                REQUIRED_BREAK_TICKS
+        )) {
+            this.clearingPillarCollision = true;
+            this.pillarTraceDetail = "clearing pillar collision @ "
+                    + posText(blockerPos)
+                    + detailSuffix(failureDetail);
+            return true;
+        }
+
         if (this.clearBlockAi.start(
                 serverLevel,
                 blockerPos,
@@ -913,6 +996,23 @@ public class GatherLogsGoal extends Goal {
             return true;
         }
         return false;
+    }
+
+    private boolean isSafePillarCollisionClearTarget(ServerLevel serverLevel, BlockPos pos) {
+        if (pos == null
+                || this.isCurrentSupportBlock(pos)
+                || this.playerNpc.isTemporaryPillarSupport(pos)
+                || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)
+                || this.isProtectedHomeLogTarget(pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                || CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)) {
+            return false;
+        }
+        return ClearBlockAi.isBreakablePathObstruction(serverLevel, pos, serverLevel.getBlockState(pos), true);
+    }
+
+    private static boolean isPillarCollisionState(BlockState state) {
+        return state != null && !state.isAir();
     }
 
     private boolean tryMoveToBetterPillarBase(ServerLevel serverLevel, BlockPos blockedFeet, String blocker) {
@@ -1030,15 +1130,52 @@ public class GatherLogsGoal extends Goal {
     }
 
     private boolean needsLogs(ServerLevel serverLevel) {
-        if (this.isSupplyLogJob()) {
-            return this.playerNpc.shouldPrioritizeLogGathering()
-                    || CraftBasicGearGoal.needsFishingRodCraftingLogs(this.playerNpc, serverLevel);
-        }
-        if (!this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
+        return hasLogSupplyDemand(this.playerNpc, serverLevel);
+    }
+
+    /** Pure demand predicate shared with farming arbitration to prevent predicate drift. */
+    public static boolean hasLogSupplyDemand(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null || serverLevel == null) {
             return false;
         }
-        return this.playerNpc.shouldPrioritizeLogGathering()
-                || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, this.playerNpc);
+        boolean supplyLogJob = (playerNpc.isDailyJobActive(PlayerNpcInterest.MINING)
+                && !playerNpc.hasInterest(PlayerNpcInterest.BUILDING))
+                || playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING)
+                || playerNpc.isDailyJobActive(PlayerNpcInterest.FARMING);
+        if (supplyLogJob) {
+            return playerNpc.shouldPrioritizeLogGathering()
+                    || FarmAi.needsFarmLogs(playerNpc, serverLevel)
+                    || CraftBasicGearGoal.needsFishingRodCraftingLogs(playerNpc, serverLevel);
+        }
+        return playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
+                && (playerNpc.shouldPrioritizeLogGathering()
+                || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, playerNpc));
+    }
+
+    /**
+     * Crop work yields for the whole selected log route. A failed/exhausted route opens a short
+     * cooldown window so ordinary farm work can resume instead of idling on unmet remote demand.
+     */
+    public static boolean shouldDeferFarmCropWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return playerNpc != null
+                && serverLevel != null
+                && (isLogGatheringEpisodeActive(playerNpc)
+                || playerNpc.getGatherCooldown() <= 0 && hasLogSupplyDemand(playerNpc, serverLevel));
+    }
+
+    public static boolean isLogGatheringEpisodeActive(PlayerNpcEntity playerNpc) {
+        return playerNpc != null && ACTIVE_LOG_GATHERERS.contains(playerNpc);
+    }
+
+    private static void setLogGatheringEpisodeActive(PlayerNpcEntity playerNpc, boolean active) {
+        if (playerNpc == null) {
+            return;
+        }
+        if (active) {
+            ACTIVE_LOG_GATHERERS.add(playerNpc);
+        } else {
+            ACTIVE_LOG_GATHERERS.remove(playerNpc);
+        }
     }
 
     private boolean isMiningOnlyLogSupply() {
@@ -1048,7 +1185,8 @@ public class GatherLogsGoal extends Goal {
 
     private boolean isSupplyLogJob() {
         return this.isMiningOnlyLogSupply()
-                || this.playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING);
+                || this.playerNpc.isDailyJobActive(PlayerNpcInterest.FISHING)
+                || this.playerNpc.isDailyJobActive(PlayerNpcInterest.FARMING);
     }
 
     private boolean tryStartPillarDescent(ServerLevel serverLevel) {
@@ -1211,7 +1349,10 @@ public class GatherLogsGoal extends Goal {
     }
 
     private boolean isValidDirtTarget(ServerLevel serverLevel, BlockPos pos) {
-        if (pos == null || this.isProtectedPillarBlock(pos) || this.isCurrentSupportBlock(pos)) {
+        if (pos == null
+                || this.isProtectedPillarBlock(pos)
+                || this.isCurrentSupportBlock(pos)
+                || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)) {
             return false;
         }
         BlockState state = serverLevel.getBlockState(pos);
@@ -1380,6 +1521,10 @@ public class GatherLogsGoal extends Goal {
         if (playerNpc == null || pos == null) {
             return false;
         }
+        if (FarmAi.isProtectedFarmBlock(playerNpc, pos)
+                || FarmAi.isProtectedFarmBlock(playerNpc, pos.below())) {
+            return true;
+        }
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
         if (home.isEmpty()) {
             return false;
@@ -1394,6 +1539,9 @@ public class GatherLogsGoal extends Goal {
     private static boolean isProtectedHomeLogTarget(PlayerNpcEntity playerNpc, BlockPos pos) {
         if (playerNpc == null || pos == null) {
             return false;
+        }
+        if (FarmAi.isProtectedFarmBlock(playerNpc, pos)) {
+            return true;
         }
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
         return home.isPresent()

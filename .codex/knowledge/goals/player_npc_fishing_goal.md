@@ -17,18 +17,20 @@ Runs the non-combat fishing job after the fisher has completed its support suppl
 - `PlayerNpcInterest.FISHING` must be the selected daily job.
 - `PlayerNpcEntity.fishingCooldown` must be `0`.
 - No upward escape target can already be active.
-- Log supply and cobblestone supply must both be satisfied: `!shouldPrioritizeLogGathering()` and `!shouldPrioritizeCobblestoneGathering()`.
 - Requires a usable fishing rod in the main hand or inventory.
+- With a usable carried rod, an active/retry-ready log or stone support attempt may run first, but a failed support search opens the shared gather-cooldown window. During that window the raw reserve does not block direct fishing or fishing-water exploration.
 - Requires a reachable local fishing spot found by the bounded water/shore scan.
 
 ## Support Flow
 
-Fishing does not skip support supplies just because the NPC has a rod. The intended order is:
+Fishing uses support supplies to bootstrap a missing rod and its stone support. The intended order is:
 
-1. Satisfy log supply through `GatherLogsGoal`.
-2. Satisfy stone supply through `GatherStoneGoal` or `DigDownForStoneGoal`.
-3. Craft or use an existing fishing rod.
+1. If the rod is missing/broken and its recipe needs wood, satisfy that demand through `GatherLogsGoal`.
+2. Satisfy stone support through `GatherStoneGoal` or `DigDownForStoneGoal`.
+3. Craft the missing rod or use an existing carried rod.
 4. Search for reachable water and fish.
+
+Fishing arbitration uses `GatherLogsGoal.isLogGatheringEpisodeActive(...)` plus the shared gather cooldown. An already selected log route keeps control until it finishes, and a retry-ready supply demand gets one attempt. If the attempt finds no actionable target and sets `gatherCooldown`, a carried rod can fish or explore for water instead of idling until that reserve is met. A genuinely missing/broken rod still blocks fishing and permits log gathering when rod crafting needs wood.
 
 `CraftBasicGearGoal` may craft a missing fishing rod after critical starter tools are handled and after the active stone-support phase has closed. Do not treat rod crafting as the blocker when the NPC already carries or holds a usable rod; then the remaining blockers are support supplies, water search, navigation, or climb/escape handling.
 
@@ -36,7 +38,9 @@ Fishing does not skip support supplies just because the NPC has a rod. The inten
 
 `findFishingSpot(...)` scans nearby surface source water within a bounded radius. A water block must have open collision above, sky visibility, and enough nearby source water for fishing. A stand position must be standable, sky-visible, within cast distance, have a clear cast ray to the water, and either already be close enough or have a completed reachable path.
 
-Water exploration is handled by the separate `ExploreAroundGoal` registration with detail `exploring for water`. That exploration starts only when `shouldExploreForFishingWater(...)` is true, so it still waits for met log supply, met cobblestone supply, and a rod. The fishing water exploration registration allows bounded upward escape and currently caps the request at 18 pillar blocks. Those exploration climb requests should only be satisfied after `EscapeHoleWithBlockGoal` reaches open-sky body space and the NPC is no longer trapped; being one block from the requested target while still under leaves is not enough.
+Water exploration is handled by the separate `ExploreAroundGoal` registration with detail `exploring for water`. That exploration starts only when `shouldExploreForFishingWater(...)` is true, so it still waits for met log supply, met cobblestone supply, and a rod. The fishing water exploration registration allows bounded upward escape and currently caps the request at 10 pillar blocks. Those exploration climb requests should only be satisfied after `EscapeHoleWithBlockGoal` reaches open-sky body space and the NPC is no longer trapped; being one block from the requested target while still under leaves is not enough.
+
+The missing-string `strolling around` registration is ordinary random walking, not water-surface recovery, and must keep `allowUpwardEscapeRequest=false`. If that stroll's current or one-second remembered navigation corridor is stopped by a physical foliage collision, `ExploreAroundGoal` may clear only the confirmed leaf/vine blocker through shared `ClearBlockAi`/`BreakingBlockAi`, then repath to the same stroll target. It does not guess nearby blocks or clear logs, and every active/retargeted blocker must stay outside saved home/build areas, owned farm protection, temporary crafting tables, and temporary pillar supports while remaining fluid-free, block-entity-free, breakable foliage. The pass is bounded to four clear starts per exploration run.
 
 ## Behavior
 
@@ -44,7 +48,7 @@ The goal temporarily equips a fishing rod from inventory if the main hand is not
 
 Continuation requires the active main-hand rod. If another behavior replaces the rod, the fishing goal ends instead of retrieving with the wrong item.
 
-When the bobber is ready, detail changes to `bite @ x y z`; after a short reaction delay, the goal retrieves. The custom bobber owns loot generation through vanilla `BuiltInLootTables.FISHING`, inserts loot into the NPC inventory, and drops overflow. The returned rod-damage value is applied to the active main-hand rod through `hurtMainHandItem(...)`.
+When the bobber is ready, detail changes to `bite @ x y z`; after a short reaction delay, the goal retrieves. The custom bobber owns loot generation through vanilla `BuiltInLootTables.FISHING` and spawns each result with vanilla-style motion toward the NPC, where normal contact pickup handles inventory insertion and overflow. The returned rod-damage value is applied to the active main-hand rod through `hurtMainHandItem(...)`.
 
 Stop discards any remaining bobber, restores the previous main-hand item after stashing or dropping the temporary rod, and sets `fishingCooldown`.
 
@@ -56,3 +60,7 @@ Stop discards any remaining bobber, restores the previous main-hand item after s
 - `hook @`
 - `bite @`
 - `exploring for water`
+- `fishing blocked: no usable carried rod`
+- `fishing blocked: log support=`
+- `fishing blocked: stone support=`
+- `fishing blocked: no reachable surface water`

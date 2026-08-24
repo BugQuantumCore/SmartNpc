@@ -21,7 +21,7 @@ Gives Player NPCs a direct stone progression path after log supply is met, witho
 
 ## Behavior
 
-The goal chooses a random surface dig site around the saved base center for building NPCs, or around the NPC's current work area for pure miners. Building sites stay at least 18 blocks away from the home center and outside the protected home area. Pure miners do not call `PlayerNpcHomeUtil.getOrCreateHome(...)` and do not persist a home as part of mining setup.
+The goal chooses a random surface dig site around the saved base center for building NPCs, or around the NPC's current work area for pure miners. Building sites stay at least 18 blocks away from the home center and outside the protected home area. Farm-support origins also stay outside the farm work/entrance footprint. Pure miners do not call `PlayerNpcHomeUtil.getOrCreateHome(...)` and do not persist a home as part of mining setup.
 
 For building NPCs, choosing the base before digging gives pathing and return-home behavior a stable destination. After building stone supply is met, the NPC should return toward the saved base instead of trying to discover a base from inside the mine. Pure miners intentionally skip this base-selection step.
 
@@ -30,6 +30,8 @@ At the dig site it carves a simple downward stair in a cardinal or diagonal hori
 Dig-down is only the opener for stone access. It must stop as soon as `GatherStoneGoal.hasNearbyStoneTarget(...)` sees actionable exposed stone, and it must not apply the normal gather cooldown in that handoff case. `GatherStoneGoal` then owns clearing remaining dirt around the stone stand and mining the connected stone cluster.
 
 Dig-site mining and dig-path clearing go through `BreakingBlockAi`, so vanilla-style hardness/tool-speed timing, tool selection, block crack progress, mining hit sounds, main-hand attack animation, durability loss, and mining sneak match the rest of the building-interest resource goals. Failed walk-to-site attempts use a short cooldown, so the NPC can reselect work instead of spending the full dig cooldown standing at an unreachable stair step.
+
+Every dig target and route-clear target is checked against home ownership plus `FarmAi`'s full buffered underground farm column. The check runs both before and after `ClearBlockAi.tick(...)`, because line-of-sight resolution may retarget a different blocker. A protected retarget is stopped and the local prospect route is recovered/reselected rather than mining beneath the farm.
 
 Mining uses vanilla-style hardness/tool timing, block crack progress, mining hit sounds, and main-hand attack animation. It stops after enough stone is collected, after a bounded number of stair steps, or after a time limit.
 
