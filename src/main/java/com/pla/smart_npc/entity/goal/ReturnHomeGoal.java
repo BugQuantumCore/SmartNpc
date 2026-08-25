@@ -10,6 +10,7 @@ import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.ItemStack;
@@ -67,6 +68,11 @@ public class ReturnHomeGoal extends Goal {
         boolean miningShelterOnly = isMiningShelterOnly(playerNpc);
         if (needsHomeSurfaceRecovery(playerNpc, serverLevel, homeArea)) {
             return true;
+        }
+        if (hasActiveSupplyRoute(playerNpc)) {
+            // A selected supply route owns movement until completion. Crossing the home work-area
+            // boundary must not turn ready build work into a higher-priority return-home loop.
+            return serverLevel.isNight() || serverLevel.isThundering();
         }
         if (miningShelterOnly && MiningNightCampGoal.shouldPauseMiningForNightCamp(playerNpc, serverLevel)) {
             return false;
@@ -129,10 +135,19 @@ public class ReturnHomeGoal extends Goal {
             return false;
         }
         this.shelterReturn = this.shouldShelterAtHome(serverLevel);
-        this.buildReturn = !miningShelterOnly && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
-        this.completedStoneTripReturn = !miningShelterOnly && shouldReturnAfterCompletedStoneTrip(this.playerNpc, serverLevel, homeArea);
         this.explorationRecoveryReturn = forcedExplorationReturn;
         this.homeSurfaceRecoveryReturn = forcedHomeSurfaceRecovery;
+        if (hasActiveSupplyRoute(this.playerNpc)
+                && !this.shelterReturn
+                && !this.explorationRecoveryReturn
+                && !this.homeSurfaceRecoveryReturn) {
+            this.utilityReturn = false;
+            this.buildReturn = false;
+            this.completedStoneTripReturn = false;
+            return false;
+        }
+        this.buildReturn = !miningShelterOnly && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
+        this.completedStoneTripReturn = !miningShelterOnly && shouldReturnAfterCompletedStoneTrip(this.playerNpc, serverLevel, homeArea);
         if (miningShelterOnly
                 && !this.shelterReturn
                 && !this.explorationRecoveryReturn
@@ -438,6 +453,16 @@ public class ReturnHomeGoal extends Goal {
         }
 
         BlockPos pos = playerNpc.blockPosition();
+        // Swimming lowers blockPosition by one block as the body bobs. Inside a home footprint
+        // that must not masquerade as an underground/home-floor failure: ReturnHome has a higher
+        // priority than gathering and would otherwise cancel a valid river crossing, request an
+        // upward escape which the water safety code clears, then repeat from the same water cell.
+        if (playerNpc.isInWaterOrBubble()
+                || serverLevel.getFluidState(pos).is(FluidTags.WATER)
+                || serverLevel.getFluidState(pos.above()).is(FluidTags.WATER)
+                || !playerNpc.onGround() && serverLevel.getFluidState(pos.below()).is(FluidTags.WATER)) {
+            return false;
+        }
         if (!PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos)) {
             return false;
         }
@@ -500,7 +525,8 @@ public class ReturnHomeGoal extends Goal {
     private boolean isProtectedHomeBlock(BlockPos pos) {
         return this.homeArea != null
                 && !this.homeSurfaceRecoveryReturn
-                && PlayerNpcHomeUtil.isInside(this.homeArea, pos);
+                && (PlayerNpcHomeUtil.isInside(this.homeArea, pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos));
     }
 
     private void requestHomeSurfaceEscape(ServerLevel serverLevel) {
@@ -583,6 +609,12 @@ public class ReturnHomeGoal extends Goal {
 
     private boolean shouldShelterAtHome(ServerLevel serverLevel) {
         return serverLevel.isNight() || serverLevel.isThundering();
+    }
+
+    private static boolean hasActiveSupplyRoute(PlayerNpcEntity playerNpc) {
+        return GatherLogsGoal.isLogGatheringEpisodeActive(playerNpc)
+                || GatherStoneGoal.isStoneGatheringEpisodeActive(playerNpc)
+                || ExploreAroundGoal.isSupplyExplorationActive(playerNpc);
     }
 
     private boolean inventoryMoreThanHalfFull() {

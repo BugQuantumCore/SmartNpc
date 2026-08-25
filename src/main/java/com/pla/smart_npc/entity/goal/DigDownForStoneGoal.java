@@ -47,6 +47,7 @@ public class DigDownForStoneGoal extends Goal {
     private static final int MINING_PROSPECT_COOLDOWN_TICKS = 20;
     private static final int FISHING_SUPPORT_RETRY_COOLDOWN_TICKS = 20;
     private static final int ORE_SEARCH_INTERVAL_TICKS = 20 * 2;
+    private static final int CAVE_CHECK_INTERVAL_TICKS = 20;
     private static final int MAX_DIG_SITE_WALK_TICKS = 20 * 25;
     private static final int LOCAL_PROSPECT_STUCK_TICKS = 20 * 2;
     private static final int LOCAL_PROSPECT_CLEAR_STUCK_TICKS = 20 * 3;
@@ -74,6 +75,7 @@ public class DigDownForStoneGoal extends Goal {
     private int stoneBlocksMined;
     private int stoneBlocksNeeded;
     private int nextProspectCheckTick;
+    private int nextCaveCheckTick;
     private int oreSearchTicks;
     private int localProspectStillTicks;
     private int activeClearTargetTicks;
@@ -241,6 +243,7 @@ public class DigDownForStoneGoal extends Goal {
         this.stairSteps = 0;
         this.stoneBlocksMined = 0;
         this.oreSearchTicks = ORE_SEARCH_INTERVAL_TICKS;
+        this.nextCaveCheckTick = 0;
         this.activeClearTargetTicks = 0;
         this.stoneBlocksNeeded = GatherStoneGoal.isMiningJobActive(this.playerNpc)
                 ? MINING_JOB_DIG_BLOCKS
@@ -276,6 +279,23 @@ public class DigDownForStoneGoal extends Goal {
         }
 
         this.goalTicks++;
+        if (this.prospectingOre
+                && this.targetPos == null
+                && this.playerNpc.tickCount >= this.nextCaveCheckTick
+                && MiningCaveStrollGoal.hasLongTraversableCave(this.playerNpc, serverLevel)) {
+            this.foundGatherStoneTarget = true;
+            this.finish("reached cave");
+            this.clearBlockAi.stop();
+            this.breakingBlockAi.stop();
+            this.playerNpc.getNavigation().stop();
+            this.playerNpc.setCurrentAiDetail("cave found for exploration");
+            return;
+        }
+        if (this.prospectingOre
+                && this.targetPos == null
+                && this.playerNpc.tickCount >= this.nextCaveCheckTick) {
+            this.nextCaveCheckTick = this.playerNpc.tickCount + CAVE_CHECK_INTERVAL_TICKS;
+        }
         if (this.shouldYieldToHigherPriorityMiningTarget(serverLevel)) {
             this.foundGatherStoneTarget = true;
             this.finish(this.prospectingOre ? "yielded to ore target" : "yielded to stone target");
@@ -306,7 +326,7 @@ public class DigDownForStoneGoal extends Goal {
             if (this.tryMoveToLocalProspectingOrigin(serverLevel)) {
                 return;
             }
-            if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            if (this.repathTicks-- <= 0) {
                 if (!this.moveTo(serverLevel, this.digOrigin)) {
                     if (this.prospectingOre) {
                         if (!this.startClearingDigRoute(serverLevel)) {
@@ -375,6 +395,7 @@ public class DigDownForStoneGoal extends Goal {
         this.digSiteWalkTicks = 0;
         this.stairSteps = 0;
         this.oreSearchTicks = 0;
+        this.nextCaveCheckTick = 0;
         this.localProspectStillTicks = 0;
         this.activeClearTargetTicks = 0;
         this.minedStone = false;
@@ -997,7 +1018,8 @@ public class DigDownForStoneGoal extends Goal {
         if (GatherStoneGoal.isMiningJobActive(this.playerNpc)
                 && !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
                 || GatherStoneGoal.isFishingSupportJob(this.playerNpc)
-                || GatherStoneGoal.isFarmingSupportJob(this.playerNpc)) {
+                || GatherStoneGoal.isFarmingSupportJob(this.playerNpc)
+                || GatherStoneGoal.isExploringSupplyJob(this.playerNpc)) {
             return true;
         }
 

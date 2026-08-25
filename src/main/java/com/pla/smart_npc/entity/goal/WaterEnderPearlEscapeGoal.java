@@ -18,8 +18,14 @@ import java.util.EnumSet;
 public class WaterEnderPearlEscapeGoal extends Goal {
     private static final int SEARCH_RADIUS = 24;
     private static final double MAX_TARGET_DISTANCE_SQR = SEARCH_RADIUS * SEARCH_RADIUS;
+    private static final int SEARCH_INTERVAL_TICKS = 40;
+    private static final int LANDING_HORIZONTAL_SAMPLES = 32;
+    private static final int LANDING_SCAN_DOWN = 6;
+    private static final int LANDING_SCAN_UP = 8;
+    private static final double GOLDEN_ANGLE_RADIANS = Math.PI * (3.0D - Math.sqrt(5.0D));
 
     private final PlayerNpcEntity playerNpc;
+    private final CanUseThrottle searchThrottle = new CanUseThrottle(SEARCH_INTERVAL_TICKS);
     private Vec3 pearlTarget;
 
     public WaterEnderPearlEscapeGoal(PlayerNpcEntity playerNpc) {
@@ -37,6 +43,9 @@ public class WaterEnderPearlEscapeGoal extends Goal {
                 || !this.playerNpc.isInWaterOrBubble()
                 || this.playerNpc.getEnderPearlCooldown() > 0
                 || !InventoryUtils.hasItem(this.playerNpc, Items.ENDER_PEARL)) {
+            return false;
+        }
+        if (!this.searchThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
@@ -91,17 +100,29 @@ public class WaterEnderPearlEscapeGoal extends Goal {
         Vec3 best = null;
         double bestDistanceSqr = Double.MAX_VALUE;
 
-        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-SEARCH_RADIUS, -6, -SEARCH_RADIUS), center.offset(SEARCH_RADIUS, 8, SEARCH_RADIUS))) {
-            BlockPos standPos = pos.immutable();
-            if (!this.canStand(serverLevel, standPos)) {
-                continue;
-            }
+        // The old cuboid search checked 49 * 49 * 15 = 36,015 blocks every time this
+        // goal was considered. Failed canUse checks are absent from running-goal traces, so
+        // those server-thread stalls looked unrelated to the NPC. Keep a strict 480-block cap.
+        double phase = this.playerNpc.getRandom().nextDouble() * Math.PI * 2.0D;
+        for (int sample = 0; sample < LANDING_HORIZONTAL_SAMPLES; sample++) {
+            double fraction = (sample + 0.5D) / LANDING_HORIZONTAL_SAMPLES;
+            double radius = 2.0D + Math.sqrt(fraction) * (SEARCH_RADIUS - 2.0D);
+            double angle = phase + sample * GOLDEN_ANGLE_RADIANS;
+            int x = center.getX() + (int) Math.round(Math.cos(angle) * radius);
+            int z = center.getZ() + (int) Math.round(Math.sin(angle) * radius);
 
-            Vec3 landing = Vec3.atBottomCenterOf(standPos);
-            double distanceSqr = this.playerNpc.position().distanceToSqr(landing);
-            if (distanceSqr <= MAX_TARGET_DISTANCE_SQR && distanceSqr < bestDistanceSqr) {
-                best = landing.add(0.0D, 0.1D, 0.0D);
-                bestDistanceSqr = distanceSqr;
+            for (int dy = LANDING_SCAN_UP; dy >= -LANDING_SCAN_DOWN; dy--) {
+                BlockPos standPos = new BlockPos(x, center.getY() + dy, z);
+                if (!serverLevel.hasChunkAt(standPos) || !this.canStand(serverLevel, standPos)) {
+                    continue;
+                }
+
+                Vec3 landing = Vec3.atBottomCenterOf(standPos);
+                double distanceSqr = this.playerNpc.position().distanceToSqr(landing);
+                if (distanceSqr <= MAX_TARGET_DISTANCE_SQR && distanceSqr < bestDistanceSqr) {
+                    best = landing.add(0.0D, 0.1D, 0.0D);
+                    bestDistanceSqr = distanceSqr;
+                }
             }
         }
 

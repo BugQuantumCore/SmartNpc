@@ -134,6 +134,19 @@ public final class PathNavigationAi {
         return this.lastMoveFailureDetail;
     }
 
+    /**
+     * Ticks destination-aware swimming on goal ticks between normal repath attempts. Goals with
+     * long repath intervals must call this before their ordinary movement/helper logic so FloatGoal
+     * can provide buoyancy while this helper preserves the same work destination.
+     */
+    public boolean tickWaterTravel(ServerLevel serverLevel, BlockPos target, double speed) {
+        return this.escapeWaterIfNeeded(serverLevel, target, speed);
+    }
+
+    public void stopWaterTravel() {
+        this.waterEscapeAi.stop();
+    }
+
     private boolean escapeWaterIfNeeded(ServerLevel serverLevel, BlockPos target, double speed) {
         WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(
                 serverLevel,
@@ -151,9 +164,17 @@ public final class PathNavigationAi {
     }
 
     public boolean canReachOrSafelyDropTo(ServerLevel serverLevel, BlockPos target, int maxSafeDrop) {
+        if (!serverLevel.hasChunkAt(target)) {
+            return false;
+        }
         Path path = this.playerNpc.getNavigation().createPath(target, 0);
         return this.isValidPathTo(target, path)
-                || this.findSafeDropStep(serverLevel, this.playerNpc.blockPosition(), target, maxSafeDrop) != null;
+                || this.canSafelyDropTo(serverLevel, target, maxSafeDrop);
+    }
+
+    public boolean canSafelyDropTo(ServerLevel serverLevel, BlockPos target, int maxSafeDrop) {
+        return serverLevel.hasChunkAt(target)
+                && this.findSafeDropStep(serverLevel, this.playerNpc.blockPosition(), target, maxSafeDrop) != null;
     }
 
     public Optional<BlockPos> findReachableRandomizedCandidate(
@@ -381,7 +402,9 @@ public final class PathNavigationAi {
     }
 
     public static boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
-        if (!serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+        if (!serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.hasChunkAt(pos)) {
             return false;
         }
         return serverLevel.getBlockState(pos).getCollisionShape(serverLevel, pos).isEmpty()

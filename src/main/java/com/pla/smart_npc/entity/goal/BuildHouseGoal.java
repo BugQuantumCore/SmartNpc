@@ -71,6 +71,8 @@ public class BuildHouseGoal extends Goal {
     private static final int MAX_SAME_PLACEMENT_TICKS = 20 * 8;
     private static final int MAX_PLACEMENT_ATTEMPTS = 4;
     private static final int MAX_UNREACHABLE_BUILD_TARGET_TICKS = 20 * 4;
+    private static final int BUILD_ROUTE_REPATH_TICKS = 20;
+    private static final int BUILD_ROUTE_NO_PROGRESS_TICKS = 20 * 3;
     private static final int CRAFT_ROUTE_CLEAR_TRIGGER_TICKS = 20;
     private static final int CRAFT_ROUTE_NO_PROGRESS_TICKS = 20 * 3;
     private static final int CRAFT_ROUTE_CLEAR_TICKS = 24;
@@ -130,6 +132,10 @@ public class BuildHouseGoal extends Goal {
     private int nextBuildMotionTick;
     private BlockPos unreachableBuildTargetPos;
     private int unreachableBuildTargetTicks;
+    private BlockPos buildRouteTarget;
+    private BlockPos buildRouteLastProgressPos;
+    private int buildRouteRepathTicks;
+    private int buildRouteNoProgressTicks;
     private BlockPos craftApproachTarget;
     private BlockPos craftRouteTablePos;
     private BlockPos craftRouteRequestedPos;
@@ -457,6 +463,7 @@ public class BuildHouseGoal extends Goal {
         this.placementAttempts = 0;
         this.nextBuildMotionTick = 0;
         this.clearUnreachableBuildTarget();
+        this.resetBuildRoute();
         this.stopCraftRouteClear();
         this.resetCraftRouteProgress();
         this.skippedCraftRouteClearTargets.clear();
@@ -622,6 +629,7 @@ public class BuildHouseGoal extends Goal {
         this.placementAttempts = 0;
         this.nextBuildMotionTick = 0;
         this.clearUnreachableBuildTarget();
+        this.resetBuildRoute();
         this.resetCraftRouteProgress();
         this.skippedCraftRouteClearTargets.clear();
         this.placingBlockAi.resetDelay();
@@ -1068,6 +1076,7 @@ public class BuildHouseGoal extends Goal {
         this.cachedCraftingBlock = null;
         this.cachedCraftingNeeded = false;
         this.clearUnreachableBuildTarget();
+        this.resetBuildRoute();
         if (!this.craftRouteClearBlockAi.isRunning()) {
             this.resetCraftRouteProgress();
             this.skippedCraftRouteClearTargets.clear();
@@ -1598,15 +1607,58 @@ public class BuildHouseGoal extends Goal {
     }
 
     private void moveTowardBuildTarget(BlockPos target, PlayerNpcBuildLayout.RelativeBlock block, String stage) {
+        boolean newRouteTarget = !target.equals(this.buildRouteTarget);
+        if (newRouteTarget) {
+            this.buildRouteTarget = target.immutable();
+            this.buildRouteLastProgressPos = this.playerNpc.blockPosition().immutable();
+            this.buildRouteRepathTicks = 0;
+            this.buildRouteNoProgressTicks = 0;
+        } else {
+            BlockPos currentPos = this.playerNpc.blockPosition();
+            if (!currentPos.equals(this.buildRouteLastProgressPos)) {
+                this.buildRouteLastProgressPos = currentPos.immutable();
+                this.buildRouteNoProgressTicks = 0;
+                this.clearUnreachableBuildTarget();
+            } else {
+                this.buildRouteNoProgressTicks++;
+            }
+        }
+
+        if (this.buildRouteRepathTicks > 0) {
+            this.buildRouteRepathTicks--;
+        }
+        boolean navigationActive = !this.playerNpc.getNavigation().isDone()
+                && !this.playerNpc.getNavigation().isStuck();
+        if (!newRouteTarget
+                && navigationActive
+                && this.buildRouteNoProgressTicks < BUILD_ROUTE_NO_PROGRESS_TICKS) {
+            // Reissuing moveTo(x, y, z) creates a fresh path. Keep the current usable path instead
+            // of rebuilding it every tick while the builder is still making progress.
+            this.updateTaskDetail(stage, block);
+            return;
+        }
+        if (this.buildRouteRepathTicks > 0) {
+            this.trackUnreachableBuildTarget(target);
+            if (this.unreachableBuildTargetTicks >= MAX_UNREACHABLE_BUILD_TARGET_TICKS) {
+                this.deferBlockedPlacement(block);
+                this.updateTaskDetail("deferred unreachable", block);
+                return;
+            }
+            this.updateTaskDetail(stage, block);
+            return;
+        }
+
         boolean moving = this.playerNpc.getNavigation().moveTo(
                 target.getX() + 0.5D,
                 target.getY(),
                 target.getZ() + 0.5D,
                 1.0D
         );
+        this.buildRouteRepathTicks = BUILD_ROUTE_REPATH_TICKS;
         if (moving
                 && !this.playerNpc.getNavigation().isDone()
-                && !this.playerNpc.getNavigation().isStuck()) {
+                && !this.playerNpc.getNavigation().isStuck()
+                && this.buildRouteNoProgressTicks < BUILD_ROUTE_NO_PROGRESS_TICKS) {
             this.clearUnreachableBuildTarget();
             this.updateTaskDetail(stage, block);
             return;
@@ -1639,6 +1691,13 @@ public class BuildHouseGoal extends Goal {
     private void clearUnreachableBuildTarget() {
         this.unreachableBuildTargetPos = null;
         this.unreachableBuildTargetTicks = 0;
+    }
+
+    private void resetBuildRoute() {
+        this.buildRouteTarget = null;
+        this.buildRouteLastProgressPos = null;
+        this.buildRouteRepathTicks = 0;
+        this.buildRouteNoProgressTicks = 0;
     }
 
     private boolean isInsideBuildWorkArea(PlayerNpcHomeUtil.HomeArea homeArea) {

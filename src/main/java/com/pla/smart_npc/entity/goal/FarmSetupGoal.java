@@ -136,6 +136,7 @@ public final class FarmSetupGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
+                || this.playerNpc.isInWaterOrBubble()
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
                 || serverLevel.isNight()
@@ -324,6 +325,7 @@ public final class FarmSetupGoal extends Goal {
                 && !this.playerNpc.isPassenger()
                 && !this.playerNpc.isHealing()
                 && this.playerNpc.getTarget() == null
+                && !this.playerNpc.isInWaterOrBubble()
                 && this.playerNpc.getUpwardEscapeTarget() == null;
     }
 
@@ -821,10 +823,7 @@ public final class FarmSetupGoal extends Goal {
         } else {
             this.routeFailureTicks++;
         }
-        boolean navigationFailed = this.playerNpc.getNavigation().isDone()
-                || this.playerNpc.getNavigation().isStuck()
-                || this.playerNpc.getNavigation().getPath() == null;
-        if (this.standPos != null && (this.repathTicks-- <= 0 || navigationFailed)) {
+        if (this.standPos != null && this.repathTicks-- <= 0) {
             this.moveToStand(serverLevel);
             this.repathTicks = REPATH_INTERVAL_TICKS;
         }

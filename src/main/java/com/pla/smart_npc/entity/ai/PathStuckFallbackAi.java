@@ -107,6 +107,39 @@ public final class PathStuckFallbackAi {
             String detailPrefix,
             Predicate<BlockPos> avoidedStand
     ) {
+        return this.watchAndStartInternal(
+                serverLevel,
+                routeTarget,
+                directionTarget,
+                detailPrefix,
+                avoidedStand,
+                true);
+    }
+
+    public boolean watchAndStartWhileNavigating(
+            ServerLevel serverLevel,
+            BlockPos routeTarget,
+            BlockPos directionTarget,
+            String detailPrefix,
+            Predicate<BlockPos> avoidedStand
+    ) {
+        return this.watchAndStartInternal(
+                serverLevel,
+                routeTarget,
+                directionTarget,
+                detailPrefix,
+                avoidedStand,
+                false);
+    }
+
+    private boolean watchAndStartInternal(
+            ServerLevel serverLevel,
+            BlockPos routeTarget,
+            BlockPos directionTarget,
+            String detailPrefix,
+            Predicate<BlockPos> avoidedStand,
+            boolean requireStoppedNavigation
+    ) {
         if (this.tick(serverLevel, detailPrefix)) {
             return true;
         }
@@ -114,7 +147,9 @@ public final class PathStuckFallbackAi {
             this.resetWatch();
             return false;
         }
-        if (!this.playerNpc.getNavigation().isDone() && !this.playerNpc.getNavigation().isStuck()) {
+        if (requireStoppedNavigation
+                && !this.playerNpc.getNavigation().isDone()
+                && !this.playerNpc.getNavigation().isStuck()) {
             this.resetWatch();
             return false;
         }
@@ -182,6 +217,10 @@ public final class PathStuckFallbackAi {
 
                 int x = feet.getX() + dx;
                 int z = feet.getZ() + dz;
+                BlockPos loadedColumn = new BlockPos(x, feet.getY(), z);
+                if (!serverLevel.hasChunkAt(loadedColumn)) {
+                    continue;
+                }
                 int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
                 int fall = feet.getY() - y;
                 if (fall < 0 || fall > DEFAULT_MAX_FALL) {
@@ -256,6 +295,9 @@ public final class PathStuckFallbackAi {
     }
 
     private boolean hasOpenBodySpace(ServerLevel serverLevel, BlockPos pos) {
+        if (!serverLevel.hasChunkAt(pos) || !serverLevel.hasChunkAt(pos.above())) {
+            return false;
+        }
         BlockState feetState = serverLevel.getBlockState(pos);
         BlockState headState = serverLevel.getBlockState(pos.above());
         return feetState.getCollisionShape(serverLevel, pos).isEmpty()

@@ -24,8 +24,10 @@ import java.util.EnumSet;
 public class CraftIronGearGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 10;
     private static final int CRAFTING_TABLE_SCAN_RADIUS = 5;
+    private static final int CAN_USE_CHECK_INTERVAL_TICKS = 40;
 
     private final PlayerNpcEntity playerNpc;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(CAN_USE_CHECK_INTERVAL_TICKS);
 
     public CraftIronGearGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -40,7 +42,10 @@ public class CraftIronGearGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.getIronGearCooldown() > 0
+                || this.playerNpc.getIronGearCooldown() > 0) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)
                 || !this.hasNearbyCraftingTable(serverLevel)) {
             return false;
         }

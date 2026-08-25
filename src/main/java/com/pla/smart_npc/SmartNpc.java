@@ -5,6 +5,7 @@ import com.pla.smart_npc.client.SmartNpcClientItemProperties;
 import com.pla.smart_npc.client.gui.InventoryViewerScreen;
 import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.config.SmartNpcConfig;
+import com.pla.smart_npc.config.SmartNpcNamesConfig;
 import com.pla.smart_npc.event.NpcGearLoadEvent;
 import com.pla.smart_npc.init.SmartNpcModCreativeTabs;
 import com.pla.smart_npc.init.SmartNpcModEntities;
@@ -49,7 +50,10 @@ public class SmartNpc {
         biomeModifiers.register("player_npc_spawns", PlayerNpcMobSpawnBiomeModifier::makeCodec);
 
         MinecraftForge.EVENT_BUS.register(new NpcGearLoadEvent());
+        modEventBus.addListener(SmartNpcNamesConfig::onConfigLoading);
+        modEventBus.addListener(SmartNpcNamesConfig::onConfigReloading);
         context.registerConfig(ModConfig.Type.COMMON, SmartNpcConfig.SPEC, "smart_npc-server.toml");
+        context.registerConfig(ModConfig.Type.COMMON, SmartNpcNamesConfig.SPEC, "smart_npc-names.toml");
         EpicFightCompat.registerModEventHandlers(modEventBus);
 
         if (FMLEnvironment.dist.isClient()) {

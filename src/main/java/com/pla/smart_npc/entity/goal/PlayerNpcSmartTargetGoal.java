@@ -29,7 +29,6 @@ import javax.annotation.Nullable;
 import java.util.EnumSet;
 
 public class PlayerNpcSmartTargetGoal extends TargetGoal {
-    private static final int SCAN_INTERVAL_TICKS = 20;
     private static final double STRONGER_TARGET_MARGIN = 7.0D;
     private static final double HEALTHY_RATIO = 0.55D;
     private static final float RARE_PLAYER_ATTACK_CHANCE = 0.08F;
@@ -37,6 +36,7 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
 
     private final PlayerNpcEntity playerNpc;
     private final TargetingConditions targetConditions;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     @Nullable
     private LivingEntity nextTarget;
     private String nextState = PlayerNpcEntity.AI_IDLE;
@@ -66,8 +66,7 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
                 this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
             }
         }
-
-        if (this.playerNpc.tickCount % SCAN_INTERVAL_TICKS != 0) {
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 

@@ -16,9 +16,11 @@ import java.util.EnumSet;
 public class PlantSaplingGoal extends Goal {
     private static final int SEARCH_RADIUS = 8;
     private static final int COOLDOWN_TICKS = 20 * 25;
+    private static final int CAN_USE_CHECK_INTERVAL_TICKS = 40;
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(CAN_USE_CHECK_INTERVAL_TICKS);
     private BlockPos plantPos;
     private ItemStack saplingStack = ItemStack.EMPTY;
 
@@ -38,6 +40,9 @@ public class PlantSaplingGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getSaplingPlantCooldown() > 0
                 || !InventoryUtils.hasItem(this.playerNpc, stack -> stack.is(ItemTags.SAPLINGS) && stack.getItem() instanceof BlockItem)) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 

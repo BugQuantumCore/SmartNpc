@@ -20,9 +20,11 @@ public class UtilityCraftingGoal extends Goal {
     private static final int WATER_SCAN_RADIUS = 7;
     private static final int COOLDOWN_TICKS = 180;
     private static final int MIN_ARROW_COUNT = 16;
+    private static final int CAN_USE_CHECK_INTERVAL_TICKS = 40;
 
     private final PlayerNpcEntity playerNpc;
     private final CraftingAi craftingAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(CAN_USE_CHECK_INTERVAL_TICKS);
     private CraftAction action = CraftAction.NONE;
 
     public UtilityCraftingGoal(PlayerNpcEntity playerNpc) {
@@ -40,6 +42,9 @@ public class UtilityCraftingGoal extends Goal {
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getCraftCooldown() > 0) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 

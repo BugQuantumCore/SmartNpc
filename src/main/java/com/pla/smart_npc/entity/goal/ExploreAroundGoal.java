@@ -23,6 +23,7 @@ import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -34,6 +35,7 @@ import java.util.function.Predicate;
 
 public class ExploreAroundGoal extends Goal {
     private static final String LOG_EXPLORATION_DETAIL = "exploring for logs";
+    private static final String STONE_EXPLORATION_DETAIL = "exploring for stone";
     private static final int[][] SEARCH_DISTANCE_BANDS = {
             {32, 48},
             {24, 32},
@@ -61,7 +63,7 @@ public class ExploreAroundGoal extends Goal {
     private static final int BUILDING_LOG_LOCAL_SURFACE_RADIUS = 18;
     private static final int BUILDING_LOG_LOCAL_SURFACE_MIN_RADIUS = 4;
     private static final int BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL = 10;
-    private static final int BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS = 24;
+    private static final int BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS = 8;
     private static final int RETURN_HOME_REQUEST_TICKS = 20 * 120;
     private static final int RETURN_HOME_RETRY_COOLDOWN_TICKS = 20 * 15;
     private static final int MAX_LOCAL_ESCAPE_PATH_CHECKS = 6;
@@ -85,6 +87,7 @@ public class ExploreAroundGoal extends Goal {
     private static final double ARRIVAL_DISTANCE_SQR = 3.0D * 3.0D;
     private static final Map<PlayerNpcEntity, FailedClimbFallbackRequest> FAILED_CLIMB_FALLBACK_REQUESTS = new WeakHashMap<>();
     private static final Map<PlayerNpcEntity, ExplorationClimbOwner> EXPLORATION_CLIMB_OWNERS = new WeakHashMap<>();
+    private static final Set<PlayerNpcEntity> ACTIVE_SUPPLY_EXPLORERS = Collections.newSetFromMap(new WeakHashMap<>());
 
     private final PlayerNpcEntity playerNpc;
     private final PathNavigationAi pathNavigationAi;
@@ -189,6 +192,10 @@ public class ExploreAroundGoal extends Goal {
         this.stopForHomeNow = stopForHomeNow;
         this.continueAcrossReachedTargets = continueAcrossReachedTargets;
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
+    }
+
+    public static boolean isSupplyExplorationActive(PlayerNpcEntity playerNpc) {
+        return playerNpc != null && ACTIVE_SUPPLY_EXPLORERS.contains(playerNpc);
     }
 
     public static void requestSafeWalkAfterFailedClimb(PlayerNpcEntity playerNpc, BlockPos failedTarget) {
@@ -310,6 +317,9 @@ public class ExploreAroundGoal extends Goal {
 
     @Override
     public void start() {
+        if (LOG_EXPLORATION_DETAIL.equals(this.detail) || STONE_EXPLORATION_DETAIL.equals(this.detail)) {
+            ACTIVE_SUPPLY_EXPLORERS.add(this.playerNpc);
+        }
         this.exploreTicks = 0;
         this.repathTicks = 0;
         this.routeFoliageClearBlockAi.stop();
@@ -356,6 +366,10 @@ public class ExploreAroundGoal extends Goal {
             return;
         }
 
+        if (this.pathNavigationAi.tickWaterTravel(serverLevel, this.targetPos, this.speed)) {
+            return;
+        }
+
         if (this.forcedDropTargetPos != null) {
             this.tickMiningLogColumnDrop(serverLevel);
             return;
@@ -372,8 +386,11 @@ public class ExploreAroundGoal extends Goal {
         }
 
         this.rememberCurrentNavigationRoute();
-        if ((this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck())
+        boolean shouldRepath = this.repathTicks-- <= 0;
+        if (shouldRepath
+                && (this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck())
                 && this.tryStartRouteFoliageClear(serverLevel, true)) {
+            this.repathTicks = REPATH_INTERVAL_TICKS;
             return;
         }
 
@@ -385,7 +402,7 @@ public class ExploreAroundGoal extends Goal {
                 30.0F,
                 30.0F
         );
-        if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+        if (shouldRepath) {
             this.moveToTarget(serverLevel);
             this.repathTicks = REPATH_INTERVAL_TICKS;
         }
@@ -393,6 +410,7 @@ public class ExploreAroundGoal extends Goal {
 
     @Override
     public void stop() {
+        ACTIVE_SUPPLY_EXPLORERS.remove(this.playerNpc);
         this.targetPos = null;
         this.exploreTicks = 0;
         this.repathTicks = 0;
@@ -412,6 +430,7 @@ public class ExploreAroundGoal extends Goal {
         this.stopExplorationSprint();
         this.clearForcedDrop();
         this.pathStuckFallbackAi.stop();
+        this.pathNavigationAi.stopWaterTravel();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
     }
@@ -425,6 +444,9 @@ public class ExploreAroundGoal extends Goal {
             int distance = this.randomDistanceInBand(band[0], band[1]);
             int x = center.getX() + (int) Math.round(Math.cos(angle) * distance);
             int z = center.getZ() + (int) Math.round(Math.sin(angle) * distance);
+            if (!isColumnLoaded(serverLevel, x, z)) {
+                continue;
+            }
             int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
             BlockPos candidate = new BlockPos(x, y, z);
             if (!this.isSafeExploreTarget(serverLevel, center, candidate)) {
@@ -434,7 +456,7 @@ public class ExploreAroundGoal extends Goal {
             Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
             if (waterTravel
                     || this.pathNavigationAi.isValidPathTo(candidate, path)
-                    || this.pathNavigationAi.canReachOrSafelyDropTo(serverLevel, candidate, MAX_EXPLORE_SAFE_DROP_BLOCKS)) {
+                    || this.pathNavigationAi.canSafelyDropTo(serverLevel, candidate, MAX_EXPLORE_SAFE_DROP_BLOCKS)) {
                 this.searchRadiusIndex = 0;
                 this.nextSearchTick = 0;
                 return candidate.immutable();
@@ -467,6 +489,9 @@ public class ExploreAroundGoal extends Goal {
 
                 int x = center.getX() + dx;
                 int z = center.getZ() + dz;
+                if (!isColumnLoaded(serverLevel, x, z)) {
+                    continue;
+                }
                 int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
                 BlockPos candidate = new BlockPos(x, y, z);
                 if (PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)
@@ -1028,6 +1053,9 @@ public class ExploreAroundGoal extends Goal {
 
                 int x = feet.getX() + dx;
                 int z = feet.getZ() + dz;
+                if (!isColumnLoaded(serverLevel, x, z)) {
+                    continue;
+                }
                 int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
                 int fall = feet.getY() - y;
                 if (fall <= 0 || fall > MINING_LOG_COLUMN_DROP_MAX_FALL) {
@@ -1185,6 +1213,9 @@ public class ExploreAroundGoal extends Goal {
 
                 int x = feet.getX() + dx;
                 int z = feet.getZ() + dz;
+                if (!isColumnLoaded(serverLevel, x, z)) {
+                    continue;
+                }
                 int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
                 int climb = y - feet.getY();
                 if (climb <= 0 || climb > MAX_EXPLORE_PILLAR_BLOCKS) {
@@ -1291,6 +1322,10 @@ public class ExploreAroundGoal extends Goal {
 
     private static String posText(BlockPos pos) {
         return pos.getX() + " " + pos.getY() + " " + pos.getZ();
+    }
+
+    private static boolean isColumnLoaded(ServerLevel serverLevel, int blockX, int blockZ) {
+        return serverLevel.hasChunk(blockX >> 4, blockZ >> 4);
     }
 
     private int randomDistanceInBand(int minInclusive, int maxInclusive) {

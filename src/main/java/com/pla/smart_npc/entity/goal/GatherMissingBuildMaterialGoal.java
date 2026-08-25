@@ -225,7 +225,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 this.finishGathering();
                 return;
             }
-            if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            if (this.repathTicks-- <= 0) {
                 this.pathNavigationAi.moveTo(serverLevel, this.standPos, this.speed, 3);
                 this.repathTicks = REPATH_INTERVAL_TICKS;
             }
@@ -280,7 +280,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
 
         this.playerNpc.getLookControl().setLookAt(this.sheepTarget, 35.0F, 35.0F);
         if (this.playerNpc.distanceToSqr(this.sheepTarget) > SHEEP_ATTACK_DISTANCE_SQR) {
-            if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            if (this.repathTicks-- <= 0) {
                 if (this.moveTowardSheep(serverLevel)) {
                     this.repathTicks = REPATH_INTERVAL_TICKS;
                     return;

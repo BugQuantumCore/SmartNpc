@@ -8,8 +8,10 @@ import net.minecraft.world.level.block.state.BlockState;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
@@ -19,6 +21,7 @@ public final class TreeAi {
     private static final int MAX_LOGS = 96;
     private static final int MIN_LEAVES = 3;
     private static final int LEAF_RADIUS = 4;
+    private static final Map<Integer, List<ColumnOffset>> SEARCH_COLUMNS_BY_RADIUS = new HashMap<>();
 
     private TreeAi() {
     }
@@ -34,26 +37,52 @@ public final class TreeAi {
         double bestTreeDistance = Double.MAX_VALUE;
         double bestLooseLogDistance = Double.MAX_VALUE;
 
-        for (BlockPos mutable : BlockPos.betweenClosed(
-                center.offset(-radius, -6, -radius),
-                center.offset(radius, 18, radius))) {
-            BlockPos pos = mutable.immutable();
-            if (visited.contains(pos) || !isLog(serverLevel, pos, allowedLogPos)) {
-                continue;
+        // Search columns nearest-first. Once a real tree exists, an unvisited column whose
+        // horizontal lower-bound already exceeds that tree's full squared distance cannot contain
+        // a closer stump. The previous cuboid traversal always read every block in the full
+        // 65x25x65 volume even when a tree stood across a small river.
+        for (ColumnOffset offset : searchColumns(radius)) {
+            if (bestTree != null && offset.distanceSqr() > bestTreeDistance) {
+                break;
             }
+            for (int dy = -6; dy <= 18; dy++) {
+                BlockPos pos = center.offset(offset.dx(), dy, offset.dz());
+                if (visited.contains(pos) || !isLog(serverLevel, pos, allowedLogPos)) {
+                    continue;
+                }
 
-            Tree candidate = scan(serverLevel, pos, visited, allowedLogPos);
-            double distance = candidate.stump().distSqr(center);
-            if (candidate.isTree() && distance < bestTreeDistance) {
-                bestTree = candidate;
-                bestTreeDistance = distance;
-            } else if (!candidate.isTree() && distance < bestLooseLogDistance) {
-                bestLooseLog = candidate;
-                bestLooseLogDistance = distance;
+                Tree candidate = scan(serverLevel, pos, visited, allowedLogPos);
+                double distance = candidate.stump().distSqr(center);
+                if (candidate.isTree() && distance < bestTreeDistance) {
+                    bestTree = candidate;
+                    bestTreeDistance = distance;
+                } else if (!candidate.isTree() && distance < bestLooseLogDistance) {
+                    bestLooseLog = candidate;
+                    bestLooseLogDistance = distance;
+                }
             }
         }
 
         return Optional.ofNullable(bestTree != null ? bestTree : bestLooseLog);
+    }
+
+    private static List<ColumnOffset> searchColumns(int radius) {
+        int safeRadius = Math.max(0, radius);
+        synchronized (SEARCH_COLUMNS_BY_RADIUS) {
+            return SEARCH_COLUMNS_BY_RADIUS.computeIfAbsent(safeRadius, value -> {
+                List<ColumnOffset> offsets = new ArrayList<>((value * 2 + 1) * (value * 2 + 1));
+                for (int dx = -value; dx <= value; dx++) {
+                    for (int dz = -value; dz <= value; dz++) {
+                        offsets.add(new ColumnOffset(dx, dz, dx * dx + dz * dz));
+                    }
+                }
+                offsets.sort(Comparator
+                        .comparingInt(ColumnOffset::distanceSqr)
+                        .thenComparingInt(ColumnOffset::dx)
+                        .thenComparingInt(ColumnOffset::dz));
+                return List.copyOf(offsets);
+            });
+        }
     }
 
     private static Tree scan(ServerLevel serverLevel, BlockPos start, Set<BlockPos> globalVisited, Predicate<BlockPos> allowedLogPos) {
@@ -113,6 +142,9 @@ public final class TreeAi {
     private static boolean isLog(ServerLevel serverLevel, BlockPos pos, Predicate<BlockPos> allowedLogPos) {
         BlockState state = serverLevel.getBlockState(pos);
         return state.is(BlockTags.LOGS) && allowedLogPos.test(pos);
+    }
+
+    private record ColumnOffset(int dx, int dz, int distanceSqr) {
     }
 
     public static final class Tree {

@@ -60,16 +60,18 @@ Examples:
 - `BUILDING`: choose/save base, gather build logs/stone/materials, terraform, build house, manage home, return home, sleep at home.
 - `FISHING`: fishing and boat stockpiling.
 - `MINING`: mining supply progression, cave-adjacent ore mining, cave path clearing, torch placement in caves, and temporary furnace support for ore smelting. A pure miner gathers logs first, then stone, then searches coal/iron/gold/copper ore; it must not choose or create a house.
-- `FARMING`: staged owned-farm setup (logs, site, stone, irrigation, fence/gate, hoe/tilling), crop/seed acquisition, planting, harvesting, crop food crafting, pure-farmer night camping around the owned gate/path, charcoal furnace support, and bounded fence lighting. A combined BUILDING + FARMING NPC finishes its strict home/build prep before farming can become active and returns to its home instead of starting an outdoor farm camp.
+- `FARMING`: staged owned-farm setup (logs, site, stone, irrigation, fence/gate, hoe/tilling), crop/seed acquisition, planting, harvesting, crop food crafting, passive local night camping when no valid farm plan exists, pure-farmer camping around a prepared farm's owned gate/path, charcoal furnace support, and bounded fence lighting. Night camp accepts FARMING when it is the current-day selection or when no current-day job was selected (for example an NPC loaded after the daytime roll window); a current-day different job remains authoritative. A combined BUILDING + FARMING NPC with a saved home/layout keeps home duty; one with neither a home/layout nor a farm plan may use the passive temporary camp instead of idling.
 - `HUNT_MONSTERS`: smart target selection against monsters and combat gear prep.
 - `HUNT_ANIMALS`: food-limited animal hunting, sheep hunting for beds, and cooking support.
 - `HUNT_PLAYERS`: rare smart target selection against players and other PlayerNpc entities, plus combat gear prep.
 - `HUNT_VILLAGERS`: very rare smart target selection against villagers, plus combat gear prep.
 - `EXPLORING`: no-target roaming exploration for the day, plus explorer utility behavior such as spyglass/boat support.
 - `LOOTING`: chest looting.
-- `CAUTIOUS`: rare sneak and scared hide behavior.
+- `CAUTIOUS`: avoids nearby survival/adventure players, hostile mobs, other Player NPCs, and compatibility threats. Rare sneak and scared hide use the same threat rules, hold crouch, and watch their cached threat; creative/spectator players and unrelated passive entities are ignored.
 
-Emergency and survival goals such as water escape, hole escape, help calls, obstruction breaking, pickup, cooking, and basic gear crafting remain outside daily-job gating where needed.
+Emergency and survival behaviors such as floating, hole escape, help calls, obstruction breaking, pickup, cooking, and basic gear crafting remain outside daily-job gating where needed. Water travel itself is destination-aware and owned by the active movement goal; there is no global MOVE-owning water-escape goal.
+
+Daily-interest gating and server-startup gating are separate. `StartupWorkGatedGoal` wraps routine work registrations (including pickup, cooking/crafting, home work, gathering, farming, fishing, mining, building, looting, and exploration). No routine work delegate can start during the first 60 server ticks; a stable UUID-derived offset spreads each NPC's release across the following 60 ticks. This gate is not persisted and therefore applies only to server startup, not to an NPC spawned later in a running world. Its continuation check also prevents a restored/running work lifecycle from bypassing the grace period. Combat targeting and attack/defense goals, low-health flee/heal, floating, cautious avoidance/hiding, help calls, hole/high-column escape, combat weapon recovery, obstruction breaking, and doors are deliberately registered without the startup wrapper so an NPC loaded into danger can react immediately.
 
 Home radius rule:
 

@@ -32,7 +32,7 @@ public final class ClearBlockAi {
     }
 
     private static final double DEFAULT_CLEAR_DISTANCE_SQR = 4.5D * 4.5D;
-    private static final double BREAK_REACH_DISTANCE_SQR = 4.0D * 4.0D;
+    static final double BREAK_REACH_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double BREAK_STAND_REACHED_SQR = 0.95D * 0.95D;
     private static final double BREAK_STAND_CENTERED_SQR = 0.35D * 0.35D;
     private static final double STAND_EYE_HEIGHT = 1.5D;
@@ -514,6 +514,9 @@ public final class ClearBlockAi {
         int topY = Math.min(origin.getY(), serverLevel.getMaxBuildHeight() - 1);
         for (int y = topY; y > targetPos.getY(); y--) {
             BlockPos cover = new BlockPos(targetPos.getX(), y, targetPos.getZ());
+            if (!serverLevel.hasChunkAt(cover)) {
+                continue;
+            }
             BlockState state = serverLevel.getBlockState(cover);
             boolean targetMatch = targetPredicate.test(state);
             boolean softCover = allowSoftColumnCover && isSoftCoverState(state);
@@ -537,6 +540,7 @@ public final class ClearBlockAi {
                 || state == null
                 || !serverLevel.isInWorldBounds(pos)
                 || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.hasChunkAt(pos)
                 || state.isAir()
                 || state.getDestroySpeed(serverLevel, pos) < 0.0F
                 || !state.getFluidState().isEmpty()
@@ -571,7 +575,11 @@ public final class ClearBlockAi {
     }
 
     private static boolean isClearable(ServerLevel serverLevel, BlockPos pos, Predicate<BlockState> targetPredicate, boolean allowSoftCover) {
-        if (pos == null || targetPredicate == null || !serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+        if (pos == null
+                || targetPredicate == null
+                || !serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.hasChunkAt(pos)) {
             return false;
         }
         BlockState state = serverLevel.getBlockState(pos);
@@ -791,6 +799,13 @@ public final class ClearBlockAi {
         }
 
         BlockPos blockerPos = hit.getBlockPos();
+        // A ray to a lower block can cross the block currently supporting the NPC.
+        // Treating that support as an ordinary cover block makes the clear request
+        // alternate between its real target and the floor under the NPC. Leave the
+        // support in place and let moveNearTarget choose a safe break stand instead.
+        if (blockerPos.equals(playerNpc.blockPosition().below())) {
+            return Optional.empty();
+        }
         BlockState blockerState = serverLevel.getBlockState(blockerPos);
         if (!targetPredicate.test(blockerState)
                 || playerNpc.distanceToSqr(centerX(blockerPos), centerY(blockerPos), centerZ(blockerPos)) > maxDistanceSqr

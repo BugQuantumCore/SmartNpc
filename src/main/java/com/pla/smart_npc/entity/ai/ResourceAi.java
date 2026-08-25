@@ -11,6 +11,8 @@ import java.util.function.Predicate;
 public final class ResourceAi {
     private static final int[] LOG_SUPPLY_GOALS = {4, 5, 6, 7, 8, 9, 10, 11, 12};
     private static final int[] STONE_SUPPLY_GOALS = {12, 16, 20, 24};
+    private static final int MIN_ADDITIONAL_SUPPLY = 3;
+    private static final int MAX_ADDITIONAL_SUPPLY = 12;
 
     private ResourceAi() {
     }
@@ -21,6 +23,11 @@ public final class ResourceAi {
 
     public static int randomStoneSupplyGoal(RandomSource random) {
         return STONE_SUPPLY_GOALS[random.nextInt(STONE_SUPPLY_GOALS.length)];
+    }
+
+    public static int randomAdditionalSupplyAmount(RandomSource random) {
+        return MIN_ADDITIONAL_SUPPLY
+                + random.nextInt(MAX_ADDITIONAL_SUPPLY - MIN_ADDITIONAL_SUPPLY + 1);
     }
 
     public static int countLogs(PlayerNpcEntity playerNpc) {

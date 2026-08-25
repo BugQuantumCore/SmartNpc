@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.SneakingAi;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
 import com.pla.smart_npc.util.PlayerNpcBuildLayoutLoader;
@@ -48,6 +49,8 @@ public class BeingAtHomeGoal extends Goal {
     private final PlayerNpcEntity playerNpc;
     private final SneakingAi sneakingAi;
     private final PathNavigationAi pathNavigationAi;
+    private final PathStuckFallbackAi pathStuckFallbackAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(20);
     private final double speed;
     private PlayerNpcHomeUtil.HomeArea homeArea;
     private BlockPos afkPos;
@@ -64,11 +67,14 @@ public class BeingAtHomeGoal extends Goal {
     private int buildWorkCheckCooldown;
     private boolean walkSneaking;
     private boolean cachedReadyBuildWork;
+    private BlockPos homeEntranceApproachPos;
+    private boolean routingViaHomeEntrance;
 
     public BeingAtHomeGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
         this.sneakingAi = new SneakingAi(playerNpc);
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
+        this.pathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
         this.speed = speed;
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
@@ -96,6 +102,9 @@ public class BeingAtHomeGoal extends Goal {
         }
         if (shelterNow) {
             this.cooldownTicks = 0;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
         }
 
         Optional<PlayerNpcHomeUtil.HomeArea> savedHome = PlayerNpcHomeUtil.getHome(this.playerNpc);
@@ -172,6 +181,14 @@ public class BeingAtHomeGoal extends Goal {
         this.buildWorkCheckCooldown = BUILD_WORK_CHECK_INTERVAL_TICKS;
         this.cachedReadyBuildWork = false;
         this.walkSneaking = false;
+        this.pathStuckFallbackAi.stop();
+        this.homeEntranceApproachPos = this.playerNpc.level() instanceof ServerLevel serverLevel
+                && this.homeArea != null
+                ? this.findHomeEntranceApproach(serverLevel, this.homeArea)
+                : null;
+        this.routingViaHomeEntrance = this.homeEntranceApproachPos != null
+                && this.homeArea != null
+                && !PlayerNpcHomeUtil.isInside(this.homeArea, this.playerNpc.blockPosition());
         this.activityMode = this.randomActivityMode();
         this.reachedSpot = this.isAtAfkPos();
         this.playerNpc.setCurrentAiState("ai.player_npc.being_at_home");
@@ -194,7 +211,32 @@ public class BeingAtHomeGoal extends Goal {
         }
         if (!this.isAtAfkPos()) {
             this.reachedSpot = false;
-            if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            if (this.routingViaHomeEntrance && this.isAtHomeEntranceApproach()) {
+                this.routingViaHomeEntrance = false;
+                this.pathStuckFallbackAi.stop();
+                this.repathTicks = 0;
+                this.moveToAfkPos();
+            }
+            if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
+                BlockPos routeTarget = this.currentHomeRouteTarget();
+                BlockPos directionTarget = this.homeEntranceApproachPos == null
+                        ? routeTarget
+                        : this.homeEntranceApproachPos;
+                String moveDetail = this.utilitySpot ? "walking to home utility" : "walking to indoor spot";
+                if (this.pathStuckFallbackAi.watchAndStartWhileNavigating(
+                        serverLevel,
+                        routeTarget,
+                        directionTarget,
+                        moveDetail,
+                        pos -> PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos))) {
+                    if (this.homeEntranceApproachPos != null) {
+                        this.routingViaHomeEntrance = true;
+                    }
+                    this.playerNpc.setCurrentAiDetail(this.pathStuckFallbackAi.detail(moveDetail));
+                    return;
+                }
+            }
+            if (this.repathTicks-- <= 0) {
                 this.moveToAfkPos();
                 this.repathTicks = REPATH_INTERVAL_TICKS;
             }
@@ -203,6 +245,8 @@ public class BeingAtHomeGoal extends Goal {
         }
 
         this.reachedSpot = true;
+        this.routingViaHomeEntrance = false;
+        this.pathStuckFallbackAi.stop();
         this.tickHomeActivity();
         this.updateDetail();
     }
@@ -228,6 +272,9 @@ public class BeingAtHomeGoal extends Goal {
         this.buildWorkCheckCooldown = 0;
         this.cachedReadyBuildWork = false;
         this.walkSneaking = false;
+        this.homeEntranceApproachPos = null;
+        this.routingViaHomeEntrance = false;
+        this.pathStuckFallbackAi.stop();
         this.playerNpc.getNavigation().stop();
         this.stopCustomHomeIdleAnimation(this.playerNpc);
         this.sneakingAi.stopSneaking();
@@ -414,8 +461,59 @@ public class BeingAtHomeGoal extends Goal {
         }
 
         if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
-            this.pathNavigationAi.moveTo(serverLevel, this.afkPos, this.speed, HOME_ENTRY_SAFE_DROP_BLOCKS);
+            this.pathNavigationAi.moveTo(
+                    serverLevel,
+                    this.currentHomeRouteTarget(),
+                    this.speed,
+                    HOME_ENTRY_SAFE_DROP_BLOCKS);
         }
+    }
+
+    private BlockPos currentHomeRouteTarget() {
+        return this.routingViaHomeEntrance && this.homeEntranceApproachPos != null
+                ? this.homeEntranceApproachPos
+                : this.afkPos;
+    }
+
+    private boolean isAtHomeEntranceApproach() {
+        return this.homeEntranceApproachPos != null
+                && this.distanceToPosSqr(this.homeEntranceApproachPos) <= AFK_REACHED_DISTANCE_SQR;
+    }
+
+    private BlockPos findHomeEntranceApproach(
+            ServerLevel serverLevel,
+            PlayerNpcHomeUtil.HomeArea homeArea
+    ) {
+        List<BlockPos> outsideCandidates = new ArrayList<>();
+        List<BlockPos> relaxedCandidates = new ArrayList<>();
+        for (BlockPos doorPos : BlockPos.betweenClosed(
+                homeArea.origin(),
+                homeArea.origin().offset(homeArea.width() - 1, 6, homeArea.depth() - 1))) {
+            if (!(serverLevel.getBlockState(doorPos).getBlock() instanceof DoorBlock)) {
+                continue;
+            }
+            for (Direction direction : Direction.Plane.HORIZONTAL) {
+                BlockPos candidate = doorPos.relative(direction).immutable();
+                if (!this.canStandAt(serverLevel, candidate)
+                        || outsideCandidates.contains(candidate)
+                        || relaxedCandidates.contains(candidate)) {
+                    continue;
+                }
+                if (PlayerNpcHomeUtil.isInsideFootprint(homeArea, candidate)) {
+                    relaxedCandidates.add(candidate);
+                } else {
+                    outsideCandidates.add(candidate);
+                }
+            }
+        }
+
+        Comparator<BlockPos> nearestFirst = Comparator.comparingDouble(this::distanceToPosSqr);
+        outsideCandidates.sort(nearestFirst);
+        relaxedCandidates.sort(nearestFirst);
+        if (!outsideCandidates.isEmpty()) {
+            return outsideCandidates.get(0);
+        }
+        return relaxedCandidates.isEmpty() ? null : relaxedCandidates.get(0);
     }
 
     private boolean isAtAfkPos() {
@@ -428,7 +526,11 @@ public class BeingAtHomeGoal extends Goal {
 
     private void updateDetail() {
         if (!this.reachedSpot) {
-            this.playerNpc.setCurrentAiDetail(this.utilitySpot ? "walking to home utility" : "walking to indoor spot");
+            if (this.routingViaHomeEntrance) {
+                this.playerNpc.setCurrentAiDetail("walking around home to entrance");
+            } else {
+                this.playerNpc.setCurrentAiDetail(this.utilitySpot ? "walking to home utility" : "walking to indoor spot");
+            }
             return;
         }
 

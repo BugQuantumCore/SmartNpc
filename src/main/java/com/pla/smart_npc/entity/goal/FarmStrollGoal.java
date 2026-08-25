@@ -44,6 +44,7 @@ public final class FarmStrollGoal extends Goal {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
                 || !this.canStroll(serverLevel)
                 || !this.playerNpc.onGround()
+                || this.playerNpc.isInWaterOrBubble()
                 || this.playerNpc.tickCount < this.nextAttemptTick) {
             return false;
         }
@@ -62,6 +63,7 @@ public final class FarmStrollGoal extends Goal {
                 && this.strollTicks < MAX_STROLL_TICKS
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
                 && this.canStroll(serverLevel)
+                && !this.playerNpc.isInWaterOrBubble()
                 && this.distanceToTargetSqr() > ARRIVAL_DISTANCE_SQR;
     }
 
@@ -94,9 +96,7 @@ public final class FarmStrollGoal extends Goal {
                 30.0F,
                 30.0F
         );
-        if (this.repathTicks-- <= 0
-                || this.playerNpc.getNavigation().isDone()
-                || this.playerNpc.getNavigation().isStuck()) {
+        if (this.repathTicks-- <= 0) {
             if (!this.moveToTarget(serverLevel)) {
                 this.targetPos = null;
                 return;

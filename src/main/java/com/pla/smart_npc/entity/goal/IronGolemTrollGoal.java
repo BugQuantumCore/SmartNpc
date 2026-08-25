@@ -27,6 +27,7 @@ public class IronGolemTrollGoal extends Goal {
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(40);
     private IronGolem golem;
     private BlockPos pillarBase;
 
@@ -44,8 +45,8 @@ public class IronGolemTrollGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.tickCount % 40 != 0
                 || this.playerNpc.getIronGolemTrollCooldown() > 0
+                || !this.canUseThrottle.canCheck(this.playerNpc)
                 || this.playerNpc.getRandom().nextFloat() > 0.015F
                 || this.countBlocks() < 3) {
             return false;

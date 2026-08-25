@@ -30,6 +30,7 @@ public class DescendHighColumnGoal extends Goal {
     private final TerraformBuildSiteGoal terraformBuildSiteGoal;
     private final ToolAi toolAi;
     private final BreakingBlockAi breakingBlockAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(10);
     private BlockPos floorTarget;
     private int goalTicks;
     private int descentSteps;
@@ -56,6 +57,9 @@ public class DescendHighColumnGoal extends Goal {
                 || this.terraformBuildSiteGoal.hasPendingSupportFillEscapeHandoff(serverLevel)
                 || this.shouldYieldToMiningSupplyWork()
                 || !this.shouldRunForCurrentState()) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
@@ -165,7 +169,8 @@ public class DescendHighColumnGoal extends Goal {
         BlockPos feet = this.playerNpc.blockPosition();
         BlockPos floor = feet.below();
         BlockState floorState = serverLevel.getBlockState(floor);
-        if (!this.canBreakColumnBlock(serverLevel, floor, floorState)
+        if (this.playerNpc.isTemporaryPillarSupport(floor)
+                || !this.canBreakColumnBlock(serverLevel, floor, floorState)
                 || !serverLevel.getBlockState(floor.below()).isSolidRender(serverLevel, floor.below())
                 || !this.isNarrowColumnTop(serverLevel, floor)
                 || !this.hasLowerWalkableTerrainNearby(serverLevel, feet)) {

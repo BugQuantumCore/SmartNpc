@@ -9,6 +9,7 @@ import com.pla.smart_npc.init.SmartNpcModEntities;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
@@ -20,6 +21,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.BlockHitResult;
@@ -28,17 +30,25 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.common.ToolActions;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 public class PlayerNpcFishingGoal extends Goal {
     private static final int WATER_SCAN_RADIUS = 36;
     private static final int WATER_SCAN_RADIUS_SQR = WATER_SCAN_RADIUS * WATER_SCAN_RADIUS;
     private static final int SHORE_SCAN_RADIUS = 8;
-    private static final int SHORE_SCAN_RADIUS_SQR = SHORE_SCAN_RADIUS * SHORE_SCAN_RADIUS;
-    private static final int MAX_STAND_PATH_CHECKS = 32;
-    private static final int MAX_WATER_SPOT_CHECKS = 160;
+    private static final int WATER_COLUMNS_PER_SEARCH = 192;
+    private static final int MAX_WATER_SPOTS_PER_SEARCH = 12;
+    private static final int SHORE_COLUMNS_PER_WATER = 32;
+    private static final int MAX_TOTAL_PATH_CHECKS_PER_SEARCH = 8;
+    private static final int FAILED_SEARCH_RETRY_MIN_TICKS = 20;
+    private static final int FAILED_SEARCH_RETRY_RANDOM_TICKS = 20;
+    private static final int CACHED_SPOT_TICKS = 20 * 5;
+    private static final int SEARCH_ORIGIN_RESET_DISTANCE_SQR = 6 * 6;
     private static final int AIM_TICKS = 8;
     private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int MAX_FISHING_TICKS = 20 * 90;
@@ -58,9 +68,12 @@ public class PlayerNpcFishingGoal extends Goal {
     private static final double CAST_EYE_HEIGHT = 1.35D;
     private static final int FISHABLE_WATER_PATCH_RADIUS = 1;
     private static final int PREFERRED_OPEN_WATER_PATCH_RADIUS = 2;
+    private static final List<BlockPos> WATER_SCAN_OFFSETS = buildHorizontalOffsets(WATER_SCAN_RADIUS);
+    private static final List<BlockPos> SHORE_SCAN_OFFSETS = buildHorizontalOffsets(SHORE_SCAN_RADIUS);
+    private static final Map<PlayerNpcEntity, FishingSearchState> SEARCH_STATES = Collections.synchronizedMap(new WeakHashMap<>());
 
     private final PlayerNpcEntity playerNpc;
-    private final CanUseThrottle canUseThrottle = new CanUseThrottle(5);
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private FishingSpot fishingSpot;
     private PlayerNpcFishingBobberEntity bobber;
     private ItemStack previousMainHand = ItemStack.EMPTY;
@@ -98,7 +111,7 @@ public class PlayerNpcFishingGoal extends Goal {
     public static boolean hasNearbyFishingSpot(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         return playerNpc != null
                 && serverLevel != null
-                && findFishingSpot(playerNpc, serverLevel, false) != null;
+                && findOrSearchFishingSpot(playerNpc, serverLevel, false) != null;
     }
 
     @Override
@@ -114,8 +127,7 @@ public class PlayerNpcFishingGoal extends Goal {
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
-
-        this.fishingSpot = findFishingSpot(this.playerNpc, serverLevel, true);
+        this.fishingSpot = findOrSearchFishingSpot(this.playerNpc, serverLevel, true);
         if (this.fishingSpot == null) {
             this.traceCanUseBlocked("fishing blocked: no reachable surface water; rod="
                     + fishingRodLocation(this.playerNpc)
@@ -172,7 +184,7 @@ public class PlayerNpcFishingGoal extends Goal {
             this.biteReactionTicks = 0;
             this.biteReactionTargetTicks = 0;
             if (!this.hasArrivedAtStand(serverLevel)) {
-                if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+                if (this.repathTicks-- <= 0) {
                     this.moveToStand(serverLevel);
                     this.repathTicks = REPATH_INTERVAL_TICKS;
                 }
@@ -434,22 +446,85 @@ public class PlayerNpcFishingGoal extends Goal {
         this.playerNpc.setIdleTraceDetail(detail, 20 * 2);
     }
 
-    private static FishingSpot findFishingSpot(PlayerNpcEntity playerNpc, ServerLevel serverLevel, boolean randomizeCastDistance) {
+    private static FishingSpot findOrSearchFishingSpot(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            boolean randomizeCastDistance
+    ) {
+        FishingSearchState state = SEARCH_STATES.computeIfAbsent(playerNpc, ignored -> new FishingSearchState());
+        synchronized (state) {
+            BlockPos center = playerNpc.blockPosition();
+            ResourceKey<Level> dimension = serverLevel.dimension();
+            if (!dimension.equals(state.dimension)
+                    || state.searchOrigin == null
+                    || horizontalDistanceSqr(center, state.searchOrigin) > SEARCH_ORIGIN_RESET_DISTANCE_SQR) {
+                state.reset(center, dimension);
+            }
+
+            long gameTime = serverLevel.getGameTime();
+            if (state.cachedSpot != null) {
+                if (gameTime <= state.cachedSpotUntilTick
+                        && isCachedFishingSpotValid(playerNpc, serverLevel, state.cachedSpot)) {
+                    return state.cachedSpot;
+                }
+                state.cachedSpot = null;
+            }
+            if (gameTime < state.nextSearchTick) {
+                return null;
+            }
+
+            FishingSpot found = searchFishingSpotBatch(playerNpc, serverLevel, state, randomizeCastDistance);
+            if (found != null) {
+                state.cachedSpot = found;
+                state.cachedSpotUntilTick = gameTime + CACHED_SPOT_TICKS;
+                state.nextSearchTick = gameTime;
+                return found;
+            }
+
+            state.nextSearchTick = gameTime
+                    + FAILED_SEARCH_RETRY_MIN_TICKS
+                    + playerNpc.getRandom().nextInt(FAILED_SEARCH_RETRY_RANDOM_TICKS + 1);
+            return null;
+        }
+    }
+
+    private static FishingSpot searchFishingSpotBatch(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            FishingSearchState state,
+            boolean randomizeCastDistance
+    ) {
         BlockPos center = playerNpc.blockPosition();
-        List<BlockPos> waterCandidates = gatherSurfaceWaterCandidates(serverLevel, center);
         FishingSpot best = null;
         double bestScore = Double.MAX_VALUE;
         double preferredCastDistance = randomizeCastDistance
                 ? Mth.nextDouble(playerNpc.getRandom(), PREFERRED_CAST_DISTANCE_MIN, PREFERRED_CAST_DISTANCE_MAX)
                 : PREFERRED_CAST_DISTANCE_MIN;
-        int waterChecks = 0;
+        FishingSearchBudget budget = new FishingSearchBudget();
+        int checkedColumns = 0;
+        int checkedWaterSpots = 0;
 
-        for (BlockPos waterPos : waterCandidates) {
-            if (waterChecks++ >= MAX_WATER_SPOT_CHECKS) {
+        while (checkedColumns++ < WATER_COLUMNS_PER_SEARCH && !WATER_SCAN_OFFSETS.isEmpty()) {
+            if (state.waterOffsetCursor >= WATER_SCAN_OFFSETS.size()) {
+                state.waterOffsetCursor = 0;
+            }
+            BlockPos offset = WATER_SCAN_OFFSETS.get(state.waterOffsetCursor++);
+            int x = state.searchOrigin.getX() + offset.getX();
+            int z = state.searchOrigin.getZ() + offset.getZ();
+            BlockPos columnPos = new BlockPos(x, center.getY(), z);
+            if (!serverLevel.hasChunkAt(columnPos)) {
+                continue;
+            }
+
+            BlockPos waterPos = findSurfaceWaterInColumn(serverLevel, x, z);
+            if (waterPos == null || !isFishableWater(serverLevel, waterPos)) {
+                continue;
+            }
+            if (checkedWaterSpots++ >= MAX_WATER_SPOTS_PER_SEARCH) {
                 break;
             }
 
-            BlockPos standPos = findStandNearWater(playerNpc, serverLevel, waterPos);
+            BlockPos standPos = findStandNearWater(playerNpc, serverLevel, waterPos, budget);
             if (standPos == null) {
                 continue;
             }
@@ -472,59 +547,59 @@ public class PlayerNpcFishingGoal extends Goal {
         return best;
     }
 
-    private static List<BlockPos> gatherSurfaceWaterCandidates(ServerLevel serverLevel, BlockPos center) {
-        List<BlockPos> candidates = new ArrayList<>();
-        for (int dx = -WATER_SCAN_RADIUS; dx <= WATER_SCAN_RADIUS; dx++) {
-            for (int dz = -WATER_SCAN_RADIUS; dz <= WATER_SCAN_RADIUS; dz++) {
-                if (dx == 0 && dz == 0 || dx * dx + dz * dz > WATER_SCAN_RADIUS_SQR) {
-                    continue;
-                }
-
-                BlockPos candidate = findSurfaceWaterInColumn(serverLevel, center.getX() + dx, center.getZ() + dz);
-                if (candidate != null && isFishableWater(serverLevel, candidate)) {
-                    candidates.add(candidate.immutable());
-                }
-            }
-        }
-
-        candidates.sort(Comparator.comparingDouble(center::distSqr));
-        return candidates;
+    private static boolean isCachedFishingSpotValid(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            FishingSpot spot
+    ) {
+        return playerNpc.blockPosition().distSqr(spot.standPos()) <= WATER_SCAN_RADIUS_SQR
+                && isFishableWater(serverLevel, spot.waterPos())
+                && isFishingStand(serverLevel, spot.standPos())
+                && canCastFrom(playerNpc, serverLevel, spot.standPos(), spot.waterPos());
     }
 
-    private static BlockPos findStandNearWater(PlayerNpcEntity playerNpc, ServerLevel serverLevel, BlockPos waterPos) {
+    private static BlockPos findStandNearWater(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            BlockPos waterPos,
+            FishingSearchBudget budget
+    ) {
         List<BlockPos> candidates = new ArrayList<>();
         BlockPos current = playerNpc.blockPosition();
         if (isFishingStand(serverLevel, current) && canCastFrom(playerNpc, serverLevel, current, waterPos)) {
             candidates.add(current.immutable());
         }
 
-        for (int dx = -SHORE_SCAN_RADIUS; dx <= SHORE_SCAN_RADIUS; dx++) {
-            for (int dz = -SHORE_SCAN_RADIUS; dz <= SHORE_SCAN_RADIUS; dz++) {
-                if (dx == 0 && dz == 0 || dx * dx + dz * dz > SHORE_SCAN_RADIUS_SQR) {
-                    continue;
-                }
-
-                int x = waterPos.getX() + dx;
-                int z = waterPos.getZ() + dz;
-                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-                BlockPos candidate = new BlockPos(x, y, z);
-                if (!isFishingStand(serverLevel, candidate) || !canCastFrom(playerNpc, serverLevel, candidate, waterPos)) {
-                    continue;
-                }
-                candidates.add(candidate.immutable());
+        int shoreColumns = 0;
+        for (BlockPos offset : SHORE_SCAN_OFFSETS) {
+            if (shoreColumns++ >= SHORE_COLUMNS_PER_WATER) {
+                break;
             }
+
+            int x = waterPos.getX() + offset.getX();
+            int z = waterPos.getZ() + offset.getZ();
+            BlockPos columnPos = new BlockPos(x, waterPos.getY(), z);
+            if (!serverLevel.hasChunkAt(columnPos)) {
+                continue;
+            }
+
+            int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+            BlockPos candidate = new BlockPos(x, y, z);
+            if (!isFishingStand(serverLevel, candidate) || !canCastFrom(playerNpc, serverLevel, candidate, waterPos)) {
+                continue;
+            }
+            candidates.add(candidate.immutable());
         }
 
         candidates.sort(Comparator
                 .comparingDouble((BlockPos pos) -> horizontalDistanceSqr(pos, waterPos))
                 .thenComparingDouble(pos -> current.distSqr(pos)));
 
-        int pathChecks = 0;
         for (BlockPos candidate : candidates) {
             if (playerNpc.distanceToSqr(candidate.getX() + 0.5D, candidate.getY(), candidate.getZ() + 0.5D) <= ARRIVAL_DISTANCE_SQR) {
                 return candidate;
             }
-            if (pathChecks++ >= MAX_STAND_PATH_CHECKS) {
+            if (!budget.tryPathCheck()) {
                 return null;
             }
             Path path = playerNpc.getNavigation().createPath(candidate, 0);
@@ -636,6 +711,22 @@ public class PlayerNpcFishingGoal extends Goal {
         return dx * dx + dz * dz;
     }
 
+    private static List<BlockPos> buildHorizontalOffsets(int radius) {
+        int radiusSqr = radius * radius;
+        List<BlockPos> offsets = new ArrayList<>();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                int distanceSqr = dx * dx + dz * dz;
+                if (distanceSqr == 0 || distanceSqr > radiusSqr) {
+                    continue;
+                }
+                offsets.add(new BlockPos(dx, 0, dz));
+            }
+        }
+        offsets.sort(Comparator.comparingInt(pos -> pos.getX() * pos.getX() + pos.getZ() * pos.getZ()));
+        return List.copyOf(offsets);
+    }
+
     private void lookAtWater() {
         if (this.fishingSpot == null) {
             return;
@@ -651,6 +742,36 @@ public class PlayerNpcFishingGoal extends Goal {
 
     private static String posText(BlockPos pos) {
         return pos.getX() + " " + pos.getY() + " " + pos.getZ();
+    }
+
+    private static final class FishingSearchBudget {
+        private int pathChecks;
+
+        private boolean tryPathCheck() {
+            if (this.pathChecks >= MAX_TOTAL_PATH_CHECKS_PER_SEARCH) {
+                return false;
+            }
+            this.pathChecks++;
+            return true;
+        }
+    }
+
+    private static final class FishingSearchState {
+        private ResourceKey<Level> dimension;
+        private BlockPos searchOrigin;
+        private int waterOffsetCursor;
+        private long nextSearchTick;
+        private FishingSpot cachedSpot;
+        private long cachedSpotUntilTick;
+
+        private void reset(BlockPos origin, ResourceKey<Level> dimension) {
+            this.dimension = dimension;
+            this.searchOrigin = origin.immutable();
+            this.waterOffsetCursor = 0;
+            this.nextSearchTick = 0L;
+            this.cachedSpot = null;
+            this.cachedSpotUntilTick = 0L;
+        }
     }
 
     private record FishingSpot(BlockPos waterPos, BlockPos standPos) {}

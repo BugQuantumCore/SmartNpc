@@ -19,6 +19,7 @@ public class CallForHelpGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 20;
 
     private final PlayerNpcEntity playerNpc;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(10);
     private LivingEntity threat;
 
     public CallForHelpGoal(PlayerNpcEntity playerNpc) {
@@ -33,6 +34,9 @@ public class CallForHelpGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getHelpAlertCooldown() > 0) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 

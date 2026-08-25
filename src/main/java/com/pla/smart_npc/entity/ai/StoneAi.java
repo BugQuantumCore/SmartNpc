@@ -42,6 +42,10 @@ public final class StoneAi {
                     if (ring > 0 && Math.max(Math.abs(dx), Math.abs(dz)) != ring) {
                         continue;
                     }
+                    BlockPos column = center.offset(dx, 0, dz);
+                    if (!serverLevel.hasChunkAt(column)) {
+                        continue;
+                    }
                     for (int dy = -SEARCH_VERTICAL_DOWN; dy <= SEARCH_VERTICAL_UP && inspected < MAX_SEARCH_POSITIONS; dy++) {
                         inspected++;
                         BlockPos pos = center.offset(dx, dy, dz);
@@ -104,7 +108,8 @@ public final class StoneAi {
     }
 
     private static boolean canUseStone(ServerLevel serverLevel, BlockPos pos, Predicate<BlockPos> allowedStone) {
-        return isStone(serverLevel.getBlockState(pos))
+        return serverLevel.hasChunkAt(pos)
+                && isStone(serverLevel.getBlockState(pos))
                 && (allowedStone == null || allowedStone.test(pos));
     }
 

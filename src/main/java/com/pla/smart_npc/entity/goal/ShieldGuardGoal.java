@@ -20,11 +20,13 @@ public class ShieldGuardGoal extends Goal {
     private static final int MIN_GUARD_TICKS = 24;
     private static final int MAX_GUARD_TICKS = 56;
     private static final int COOLDOWN_TICKS = 80;
+    private static final int MOVEMENT_REPATH_TICKS = 10;
 
     private final PlayerNpcEntity playerNpc;
     private LivingEntity target;
     private ItemStack previousOffhand = ItemStack.EMPTY;
     private int guardTicks;
+    private int movementRepathTicks;
     private boolean usingTemporaryShield;
     private boolean wasSprinting;
 
@@ -41,7 +43,6 @@ public class ShieldGuardGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getShieldGuardCooldown() > 0
-                || this.playerNpc.tickCount % 8 != 0
                 || !this.hasShield()) {
             return false;
         }
@@ -77,6 +78,7 @@ public class ShieldGuardGoal extends Goal {
         }
 
         this.guardTicks = MIN_GUARD_TICKS + this.playerNpc.getRandom().nextInt(MAX_GUARD_TICKS - MIN_GUARD_TICKS + 1);
+        this.movementRepathTicks = 0;
         this.wasSprinting = this.playerNpc.isSprinting();
         this.playerNpc.setSprinting(false);
         this.playerNpc.setCurrentAiState("ai.player_npc.shield_guarding");
@@ -113,6 +115,7 @@ public class ShieldGuardGoal extends Goal {
         this.target = null;
         this.previousOffhand = ItemStack.EMPTY;
         this.guardTicks = 0;
+        this.movementRepathTicks = 0;
         this.usingTemporaryShield = false;
         this.playerNpc.setShieldGuardCooldown(COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 8));
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -126,9 +129,13 @@ public class ShieldGuardGoal extends Goal {
 
         this.playerNpc.getLookControl().setLookAt(this.target, 70.0F, 70.0F);
         if (this.playerNpc.distanceToSqr(this.target) > APPROACH_DISTANCE_SQR) {
-            this.playerNpc.getNavigation().moveTo(this.target, GUARD_MOVE_SPEED);
+            if (this.movementRepathTicks-- <= 0) {
+                this.playerNpc.getNavigation().moveTo(this.target, GUARD_MOVE_SPEED);
+                this.movementRepathTicks = MOVEMENT_REPATH_TICKS;
+            }
         } else {
             this.playerNpc.getNavigation().stop();
+            this.movementRepathTicks = 0;
         }
     }
 

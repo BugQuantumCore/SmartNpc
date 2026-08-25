@@ -40,8 +40,10 @@ public class BreakTargetObstructionGoal extends Goal {
     private static final int MAX_MINE_TICKS = 20 * 8;
     private static final double HIGH_TARGET_PILLAR_HORIZONTAL_DISTANCE_SQR = 12.0D * 12.0D;
     private static final int HIGH_TARGET_PILLAR_REQUEST_TICKS = 20 * 8;
+    private static final int CAN_USE_CHECK_INTERVAL_TICKS = 10;
 
     private final PlayerNpcEntity playerNpc;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(CAN_USE_CHECK_INTERVAL_TICKS);
     private LivingEntity target;
     private BlockPos obstructionPos;
     private ItemStack previousMainHand = ItemStack.EMPTY;
@@ -68,7 +70,10 @@ public class BreakTargetObstructionGoal extends Goal {
 
         LivingEntity currentTarget = this.playerNpc.getTarget();
         if (!this.isValidTarget(currentTarget)
-                || this.playerNpc.distanceToSqr(currentTarget) > MAX_TARGET_DISTANCE_SQR
+                || this.playerNpc.distanceToSqr(currentTarget) > MAX_TARGET_DISTANCE_SQR) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)
                 || this.playerNpc.hasLineOfSight(currentTarget) && this.canReachTarget(currentTarget)) {
             return false;
         }
@@ -146,7 +151,7 @@ public class BreakTargetObstructionGoal extends Goal {
                 this.obstructionPos.getZ() + 0.5D
         ) > BREAK_DISTANCE_SQR) {
             this.playerNpc.clearBlockBreakProgress(this.obstructionPos);
-            if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            if (this.repathTicks-- <= 0) {
                 this.moveNearObstruction(serverLevel);
                 this.repathTicks = REPATH_INTERVAL_TICKS;
             }

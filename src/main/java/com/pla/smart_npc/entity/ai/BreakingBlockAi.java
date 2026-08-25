@@ -86,7 +86,9 @@ public final class BreakingBlockAi {
             boolean allowBlockEntity,
             boolean allowOwnedFarmDestruction
     ) {
-        if (targetPos == null || targetPredicate == null) {
+        if (targetPos == null
+                || targetPredicate == null
+                || !serverLevel.hasChunkAt(targetPos)) {
             this.stop();
             return TickResult.FAILED;
         }

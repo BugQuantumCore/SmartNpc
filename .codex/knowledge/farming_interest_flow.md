@@ -9,7 +9,7 @@
 5. Clear farm surface/headroom obstructions, place the water source, craft/place fences and an open gate, then till every crop cell except irrigation and the entrance path.
 6. Repair missing or water-filled ground with carried dirt, restore water/perimeter/gate/tilled ground, and clear later surface or entrance blockers.
 7. Harvest mature crops, gather reachable nearby mature village crops, plant wheat/carrot/potato/beetroot, and break reachable grass when seeds are missing. Explore to a new local area only when no actionable nearby supply exists.
-8. At night, a pure FARMING worker returns through the saved open gate to an outside-only camp stand. Camp walking also stays outside; the worker can place/use/reclaim its temporary furnace and add up to four deterministic low-light fence-top torches. Existing torches and unsupported fence shapes are skipped.
+8. At night, a FARMING-interest worker whose current-day selected job is either FARMING or absent anchors a passive temporary camp at its current dry position when no valid farm plan exists, using bounded local walk/look/sneak activity until daylight or plan creation. This absent-job fallback is required for NPCs first loaded/spawned after the daytime job-roll window. A current-day selection for another job retains ownership and suppresses the farming camp. With a plan, an eligible pure FARMING worker returns through the saved open gate to an outside-only camp stand. Camp walking also stays outside; the worker can place/use/reclaim its temporary furnace and add up to four deterministic low-light fence-top torches. Existing torches and unsupported fence shapes are skipped.
 9. During clear daytime, a fully planted farm may use a bounded low-priority stroll on explicit entrance-path cells or a safe ring around the perimeter. Any actionable owned crop work suppresses or preempts the stroll.
 
 A READY farm does not treat an absent old hoe as work by itself. Replacement-hoe and two-stone support demand return only after an exposed crop-ground cell actually needs tilling; planted cells remain valid until harvest exposes their support. READY farming days also suppress optional general gear crafting, while concrete lighting log/stone support and emergency escape tools remain eligible.
@@ -46,13 +46,32 @@ Ready-farm crop work also owns the short six-to-thirteen-tick pause after each s
 
 Seed/crop exploration is allowed to issue the shared bounded exploration climb request. If a seedless farmer is below the surface and no reachable surface exploration target exists, `ExploreAroundGoal` selects a nearby supported surface within its ten-block climb budget, records the seed/crop exploration owner, and hands off to the existing upward escape/pillar path. A failed climb can only hand back to the same exploration mode, which resumes a bounded local fallback walk or the next seed/crop search instead of leaving the farmer idle in the shaft.
 
-Active work and exploration destinations remain owned while the NPC is making water progress. `PathNavigationAi` passes the requested destination into `WaterEscapeAi`, and direct log/stone/build callers pass their current stand or work target. While submerged, `ExploreAroundGoal` may select a validated dry surface target even though land pathfinding cannot yet reach it, and it never converts that water route into an upward pillar request. The helper first chooses a safe dry exit biased toward the destination; in open/source water it performs vanilla-style swimming toward it at speed `<= 1.0D`. Two seconds without progress triggers the existing bounded footing placement or flowing-current fallback. An NPC with no usable block receives three bounded swim attempts instead of immediately canceling the work target; after all three make no progress, that destination is marked failed for the current goal episode. `ExploreAroundGoal` then selects another exploration target. Footing/current placement rejects owned-farm destruction protection and the home/build footprint.
+Active work and exploration destinations remain owned while the NPC is making water progress. There is no global MOVE-owning water goal: priority-zero `FloatGoal` supplies buoyancy while `PathNavigationAi` passes the requested destination into `WaterEscapeAi`, and direct log/stone/build callers pass their current stand or work target. While submerged, `ExploreAroundGoal` may select a validated dry surface target even though land pathfinding cannot yet reach it, ticks water travel every goal tick between normal repaths, and never converts that water route into an upward pillar request. The helper swims toward the owner destination at speed `<= 1.0D`; a dry exit is accepted only if it advances toward that destination, so it cannot return to the bank the NPC just left. Two seconds without progress may trigger bounded footing placement only in one-block-deep water or beside a solid wall/shore obstruction. An NPC that remains stalled receives three bounded attempts before that destination is marked failed for the current goal episode, after which `ExploreAroundGoal` can select another target. Footing placement rejects owned-farm destruction protection and the home/build footprint.
+
+Farm-support log/stone gathering keeps its active route during a river crossing. A wet body bobbing
+one block below the saved home-origin Y is not home-surface recovery, even when its X/Z remains in
+the home build footprint; otherwise higher-priority ReturnHome cancels the gathering owner and the
+farmer repeatedly rescans the same supply target. Direct gather water steering runs every server
+tick and includes capped horizontal acceleration toward the saved work stand; FloatGoal supplies
+vertical buoyancy but does not move the NPC across the river by itself.
 
 During that bounded upward escape, a bed intersecting the active pillar/body column may be cleared even inside the home/build footprint. The exception is bed-only: non-bed build blocks remain protected, owned-farm destruction protection is checked for both matching bed halves, and occupied beds are rejected. Vanilla destruction removes the paired half and produces one bed drop; a no-drop fallback only repairs a paired half left behind by the neighbor update. This prevents a farmer standing on a bed from looping indefinitely at `pillaring 0/N shifting pillar base`.
 
 Bone meal targets only reachable, non-mature crops inside the owned plan. Bones are crafted only when such a target exists. The crop is revalidated at use time, growth is committed without a random can-use failure, and inventory is restored if no mutation occurs. Harvesting accepts only `CropBlock.isMaxAge(...)`; subsequent planting consumes a seed/crop item only after the empty farmland target is revalidated.
 
-Any NPC carrying BUILDING interest defers normal Farming, Mining, and Fishing outdoor camp. At night/thunder, the saved-home return/shelter behavior wins regardless of that day's selected job. This gate does not abandon a previously placed owned camp furnace: its bounded recovery runs first.
+Any NPC carrying BUILDING interest with a saved home or selected layout defers normal Farming,
+Mining, and Fishing outdoor camp. At night/thunder, saved-home return/shelter behavior wins
+regardless of that day's selected job. A mixed builder/farmer with neither a home/layout nor a
+valid farm plan may use the same passive no-plan farming camp instead of idling. The bootstrap camp
+does not place a furnace or mutate terrain, will not start/continue in water, and immediately yields
+to combat/healing/emergency goals; plan validity is rechecked on a 20-tick cadence. This gate does
+not abandon a previously placed owned camp furnace: its bounded recovery runs first.
+
+`MiningNightCampGoal` is registered as ordinary startup-gated work. The startup grace and UUID
+stagger can delay its first activation during world restoration, but they cannot explain a late
+idle episode after release. Daily job selection rolls only during daytime ticks 1-11999 and does
+not deliberately clear a job at night. A null current-day job after that window is therefore an
+unselected farming-night fallback, not evidence that the NPC lacks its FARMING interest.
 
 Stone protection is deeper than ordinary surface ownership. `FarmAi.isBelowOwnedFarmFootprint(...)` protects the farm and a two-block X/Z support buffer from the farm ground down to world minimum. `GatherStoneGoal` moves out of the farm work/entrance footprint using bounded safe egress selection before it scans, clears, or mines; `DigDownForStoneGoal` rejects protected origins and dig/clear targets. Both revalidate blockers after `ClearBlockAi` resolves or retargets them, so mining cannot tunnel under irrigation, crops, fences, or the gate.
 

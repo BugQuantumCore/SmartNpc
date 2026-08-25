@@ -874,19 +874,17 @@ public class SmartNpcInspectorOverlay {
         lastDisplayCacheMillis = Long.MIN_VALUE;
         sendToServerIfConnected(new PlayerNpcInspectatorModePacket(true, inspectatorEntityId));
         if (startingFresh) {
-            minecraft.options.setCameraType(CameraType.THIRD_PERSON_FRONT);
+            minecraft.options.setCameraType(CameraType.THIRD_PERSON_BACK);
             inspectatorCameraDistance = INSPECTATOR_CAMERA_DISTANCE_DEFAULT;
         }
-        minecraft.setCameraEntity(minecraft.player);
+        updateInspectatorCameraMode(minecraft, playerNpc);
         if (minecraft.screen == null) {
             minecraft.mouseHandler.grabMouse();
         }
     }
 
     private static void tickActiveInspectator(Minecraft minecraft, PlayerNpcEntity playerNpc, boolean allowHotkeys) {
-        if (minecraft.player != null && minecraft.getCameraEntity() != minecraft.player) {
-            minecraft.setCameraEntity(minecraft.player);
-        }
+        updateInspectatorCameraMode(minecraft, playerNpc);
 
         if (minecraft.options.getCameraType() == CameraType.FIRST_PERSON) {
             inspectatorZoomRepeatTicks = 0;
@@ -915,7 +913,14 @@ public class SmartNpcInspectorOverlay {
         lastDisplayCacheMillis = Long.MIN_VALUE;
 
         if (minecraft != null && minecraft.player != null) {
-            minecraft.setCameraEntity(previousCameraEntity != null ? previousCameraEntity : minecraft.player);
+            Entity cameraToRestore = previousCameraEntity;
+            if (cameraToRestore == null
+                    || cameraToRestore.isRemoved()
+                    || minecraft.level == null
+                    || cameraToRestore.level() != minecraft.level) {
+                cameraToRestore = minecraft.player;
+            }
+            minecraft.setCameraEntity(cameraToRestore);
             if (previousCameraType != null) {
                 minecraft.options.setCameraType(previousCameraType);
             }
@@ -1092,10 +1097,13 @@ public class SmartNpcInspectorOverlay {
         lastRefreshGameTime = Long.MIN_VALUE;
         lastDisplayCacheMillis = Long.MIN_VALUE;
         if (startingFresh) {
-            minecraft.options.setCameraType(CameraType.THIRD_PERSON_FRONT);
+            minecraft.options.setCameraType(CameraType.THIRD_PERSON_BACK);
             inspectatorCameraDistance = INSPECTATOR_CAMERA_DISTANCE_DEFAULT;
         }
-        minecraft.setCameraEntity(minecraft.player);
+        Entity target = minecraft.level == null ? null : minecraft.level.getEntity(entityId);
+        if (target instanceof PlayerNpcEntity playerNpc && playerNpc.isAlive()) {
+            updateInspectatorCameraMode(minecraft, playerNpc);
+        }
         if (minecraft.screen == null) {
             minecraft.mouseHandler.grabMouse();
         }
@@ -1103,6 +1111,14 @@ public class SmartNpcInspectorOverlay {
 
     private static boolean isWaitingForInspectatorTarget() {
         return inspectatorActive && pendingInspectatorTargetTicks > 0;
+    }
+
+    private static void updateInspectatorCameraMode(Minecraft minecraft, PlayerNpcEntity playerNpc) {
+        CameraType cameraType = minecraft.options.getCameraType();
+        Entity desiredCamera = cameraType == CameraType.FIRST_PERSON ? minecraft.player : playerNpc;
+        if (desiredCamera != null && minecraft.getCameraEntity() != desiredCamera) {
+            minecraft.setCameraEntity(desiredCamera);
+        }
     }
 
     private static boolean tickPendingInspectatorTarget(Minecraft minecraft) {

@@ -69,7 +69,7 @@ public class GatherStoneGoal extends Goal {
     private static final int HOME_EGRESS_VERTICAL_DOWN = 4;
     private static final int HOME_EGRESS_VERTICAL_UP = 3;
     private static final int HOME_EGRESS_RANDOM_POOL = 6;
-    private static final int HOME_EGRESS_PATH_CHECKS = 16;
+    private static final int HOME_EGRESS_PATH_CHECKS = 8;
     private static final int HOME_STONE_TARGET_BUFFER = 4;
     private static final int HOME_STONE_TARGET_MAX_Y_OFFSET = 1;
     private static final double HOME_EGRESS_REACHED_DISTANCE_SQR = 1.1D * 1.1D;
@@ -78,8 +78,9 @@ public class GatherStoneGoal extends Goal {
     private static final int STONE_SAFE_STAND_EGRESS_VERTICAL_DOWN = 2;
     private static final int STONE_SAFE_STAND_EGRESS_VERTICAL_UP = 2;
     private static final int STONE_SAFE_STAND_EGRESS_RANDOM_POOL = 8;
-    private static final int STONE_SAFE_STAND_EGRESS_PATH_CHECKS = 18;
+    private static final int STONE_SAFE_STAND_EGRESS_PATH_CHECKS = 8;
     private static final int STONE_SAFE_STAND_REACH_TIMEOUT_TICKS = 20 * 10;
+    private static final int STONE_EGRESS_REPATH_INTERVAL_TICKS = 20;
     private static final int FAILED_STONE_SAFE_STAND_SKIP_TICKS = 20 * 12;
     private static final int STONE_WORK_NO_PROGRESS_TICKS = 20 * 5;
     private static final int IDLE_DIAGNOSTIC_TICKS = 20 * 8;
@@ -99,12 +100,12 @@ public class GatherStoneGoal extends Goal {
     private int repathTicks;
     private int standRouteAttempts;
     private int failedAccessAttempts;
-    private int phaseRecheckTicks;
-    private boolean phaseStillActive = true;
+    private int nextContinueEligibilityCheckTick;
     private boolean clearedAccessForTarget;
     private BlockPos stoneEgressPos;
     private BlockPos stoneEgressWatchPos;
     private int stoneEgressReachTicks;
+    private int nextStoneEgressPathAttemptTick;
     private BlockPos temporarilyBlockedTarget;
     private BlockPos lastStoneWorkProgressPos;
     private long temporarilyBlockedTargetUntilTick;
@@ -148,17 +149,23 @@ public class GatherStoneGoal extends Goal {
 
         boolean fishingSupportJob = isFishingSupportJob(playerNpc);
         boolean farmingSupportJob = isFarmingSupportJob(playerNpc);
-        if (!fishingSupportJob && !farmingSupportJob && !hasPreparedBaseForStone(playerNpc, serverLevel)) {
+        boolean exploringSupplyJob = isExploringSupplyJob(playerNpc);
+        if (!fishingSupportJob
+                && !farmingSupportJob
+                && !exploringSupplyJob
+                && !hasPreparedBaseForStone(playerNpc, serverLevel)) {
             return false;
         }
 
         boolean miningJob = isMiningJobActive(playerNpc);
         return fishingSupportJob && playerNpc.shouldPrioritizeCobblestoneGathering()
                 || farmingSupportJob && FarmAi.needsFarmStone(playerNpc, serverLevel)
+                || exploringSupplyJob && playerNpc.shouldPrioritizeCobblestoneGathering()
                 || miningJob && playerNpc.shouldPrioritizeCobblestoneGathering()
                 || !miningJob
                 && !fishingSupportJob
                 && !farmingSupportJob
+                && !exploringSupplyJob
                 && (playerNpc.shouldPrioritizeCobblestoneGathering()
                 || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, playerNpc));
     }
@@ -192,6 +199,10 @@ public class GatherStoneGoal extends Goal {
         return playerNpc != null && playerNpc.isDailyJobActive(PlayerNpcInterest.FARMING);
     }
 
+    public static boolean isExploringSupplyJob(PlayerNpcEntity playerNpc) {
+        return playerNpc != null && playerNpc.isDailyJobActive(PlayerNpcInterest.EXPLORING);
+    }
+
     private static boolean hasEnoughLogsForStonePhase(PlayerNpcEntity playerNpc) {
         return playerNpc != null
                 && !playerNpc.shouldPrioritizeLogGathering()
@@ -210,11 +221,13 @@ public class GatherStoneGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
-                || (!continuingStoneAccess && this.playerNpc.getGatherCooldown() > 0)
-                || MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
+                || (!continuingStoneAccess && this.playerNpc.getGatherCooldown() > 0)) {
             return false;
         }
-        if (!continuingStoneAccess && !this.canUseThrottle.canCheck(this.playerNpc)) {
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
+        if (MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
             return false;
         }
         if (this.shouldYieldToFarmCropWork(serverLevel)) {
@@ -262,16 +275,23 @@ public class GatherStoneGoal extends Goal {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             return this.traceStoneStop("not server level");
         }
-        if (this.shouldYieldToFarmCropWork(serverLevel)) {
-            return this.traceStoneStop("actionable owned farm crop work");
-        }
-        if (MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
-            return this.traceStoneStop("night camp pause night=" + serverLevel.isNight()
-                    + " thunder=" + serverLevel.isThundering()
-                    + " sky=" + serverLevel.canSeeSky(this.playerNpc.blockPosition().above()));
-        }
-        if (!this.canContinueStoneWork(serverLevel)) {
-            return this.traceStoneStop("phase inactive " + this.lastPhaseDiagnostic);
+        // GoalSelector evaluates continuation every tick. Owned-farm scans and supply/build phase
+        // checks are cached for one second; immediate death, combat, tool and escape guards above
+        // stay cheap and responsive.
+        if (this.playerNpc.tickCount >= this.nextContinueEligibilityCheckTick) {
+            this.nextContinueEligibilityCheckTick = this.playerNpc.tickCount
+                    + PHASE_RECHECK_INTERVAL_TICKS;
+            if (this.shouldYieldToFarmCropWork(serverLevel)) {
+                return this.traceStoneStop("actionable owned farm crop work");
+            }
+            if (MiningNightCampGoal.shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
+                return this.traceStoneStop("night camp pause night=" + serverLevel.isNight()
+                        + " thunder=" + serverLevel.isThundering()
+                        + " sky=" + serverLevel.canSeeSky(this.playerNpc.blockPosition().above()));
+            }
+            if (!this.canContinueStoneWork(serverLevel)) {
+                return this.traceStoneStop("phase inactive " + this.lastPhaseDiagnostic);
+            }
         }
         return true;
     }
@@ -283,6 +303,7 @@ public class GatherStoneGoal extends Goal {
 
     @Override
     public void start() {
+        this.playerNpc.beginStoneSupplyGatheringEpisode();
         setStoneGatheringEpisodeActive(this.playerNpc, true);
         this.gatherTicks = 0;
         this.repathTicks = 0;
@@ -290,8 +311,9 @@ public class GatherStoneGoal extends Goal {
         this.failedAccessAttempts = 0;
         this.resetStoneWorkProgressMonitor();
         this.lastPhaseDiagnostic = "";
-        this.phaseRecheckTicks = PHASE_RECHECK_INTERVAL_TICKS;
-        this.phaseStillActive = true;
+        this.nextContinueEligibilityCheckTick = this.playerNpc.tickCount
+                + PHASE_RECHECK_INTERVAL_TICKS;
+        this.nextStoneEgressPathAttemptTick = this.playerNpc.tickCount;
         this.clearedAccessForTarget = false;
         this.playerNpc.setCurrentAiState("ai.player_npc.gathering_stone");
         this.toolAi.equipTool(PickaxeItem.class);
@@ -310,10 +332,11 @@ public class GatherStoneGoal extends Goal {
         }
 
         this.gatherTicks++;
-        this.tickSafeStoneStandReachTimeout(serverLevel);
         if (this.tickWaterEscape(serverLevel)) {
             return;
         }
+
+        this.tickSafeStoneStandReachTimeout(serverLevel);
 
         if (this.stoneEgressPos != null) {
             if (this.moveToSafeStoneStand(serverLevel, true)) {
@@ -426,6 +449,7 @@ public class GatherStoneGoal extends Goal {
 
     @Override
     public void stop() {
+        this.playerNpc.endStoneSupplyGatheringEpisode();
         setStoneGatheringEpisodeActive(this.playerNpc, false);
         this.playerNpc.clearBlockBreakProgress(this.targetPos);
         this.toolAi.restoreMainHand();
@@ -447,8 +471,8 @@ public class GatherStoneGoal extends Goal {
         this.lastPhaseDiagnostic = "";
         this.skippedAccessClearBlocks.clear();
         this.temporarilyBlockedStoneEgress.clear();
-        this.phaseRecheckTicks = 0;
-        this.phaseStillActive = true;
+        this.nextContinueEligibilityCheckTick = 0;
+        this.nextStoneEgressPathAttemptTick = 0;
         this.clearedAccessForTarget = false;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
@@ -506,7 +530,8 @@ public class GatherStoneGoal extends Goal {
             if (checks++ >= MAX_TARGET_SELECTION_CHECKS) {
                 break;
             }
-            if (!StoneAi.isStone(serverLevel.getBlockState(candidate))
+            if (!serverLevel.hasChunkAt(candidate)
+                    || !StoneAi.isStone(serverLevel.getBlockState(candidate))
                     || isCurrentFeetColumnTarget(this.playerNpc, candidate)
                     || isInsideProtectedStoneTarget(this.playerNpc, candidate)) {
                 continue;
@@ -569,7 +594,8 @@ public class GatherStoneGoal extends Goal {
                 if (checks++ >= MAX_STONE_PATH_CHECKS) {
                     return Optional.empty();
                 }
-                if (StoneAi.isStone(serverLevel.getBlockState(candidate))
+                if (serverLevel.hasChunkAt(candidate)
+                        && StoneAi.isStone(serverLevel.getBlockState(candidate))
                         && !isInsideProtectedStoneTarget(playerNpc, candidate)
                         && (canMineFromCurrentPosition(serverLevel, playerNpc, candidate)
                         || findStandPos(playerNpc, serverLevel, candidate, pathNavigationAi).isPresent())) {
@@ -641,6 +667,9 @@ public class GatherStoneGoal extends Goal {
     }
 
     private boolean isValidTarget(ServerLevel serverLevel, BlockPos pos) {
+        if (pos == null || !serverLevel.hasChunkAt(pos)) {
+            return false;
+        }
         BlockState state = serverLevel.getBlockState(pos);
         return StoneAi.isStone(state)
                 && !isCurrentFeetColumnTarget(this.playerNpc, pos)
@@ -686,6 +715,7 @@ public class GatherStoneGoal extends Goal {
 
     private static boolean isWetStoneStand(ServerLevel serverLevel, BlockPos pos) {
         return pos != null
+                && serverLevel.hasChunkAt(pos)
                 && (serverLevel.getFluidState(pos).is(FluidTags.WATER)
                 || serverLevel.getFluidState(pos.above()).is(FluidTags.WATER)
                 || serverLevel.getFluidState(pos.below()).is(FluidTags.WATER));
@@ -695,7 +725,8 @@ public class GatherStoneGoal extends Goal {
         if (!serverLevel.isInWorldBounds(pos)
                 || !serverLevel.isInWorldBounds(pos.above())
                 || !serverLevel.getWorldBorder().isWithinBounds(pos)
-                || !serverLevel.getWorldBorder().isWithinBounds(pos.above())) {
+                || !serverLevel.getWorldBorder().isWithinBounds(pos.above())
+                || !serverLevel.hasChunkAt(pos)) {
             return false;
         }
 
@@ -719,6 +750,9 @@ public class GatherStoneGoal extends Goal {
             BlockPos pos,
             PathNavigationAi pathNavigationAi
     ) {
+        if (pos == null || !serverLevel.hasChunkAt(pos)) {
+            return false;
+        }
         Optional<BlockPos> stand = findStandPos(playerNpc, serverLevel, pos, pathNavigationAi);
         if (!StoneAi.isStone(serverLevel.getBlockState(pos))
                 || isCurrentFeetColumnTarget(playerNpc, pos)
@@ -745,7 +779,8 @@ public class GatherStoneGoal extends Goal {
         }
         if (isMiningJobActive(playerNpc)
                 && !playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
-                || isFarmingSupportJob(playerNpc)) {
+                || isFarmingSupportJob(playerNpc)
+                || isExploringSupplyJob(playerNpc)) {
             return true;
         }
 
@@ -864,8 +899,7 @@ public class GatherStoneGoal extends Goal {
         this.playerNpc.setCurrentAiDetail("moving to safe stone stand blocked "
                 + ResourceAi.countStone(this.playerNpc) + "/" + this.playerNpc.getStoneSupplyGoal());
         if (this.targetPos != null
-                && (this.repathTicks-- <= 0
-                || this.playerNpc.getNavigation().isStuck())) {
+                && this.repathTicks-- <= 0) {
             if (this.recordAccessFailureAndShouldReselect(serverLevel)) {
                 this.recoverFromBlockedStoneAccess(serverLevel, "stone stand blocked");
             }
@@ -891,6 +925,9 @@ public class GatherStoneGoal extends Goal {
         }
 
         if (this.stoneEgressPos == null) {
+            if (this.playerNpc.tickCount < this.nextStoneEgressPathAttemptTick) {
+                return true;
+            }
             Optional<BlockPos> selected = force
                     ? this.findNearbySafeStoneStand(serverLevel)
                     .or(() -> this.findSafeStoneStandEgressPos(serverLevel))
@@ -919,6 +956,11 @@ public class GatherStoneGoal extends Goal {
                 30.0F
         );
 
+        if (this.playerNpc.tickCount < this.nextStoneEgressPathAttemptTick) {
+            return true;
+        }
+        this.nextStoneEgressPathAttemptTick = this.playerNpc.tickCount
+                + STONE_EGRESS_REPATH_INTERVAL_TICKS;
         boolean moved = this.pathNavigationAi.moveTo(
                 serverLevel,
                 this.stoneEgressPos,
@@ -926,12 +968,14 @@ public class GatherStoneGoal extends Goal {
                 MAX_STAND_SAFE_DROP_BLOCKS
         );
         if (!moved) {
-            if (this.shouldRetrySafeStoneStandEgress()) {
+            boolean retry = this.shouldRetrySafeStoneStandEgress();
+            if (retry) {
                 this.markStoneEgressTemporarilyBlocked(serverLevel, this.stoneEgressPos, "safe stone stand path failed");
             }
             this.clearStoneEgressTarget();
+            return retry;
         }
-        return moved;
+        return true;
     }
 
     private void tickSafeStoneStandReachTimeout(ServerLevel serverLevel) {
@@ -1419,22 +1463,21 @@ public class GatherStoneGoal extends Goal {
     }
 
     private boolean canContinueStoneWork(ServerLevel serverLevel) {
-        if (this.phaseRecheckTicks > 0) {
-            this.phaseRecheckTicks--;
-            return this.phaseStillActive;
-        }
-
-        this.phaseRecheckTicks = PHASE_RECHECK_INTERVAL_TICKS;
         boolean miningJob = isMiningJobActive(this.playerNpc);
         boolean fishingSupportJob = isFishingSupportJob(this.playerNpc);
         boolean farmingSupportJob = isFarmingSupportJob(this.playerNpc);
+        boolean exploringSupplyJob = isExploringSupplyJob(this.playerNpc);
         boolean supplyPhaseActive = isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
-                || this.toolAi.hasTool(PickaxeItem.class)
-                && isStoneSupplyPhaseActiveWithAvailablePickaxe(this.playerNpc, serverLevel);
+                || (this.toolAi.hasTool(PickaxeItem.class)
+                && isStoneSupplyPhaseActiveWithAvailablePickaxe(this.playerNpc, serverLevel));
         boolean stayHomeForWeather = this.shouldStayHomeForWeather(serverLevel);
         boolean preparedBase = hasPreparedBaseForStone(this.playerNpc, serverLevel);
-        boolean accessAllowed = this.clearedAccessForTarget || fishingSupportJob || farmingSupportJob || preparedBase;
-        this.phaseStillActive = supplyPhaseActive
+        boolean accessAllowed = this.clearedAccessForTarget
+                || fishingSupportJob
+                || farmingSupportJob
+                || exploringSupplyJob
+                || preparedBase;
+        boolean phaseStillActive = supplyPhaseActive
                 && (!stayHomeForWeather || miningJob)
                 && accessAllowed;
         this.lastPhaseDiagnostic = "supply=" + supplyPhaseActive
@@ -1447,7 +1490,7 @@ public class GatherStoneGoal extends Goal {
                 + ",miningJob=" + miningJob
                 + ",night=" + serverLevel.isNight()
                 + ",thunder=" + serverLevel.isThundering();
-        return this.phaseStillActive;
+        return phaseStillActive;
     }
 
     private boolean isClearablePathState(BlockState state) {
@@ -1711,7 +1754,10 @@ public class GatherStoneGoal extends Goal {
     }
 
     private static String blockStateText(ServerLevel serverLevel, BlockPos pos) {
-        if (serverLevel == null || pos == null || !serverLevel.isInWorldBounds(pos)) {
+        if (serverLevel == null
+                || pos == null
+                || !serverLevel.isInWorldBounds(pos)
+                || !serverLevel.hasChunkAt(pos)) {
             return "none";
         }
 

@@ -420,7 +420,7 @@ public class GatherMaterialsGoal extends Goal {
             if (this.targetType == MaterialTarget.LOG && targetState.is(BlockTags.LOGS) && this.tryPillarTowardLog(serverLevel)) {
                 return;
             }
-            if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            if (this.repathTicks-- <= 0) {
                 if (this.tryStartPathObstructionMining(serverLevel)) {
                     return;
                 }

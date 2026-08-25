@@ -4,6 +4,7 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.clazz.FakePlayer;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
+import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.FarmAi;
@@ -17,6 +18,7 @@ import com.pla.smart_npc.entity.goal.BreakTargetObstructionGoal;
 import com.pla.smart_npc.entity.goal.BoatStockpileGoal;
 import com.pla.smart_npc.entity.goal.BoatTrapMonsterGoal;
 import com.pla.smart_npc.entity.goal.CallForHelpGoal;
+import com.pla.smart_npc.entity.goal.CautiousAvoidThreatGoal;
 import com.pla.smart_npc.entity.goal.CheckHomeSuppliesGoal;
 import com.pla.smart_npc.entity.goal.CombatFishingRodGoal;
 import com.pla.smart_npc.entity.goal.CookFoodGoal;
@@ -28,7 +30,6 @@ import com.pla.smart_npc.entity.goal.DescendHighColumnGoal;
 import com.pla.smart_npc.entity.goal.DigDownForStoneGoal;
 import com.pla.smart_npc.entity.goal.EatHealingFoodGoal;
 import com.pla.smart_npc.entity.goal.EscapeHoleWithBlockGoal;
-import com.pla.smart_npc.entity.goal.EscapeWaterCurrentGoal;
 import com.pla.smart_npc.entity.goal.ExploreAroundGoal;
 import com.pla.smart_npc.entity.goal.ExploreCaveOreGoal;
 import com.pla.smart_npc.entity.goal.FillWaterBucketGoal;
@@ -59,6 +60,7 @@ import com.pla.smart_npc.entity.goal.ReturnHomeGoal;
 import com.pla.smart_npc.entity.goal.ScaredHideGoal;
 import com.pla.smart_npc.entity.goal.ShieldGuardGoal;
 import com.pla.smart_npc.entity.goal.SleepAtHomeGoal;
+import com.pla.smart_npc.entity.goal.StartupWorkGatedGoal;
 import com.pla.smart_npc.entity.goal.PlantSaplingGoal;
 import com.pla.smart_npc.entity.goal.RetargetCloserThreatGoal;
 import com.pla.smart_npc.entity.goal.ThrowEnderPearlGoal;
@@ -90,6 +92,7 @@ import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.DamageTypeTags;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.DifficultyInstance;
@@ -267,6 +270,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int rawLogReserveTarget = 24;
     private int woodSupplyTarget = 64;
     private int cobblestoneSupplyTarget = 24;
+    private int activeLogSupplyTarget;
+    private int activeStoneSupplyTarget;
     private long lastSupplyGoalRerollDay = -1L;
     @Nullable
     private PlayerNpcInterest selectedDailyJobInterest;
@@ -973,7 +978,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public int getLogSupplyGoal() {
-        return this.rawLogReserveTarget;
+        return Math.max(this.rawLogReserveTarget, this.activeLogSupplyTarget);
     }
 
     public int getWoodSupplyTarget() {
@@ -985,7 +990,27 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public int getStoneSupplyGoal() {
-        return this.cobblestoneSupplyTarget;
+        return Math.max(this.cobblestoneSupplyTarget, this.activeStoneSupplyTarget);
+    }
+
+    public void beginLogSupplyGatheringEpisode() {
+        this.activeLogSupplyTarget = ResourceAi.countLogs(this) < this.rawLogReserveTarget
+                ? this.rawLogReserveTarget + ResourceAi.randomAdditionalSupplyAmount(this.getRandom())
+                : 0;
+    }
+
+    public void endLogSupplyGatheringEpisode() {
+        this.activeLogSupplyTarget = 0;
+    }
+
+    public void beginStoneSupplyGatheringEpisode() {
+        this.activeStoneSupplyTarget = ResourceAi.countStone(this) < this.cobblestoneSupplyTarget
+                ? this.cobblestoneSupplyTarget + ResourceAi.randomAdditionalSupplyAmount(this.getRandom())
+                : 0;
+    }
+
+    public void endStoneSupplyGatheringEpisode() {
+        this.activeStoneSupplyTarget = 0;
     }
 
     public boolean shouldPrioritizeLogGathering() {
@@ -1561,49 +1586,52 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         GatherLogsGoal gatherLogsGoal = new GatherLogsGoal(this, 1.0D);
         GatherMissingBuildMaterialGoal gatherMissingBuildMaterialGoal = new GatherMissingBuildMaterialGoal(this, 1.0D);
         TerraformBuildSiteGoal terraformBuildSiteGoal = new TerraformBuildSiteGoal(this, 1.0D);
+        // Floating only owns JUMP, so the active work goal keeps its MOVE target while swimming.
+        // Destination-aware water recovery is ticked by the work goal instead of globally
+        // redirecting the NPC to an unrelated nearby bank.
         this.goalSelector.addGoal(0, new FloatGoal(this));
-        this.goalSelector.addGoal(0, new EscapeWaterCurrentGoal(this));
         this.registerVanillaCombatReplacementGoals();
         this.goalSelector.addGoal(1, new EscapeHoleWithBlockGoal(this));
         this.goalSelector.addGoal(1, new DescendHighColumnGoal(this, terraformBuildSiteGoal));
         this.goalSelector.addGoal(1, new CallForHelpGoal(this));
-        this.goalSelector.addGoal(2, this.gated(new SleepAtHomeGoal(this), PlayerNpcInterest.BUILDING));
+        this.goalSelector.addGoal(1, this.gated(new CautiousAvoidThreatGoal(this), PlayerNpcInterest.CAUTIOUS));
+        this.addWorkGoal(2, this.gated(new SleepAtHomeGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(2, this.gated(new ScaredHideGoal(this), PlayerNpcInterest.CAUTIOUS));
-        this.goalSelector.addGoal(3, new PickupNearbyItemGoal(this, 1.0D));
+        this.addWorkGoal(3, new PickupNearbyItemGoal(this, 1.0D));
         this.goalSelector.addGoal(3, new RecoverWeaponInCombatGoal(this, 1.0D, 8.0D));
         this.goalSelector.addGoal(3, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS));
-        this.goalSelector.addGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(5, this.gated(terraformBuildSiteGoal, PlayerNpcInterest.BUILDING));
+        this.addWorkGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
+        this.addWorkGoal(5, this.gated(terraformBuildSiteGoal, PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new MeleeAttackGoal(this, 1.0D, true));
-        this.goalSelector.addGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(4, new MiningNightCampGoal(this, 1.0D));
-        this.goalSelector.addGoal(5, new CookFoodGoal(this));
-        this.goalSelector.addGoal(5, this.gated(new FarmSetupGoal(this), PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(5, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(5, this.gated(new CraftCropFoodGoal(this), PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(5, this.gated(new PlayerNpcFishingGoal(this), PlayerNpcInterest.FISHING));
-        this.goalSelector.addGoal(5, this.gated(new LootNearbyChestGoal(this, 1.0D), PlayerNpcInterest.LOOTING));
-        this.goalSelector.addGoal(5, this.gated(new JukeboxDanceGoal(this, 1.0D), PlayerNpcInterest.TROLL_HIT));
-        this.goalSelector.addGoal(5, this.gated(new TrollHitGoal(this), PlayerNpcInterest.TROLL_HIT));
-        this.goalSelector.addGoal(5, this.gated(new IronGolemTrollGoal(this), PlayerNpcInterest.TROLL_HIT));
-        this.goalSelector.addGoal(5, this.gated(new ManageHomeBaseGoal(this), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(5, this.gated(new CheckHomeSuppliesGoal(this), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(5, new CraftBasicGearGoal(this));
+        this.addWorkGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
+        this.addWorkGoal(4, new MiningNightCampGoal(this, 1.0D));
+        this.addWorkGoal(5, new CookFoodGoal(this));
+        this.addWorkGoal(5, this.gated(new FarmSetupGoal(this), PlayerNpcInterest.FARMING));
+        this.addWorkGoal(5, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
+        this.addWorkGoal(5, this.gated(new CraftCropFoodGoal(this), PlayerNpcInterest.FARMING));
+        this.addWorkGoal(5, this.gated(new PlayerNpcFishingGoal(this), PlayerNpcInterest.FISHING));
+        this.addWorkGoal(5, this.gated(new LootNearbyChestGoal(this, 1.0D), PlayerNpcInterest.LOOTING));
+        this.addWorkGoal(5, this.gated(new JukeboxDanceGoal(this, 1.0D), PlayerNpcInterest.TROLL_HIT));
+        this.addWorkGoal(5, this.gated(new TrollHitGoal(this), PlayerNpcInterest.TROLL_HIT));
+        this.addWorkGoal(5, this.gated(new IronGolemTrollGoal(this), PlayerNpcInterest.TROLL_HIT));
+        this.addWorkGoal(5, this.gated(new ManageHomeBaseGoal(this), PlayerNpcInterest.BUILDING));
+        this.addWorkGoal(5, this.gated(new CheckHomeSuppliesGoal(this), PlayerNpcInterest.BUILDING));
+        this.addWorkGoal(5, new CraftBasicGearGoal(this));
         this.goalSelector.addGoal(5, new BreakTargetObstructionGoal(this));
-        this.goalSelector.addGoal(5, this.gated(new CraftIronGearGoal(this), PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
-        this.goalSelector.addGoal(5, this.gated(new CraftShieldGoal(this), PlayerNpcInterest.CAUTIOUS, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
-        this.goalSelector.addGoal(5, this.gated(new UtilityCraftingGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.FISHING, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
-        this.goalSelector.addGoal(5, this.gated(new BoatStockpileGoal(this), PlayerNpcInterest.FISHING, PlayerNpcInterest.EXPLORING));
-        this.goalSelector.addGoal(5, this.gated(new PlantSaplingGoal(this), PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(5, this.gated(new UseSpyglassGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.CAUTIOUS));
-        this.goalSelector.addGoal(6, this.gated(gatherLogsGoal, PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
-        this.goalSelector.addGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(6, gatherMissingBuildMaterialGoal);
-        this.goalSelector.addGoal(7, this.gated(new MiningCaveStrollGoal(this, 1.0D), PlayerNpcInterest.MINING));
-        this.goalSelector.addGoal(7, this.gated(new FarmStrollGoal(this, 1.0D), PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        this.addWorkGoal(5, this.gated(new CraftIronGearGoal(this), PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
+        this.addWorkGoal(5, this.gated(new CraftShieldGoal(this), PlayerNpcInterest.CAUTIOUS, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
+        this.addWorkGoal(5, this.gated(new UtilityCraftingGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.FISHING, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
+        this.addWorkGoal(5, this.gated(new BoatStockpileGoal(this), PlayerNpcInterest.FISHING, PlayerNpcInterest.EXPLORING));
+        this.addWorkGoal(5, this.gated(new PlantSaplingGoal(this), PlayerNpcInterest.FARMING));
+        this.addWorkGoal(5, this.gated(new UseSpyglassGoal(this), PlayerNpcInterest.EXPLORING, PlayerNpcInterest.CAUTIOUS));
+        this.addWorkGoal(6, this.gated(gatherLogsGoal, PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING, PlayerNpcInterest.EXPLORING));
+        this.addWorkGoal(6, this.gated(new GatherStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING, PlayerNpcInterest.EXPLORING));
+        this.addWorkGoal(6, this.gated(new ExploreCaveOreGoal(this, 1.0D), PlayerNpcInterest.MINING));
+        this.addWorkGoal(6, this.gated(new DigDownForStoneGoal(this, 1.0D), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING, PlayerNpcInterest.EXPLORING));
+        this.addWorkGoal(6, gatherMissingBuildMaterialGoal);
+        this.addWorkGoal(7, this.gated(new MiningCaveStrollGoal(this, 1.0D), PlayerNpcInterest.MINING));
+        this.addWorkGoal(7, this.gated(new FarmStrollGoal(this, 1.0D), PlayerNpcInterest.FARMING));
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for logs",
@@ -1617,8 +1645,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 true,
                 true,
                 true
-        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING, PlayerNpcInterest.EXPLORING));
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for stone",
@@ -1628,8 +1656,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 level -> GatherStoneGoal.hasNearbyStoneTarget(this, level),
                 false
-        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        ), PlayerNpcInterest.BUILDING, PlayerNpcInterest.MINING, PlayerNpcInterest.FISHING, PlayerNpcInterest.FARMING, PlayerNpcInterest.EXPLORING));
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for a farm area",
@@ -1638,7 +1666,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 true,
                 false
         ), PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for seeds and crops",
@@ -1647,7 +1675,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 true,
                 false
         ), PlayerNpcInterest.FARMING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for water",
@@ -1658,7 +1686,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 true,
                 true
         ), PlayerNpcInterest.FISHING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "strolling around",
@@ -1669,7 +1697,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 false,
                 true
         ), PlayerNpcInterest.FISHING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring for build materials",
@@ -1679,7 +1707,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 gatherMissingBuildMaterialGoal::hasNearbyActionableGatherTarget
         ), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "strolling after finishing home",
@@ -1694,15 +1722,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 true,
                 true
         ), PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "exploring",
                 level -> this.isDailyJobActive(PlayerNpcInterest.EXPLORING)
+                        && !this.shouldPrioritizeLogGathering()
+                        && !this.shouldPrioritizeCobblestoneGathering()
                         && !this.shouldStayHomeForWeather(level),
                 level -> false
         ), PlayerNpcInterest.EXPLORING));
-        this.goalSelector.addGoal(7, this.gated(new ExploreAroundGoal(
+        this.addWorkGoal(7, this.gated(new ExploreAroundGoal(
                 this,
                 1.0D,
                 "patrolling home for monsters",
@@ -1714,7 +1744,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 true,
                 false
         ), PlayerNpcInterest.HUNT_MONSTERS));
-        this.goalSelector.addGoal(4, this.gated(new BeingAtHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
+        this.addWorkGoal(4, this.gated(new BeingAtHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
         ((GroundPathNavigation) this.getNavigation()).setCanOpenDoors(true);
         ((GroundPathNavigation) this.getNavigation()).setCanFloat(true);
@@ -1728,6 +1758,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return new InterestGatedGoal(this, goal, interests);
     }
 
+    private void addWorkGoal(int priority, Goal goal) {
+        this.goalSelector.addGoal(priority, new StartupWorkGatedGoal(this, goal));
+    }
+
     private boolean shouldStayHomeForWeather(ServerLevel serverLevel) {
         return PlayerNpcHomeUtil.getHome(this).isPresent()
                 && (serverLevel.isNight() || serverLevel.isThundering());
@@ -1738,6 +1772,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return true;
         }
         if (this.isDailyJobActive(PlayerNpcInterest.MINING) && !this.hasInterest(PlayerNpcInterest.BUILDING)) {
+            return true;
+        }
+        if (this.isDailyJobActive(PlayerNpcInterest.EXPLORING)) {
             return true;
         }
         if (this.hasInterest(PlayerNpcInterest.BUILDING) && this.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
@@ -1774,7 +1811,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(4, this.gated(new BoatTrapMonsterGoal(this), PlayerNpcInterest.HUNT_MONSTERS));
         this.goalSelector.addGoal(4, this.gated(new UseFlintAndSteelGoal(this), PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS, PlayerNpcInterest.TROLL_HIT));
         this.goalSelector.addGoal(4, this.gated(new UseLavaBucketGoal(this), PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS, PlayerNpcInterest.TROLL_HIT));
-        this.goalSelector.addGoal(8, new FillWaterBucketGoal(this, 1.0D));
+        this.addWorkGoal(8, new FillWaterBucketGoal(this, 1.0D));
     }
 
     public @NotNull MobType getMobType() {
@@ -1976,7 +2013,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || "ai.player_npc.escaping_hole".equals(state)
                 || "ai.player_npc.descending_column".equals(state)
                 || "ai.player_npc.pillaring_up".equals(state)
-                || "ai.player_npc.escaping_water_current".equals(state)
                 || "ai.player_npc.breaking_target_obstruction".equals(state)
                 || "ai.player_npc.managing_home".equals(state)
                 || "ai.player_npc.checking_home_supplies".equals(state)
@@ -2502,6 +2538,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.idleTraceDetail = "";
         }
         this.upwardEscapeRequestTicks = tickCooldown(this.upwardEscapeRequestTicks);
+        BlockPos feet = this.blockPosition();
+        boolean wetForLandEscape = this.isInWaterOrBubble()
+                || this.level().getFluidState(feet).is(FluidTags.WATER)
+                || this.level().getFluidState(feet.above()).is(FluidTags.WATER)
+                || !this.onGround() && this.level().getFluidState(feet.below()).is(FluidTags.WATER);
+        if (wetForLandEscape && this.getUpwardEscapeTarget() != null) {
+            // A land pillar request is invalid once its owner has fallen into water. Keeping it
+            // lets EscapeHoleWithBlockGoal preempt destination-aware swimming after FloatGoal
+            // starts, so discard it and let the owning travel goal cross the water instead.
+            this.clearUpwardEscapeTarget();
+        }
         if (this.upwardEscapeRequestTicks <= 0) {
             boolean hasExplorationClimbFallbackDetail = this.hasExplorationClimbFallbackDetail();
             if (this.upwardEscapeTarget != null
@@ -3494,6 +3541,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     public SpawnGroupData finalizeSpawn(@NotNull ServerLevelAccessor serverLevelAccessor, @NotNull DifficultyInstance difficultyInstance, @NotNull MobSpawnType mobSpawnType, @Nullable SpawnGroupData spawngroupdata, @Nullable CompoundTag compoundtag) {
         SpawnGroupData returnSpawnGroupData = super.finalizeSpawn(serverLevelAccessor, difficultyInstance, mobSpawnType, spawngroupdata, compoundtag);
 
+        if (this.isRemoved()) {
+            return returnSpawnGroupData;
+        }
+
         ServerLevel serverLevel = serverLevelAccessor.getLevel();
 
         this.setCurrentAiState(AI_IDLE);
@@ -3691,8 +3742,20 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public static boolean canSpawn(EntityType<PlayerNpcEntity> entityType, ServerLevelAccessor level, MobSpawnType spawnType, BlockPos position, RandomSource random) {
         ServerLevel serverLevel = level.getLevel();
+        if (spawnType != MobSpawnType.SPAWN_EGG
+                && spawnType != MobSpawnType.COMMAND && spawnType != MobSpawnType.STRUCTURE
+                && SmartNpcConfig.isForceTickManageEnabled()) {
+            int maxNaturalPlayerNpcs = SmartNpcConfig.getMaxNaturalPlayerNpcs();
+            if (maxNaturalPlayerNpcs == 0
+                    || (maxNaturalPlayerNpcs > 0
+                    && PlayerNpcForceTickManager.livingNpcCount(serverLevel.getServer()) >= maxNaturalPlayerNpcs)) {
+                return false;
+            }
+        }
+        if (!hasAvailableConfiguredName(serverLevel.getServer())) {
+            return false;
+        }
         if (serverLevel.isNight()) {
-            // Nerf Player NPC spawn at night
             return false;
         }
         return PathfinderMob.checkMobSpawnRules(entityType, level, spawnType, position, random);

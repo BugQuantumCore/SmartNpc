@@ -26,6 +26,7 @@ public final class PlayerNpcForceTickData extends SavedData {
     private static final String DIMENSION_TAG = "Dimension";
     private static final String CHUNK_X_TAG = "ChunkX";
     private static final String CHUNK_Z_TAG = "ChunkZ";
+    private static final String USERNAME_TAG = "Username";
 
     private final Map<UUID, Entry> entries = new LinkedHashMap<>();
 
@@ -54,7 +55,10 @@ public final class PlayerNpcForceTickData extends SavedData {
             UUID npcId = npcTag.getUUID(ID_TAG);
             ResourceKey<Level> levelKey = ResourceKey.create(Registries.DIMENSION, dimensionId);
             ChunkPos centerChunk = new ChunkPos(npcTag.getInt(CHUNK_X_TAG), npcTag.getInt(CHUNK_Z_TAG));
-            data.entries.put(npcId, new Entry(npcId, levelKey, centerChunk));
+            String username = npcTag.contains(USERNAME_TAG, Tag.TAG_STRING)
+                    ? npcTag.getString(USERNAME_TAG)
+                    : "";
+            data.entries.put(npcId, new Entry(npcId, levelKey, centerChunk, username));
         }
         return data;
     }
@@ -68,6 +72,9 @@ public final class PlayerNpcForceTickData extends SavedData {
             npcTag.putString(DIMENSION_TAG, entry.levelKey().location().toString());
             npcTag.putInt(CHUNK_X_TAG, entry.centerChunk().x);
             npcTag.putInt(CHUNK_Z_TAG, entry.centerChunk().z);
+            if (!entry.username().isBlank()) {
+                npcTag.putString(USERNAME_TAG, entry.username());
+            }
             npcs.add(npcTag);
         }
         tag.put(NPCS_TAG, npcs);
@@ -78,8 +85,8 @@ public final class PlayerNpcForceTickData extends SavedData {
         return new ArrayList<>(this.entries.values());
     }
 
-    public void put(UUID npcId, ResourceKey<Level> levelKey, ChunkPos centerChunk) {
-        Entry nextEntry = new Entry(npcId, levelKey, centerChunk);
+    public void put(UUID npcId, ResourceKey<Level> levelKey, ChunkPos centerChunk, String username) {
+        Entry nextEntry = new Entry(npcId, levelKey, centerChunk, Objects.requireNonNullElse(username, ""));
         if (Objects.equals(this.entries.get(npcId), nextEntry)) {
             return;
         }
@@ -94,6 +101,6 @@ public final class PlayerNpcForceTickData extends SavedData {
         }
     }
 
-    public record Entry(UUID npcId, ResourceKey<Level> levelKey, ChunkPos centerChunk) {
+    public record Entry(UUID npcId, ResourceKey<Level> levelKey, ChunkPos centerChunk, String username) {
     }
 }

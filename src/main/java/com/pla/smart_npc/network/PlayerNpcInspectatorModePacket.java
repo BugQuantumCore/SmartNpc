@@ -9,12 +9,14 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.GameType;
 import net.minecraftforge.network.NetworkEvent;
+import net.minecraftforge.network.PacketDistributor;
 
 import java.util.function.Supplier;
 
 public class PlayerNpcInspectatorModePacket {
     private static final String ACTIVE_KEY = "PlayerNpcInspectatorActive";
     private static final String ORIGINAL_GAME_MODE_KEY = "PlayerNpcInspectatorOriginalGameMode";
+    private static final String TARGET_UUID_KEY = "PlayerNpcInspectatorTarget";
     private static final double MAX_START_DISTANCE_SQR = 96.0D * 96.0D;
 
     private final boolean active;
@@ -68,7 +70,11 @@ public class PlayerNpcInspectatorModePacket {
                 : player.gameMode.getGameModeForPlayer().getId();
         data.remove(ACTIVE_KEY);
         data.remove(ORIGINAL_GAME_MODE_KEY);
+        data.remove(TARGET_UUID_KEY);
 
+        player.setCamera(player);
+        // Clean up passengers left by older inspector sessions, which used
+        // forced riding as their camera anchor.
         if (player.getVehicle() instanceof PlayerNpcEntity) {
             player.stopRiding();
         }
@@ -78,8 +84,49 @@ public class PlayerNpcInspectatorModePacket {
         }
     }
 
+    public static void restorePlayerAndClearInspector(ServerPlayer player) {
+        restorePlayer(player);
+        if (player.connection != null) {
+            SmartNpcNetwork.CHANNEL.send(
+                    PacketDistributor.PLAYER.with(() -> player),
+                    PlayerNpcInspectorPacket.clear()
+            );
+        }
+    }
+
     public static boolean isInspectatorActive(Entity entity) {
         return entity != null && entity.getPersistentData().getBoolean(ACTIVE_KEY);
+    }
+
+    public static boolean isInspecting(ServerPlayer player, PlayerNpcEntity playerNpc) {
+        if (!isInspectatorActive(player) || playerNpc == null) {
+            return false;
+        }
+
+        CompoundTag data = player.getPersistentData();
+        return player.getCamera() == playerNpc
+                || data.hasUUID(TARGET_UUID_KEY) && data.getUUID(TARGET_UUID_KEY).equals(playerNpc.getUUID());
+    }
+
+    public static boolean hasValidInspectatorTarget(ServerPlayer player) {
+        if (!isInspectatorActive(player)) {
+            return true;
+        }
+        if (player.gameMode.getGameModeForPlayer() != GameType.SPECTATOR) {
+            return false;
+        }
+
+        Entity camera = player.getCamera();
+        if (!(camera instanceof PlayerNpcEntity playerNpc)
+                || !playerNpc.isAlive()
+                || playerNpc.isRemoved()
+                || playerNpc.level() != player.level()) {
+            return false;
+        }
+
+        CompoundTag data = player.getPersistentData();
+        return data.hasUUID(TARGET_UUID_KEY)
+                && data.getUUID(TARGET_UUID_KEY).equals(playerNpc.getUUID());
     }
 
     public static void beginInspectator(ServerPlayer player, PlayerNpcEntity playerNpc) {
@@ -87,10 +134,20 @@ public class PlayerNpcInspectatorModePacket {
     }
 
     public static void beginInspectator(ServerPlayer player, PlayerNpcEntity playerNpc, boolean teleportToNpc) {
-        if (teleportToNpc && playerNpc.level() instanceof ServerLevel serverLevel) {
-            if (player.getVehicle() != null && player.getVehicle() != playerNpc) {
-                player.stopRiding();
-            }
+        if (!player.isAlive()
+                || player.isRemoved()
+                || !playerNpc.isAlive()
+                || playerNpc.isRemoved()
+                || !(playerNpc.level() instanceof ServerLevel serverLevel)) {
+            restorePlayerAndClearInspector(player);
+            return;
+        }
+
+        if (player.getVehicle() instanceof PlayerNpcEntity) {
+            player.stopRiding();
+        }
+
+        if (teleportToNpc && player.level() != serverLevel) {
             player.teleportTo(serverLevel, playerNpc.getX(), playerNpc.getY(), playerNpc.getZ(), playerNpc.getYRot(), playerNpc.getXRot());
         }
 
@@ -101,11 +158,9 @@ public class PlayerNpcInspectatorModePacket {
             data.putInt(ORIGINAL_GAME_MODE_KEY, player.gameMode.getGameModeForPlayer().getId());
             data.putBoolean(ACTIVE_KEY, true);
         }
+        data.putUUID(TARGET_UUID_KEY, playerNpc.getUUID());
 
         player.setGameMode(GameType.SPECTATOR);
-        if (player.getVehicle() != playerNpc) {
-            player.stopRiding();
-            player.startRiding(playerNpc, true);
-        }
+        player.setCamera(playerNpc);
     }
 }

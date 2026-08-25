@@ -411,7 +411,7 @@ public class TerraformBuildSiteGoal extends Goal {
                     && this.startClearingRoute(serverLevel, pos)) {
                 return;
             }
-            if (this.repathTicks-- <= 0 || navigationProblem) {
+            if (this.repathTicks-- <= 0) {
                 this.repathTicks = 20;
                 this.moveToTarget(serverLevel);
             }

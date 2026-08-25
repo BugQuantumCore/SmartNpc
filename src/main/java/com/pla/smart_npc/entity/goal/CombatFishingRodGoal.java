@@ -56,7 +56,7 @@ public class CombatFishingRodGoal extends Goal {
         if (distanceSqr < MIN_DISTANCE_SQR || distanceSqr > MAX_DISTANCE_SQR) {
             return false;
         }
-        if (this.playerNpc.tickCount % 12 != 0 || this.playerNpc.getRandom().nextFloat() > 0.22F) {
+        if (this.playerNpc.getRandom().nextFloat() > 0.22F) {
             return false;
         }
 

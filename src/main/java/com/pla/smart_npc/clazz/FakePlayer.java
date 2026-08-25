@@ -2,6 +2,8 @@ package com.pla.smart_npc.clazz;
 
 import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.minecraft.MinecraftProfileTexture;
+import com.pla.smart_npc.config.SmartNpcNamesConfig;
+import com.pla.smart_npc.util.PlayerNpcForceTickManager;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtUtils;
 import net.minecraft.network.chat.Component;
@@ -9,6 +11,7 @@ import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.RandomSource;
 import net.minecraft.util.StringUtil;
 import net.minecraft.world.DifficultyInstance;
@@ -25,57 +28,23 @@ import javax.annotation.Nullable;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class FakePlayer extends PathfinderMob {
     private static final EntityDataAccessor<String> NAME = SynchedEntityData.defineId(FakePlayer.class, EntityDataSerializers.STRING);
-    private static final List<FakePlayerName> HARDCODED_NAMES = List.of(
-            new FakePlayerName("mine", PlayerNpcInterest.MINING),
-            new FakePlayerName("build", PlayerNpcInterest.BUILDING),
-            new FakePlayerName("fish", PlayerNpcInterest.FISHING),
-            new FakePlayerName("farm", PlayerNpcInterest.FARMING)
-//            new FakePlayerName("Darkere", PlayerNpcInterest.BUILDING, PlayerNpcInterest.HUNT_ANIMALS),
-//            new FakePlayerName("Darkhax", PlayerNpcInterest.MINING),
-//            new FakePlayerName("Emberwalker", PlayerNpcInterest.BUILDING, PlayerNpcInterest.HUNT_MONSTERS),
-//            new FakePlayerName("Gigabit101", PlayerNpcInterest.BUILDING),
-//            new FakePlayerName("Kamefrede", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_MONSTERS),
-//            new FakePlayerName("KnightMiner_", PlayerNpcInterest.MINING),
-//            new FakePlayerName("Lat", PlayerNpcInterest.MINING),
-//            new FakePlayerName("LexManos", PlayerNpcInterest.MINING, PlayerNpcInterest.LOOTING),
-//            new FakePlayerName("Mrbysco", PlayerNpcInterest.BUILDING, PlayerNpcInterest.LOOTING),
-//            new FakePlayerName("P3pp3rF1y", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_PLAYERS),
-//            new FakePlayerName("Ray", PlayerNpcInterest.BUILDING, PlayerNpcInterest.HUNT_PLAYERS),
-//            new FakePlayerName("Ridanis", PlayerNpcInterest.BUILDING, PlayerNpcInterest.HUNT_ANIMALS),
-//            new FakePlayerName("SOTMead", PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS),
-//            new FakePlayerName("ShyNieke", PlayerNpcInterest.CAUTIOUS, PlayerNpcInterest.HUNT_MONSTERS),
-//            new FakePlayerName("SkySom", PlayerNpcInterest.EXPLORING, PlayerNpcInterest.LOOTING),
-//            new FakePlayerName("Soaryn", PlayerNpcInterest.BUILDING),
-//            new FakePlayerName("ValkyrieofNight", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_MONSTERS),
-//            new FakePlayerName("XCompWiz", PlayerNpcInterest.BUILDING),
-//            new FakePlayerName("DaReal_BingoBear", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_ANIMALS),
-//            new FakePlayerName("darkphan", PlayerNpcInterest.BUILDING, PlayerNpcInterest.LOOTING),
-//            new FakePlayerName("direwolf20", PlayerNpcInterest.MINING),
-//            new FakePlayerName("dmodoomsirius", PlayerNpcInterest.BUILDING, PlayerNpcInterest.LOOTING),
-//            new FakePlayerName("dmodoomsirius", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_VILLAGERS),
-//            new FakePlayerName("malte0811", PlayerNpcInterest.BUILDING),
-//            new FakePlayerName("nekosune", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_PLAYERS),
-//            new FakePlayerName("neptunepink", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_PLAYERS),
-//            new FakePlayerName("vadis365", PlayerNpcInterest.BUILDING, PlayerNpcInterest.HUNT_VILLAGERS),
-//            new FakePlayerName("wyld", PlayerNpcInterest.BUILDING),
-//            new FakePlayerName("paulsoaresjr", PlayerNpcInterest.BUILDING, PlayerNpcInterest.LOOTING),
-//            new FakePlayerName("Mhykol", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_MONSTERS),
-//            new FakePlayerName("Vswe", PlayerNpcInterest.BUILDING),
-//            new FakePlayerName("TurkeyDev", PlayerNpcInterest.BUILDING),
-//            new FakePlayerName("Gen_Deathrow", PlayerNpcInterest.BUILDING, PlayerNpcInterest.HUNT_MONSTERS),
-//            new FakePlayerName("Sevadus", PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_VILLAGERS)
-    );
     private static final List<PlayerNpcInterest> DEFAULT_INTERESTS = List.of(
             PlayerNpcInterest.BUILDING
     );
     private static final Queue<FakePlayerName> NAME_POOL = new ArrayDeque<>();
+    private static List<String> cachedNameEntries = List.of();
+    private static List<FakePlayerName> cachedNames = List.of();
+    private static boolean nameConfigInitialized;
     private static final Queue<FakePlayer> PROFILE_QUEUE = new ConcurrentLinkedQueue<>();
     private static final Object PROFILE_LOCK = new Object();
     private static Thread profileThread;
@@ -155,7 +124,12 @@ public class FakePlayer extends PathfinderMob {
     public @Nullable SpawnGroupData finalizeSpawn(@NotNull ServerLevelAccessor level, @NotNull DifficultyInstance difficulty, @NotNull MobSpawnType spawnType, @Nullable SpawnGroupData groupData, @Nullable CompoundTag tag) {
         SpawnGroupData result = super.finalizeSpawn(level, difficulty, spawnType, groupData, tag);
         if (!this.hasUsername()) {
-            this.setUsername(nextHardcodedName(level.getRandom()));
+            FakePlayerName nextName = nextConfiguredName(level.getRandom(), level.getLevel().getServer());
+            if (nextName == null) {
+                this.discard();
+                return result;
+            }
+            this.setUsername(nextName);
         }
         return result;
     }
@@ -178,7 +152,12 @@ public class FakePlayer extends PathfinderMob {
         if (!StringUtil.isNullOrEmpty(username)) {
             this.setUsername(username);
         } else if (!this.level().isClientSide()) {
-            this.setUsername(nextHardcodedName(this.getRandom()));
+            FakePlayerName nextName = nextConfiguredName(this.getRandom(), this.level().getServer());
+            if (nextName == null) {
+                this.discard();
+            } else {
+                this.setUsername(nextName);
+            }
         }
         if (tag.contains("Profile", CompoundTag.TAG_COMPOUND)) {
             this.profile = NbtUtils.readGameProfile(tag.getCompound("Profile"));
@@ -211,7 +190,10 @@ public class FakePlayer extends PathfinderMob {
 
     public FakePlayerName getUsername() {
         if (!this.hasUsername() && !this.level().isClientSide()) {
-            this.setUsername(nextHardcodedName(this.getRandom()));
+            FakePlayerName nextName = nextConfiguredName(this.getRandom(), this.level().getServer());
+            if (nextName != null) {
+                this.setUsername(nextName);
+            }
         }
         return new FakePlayerName(this.entityData.get(NAME));
     }
@@ -221,9 +203,13 @@ public class FakePlayer extends PathfinderMob {
     }
 
     public void setUsername(FakePlayerName username) {
-        FakePlayerName newName = username == null || username.isInvalid()
-                ? nextHardcodedName(this.getRandom())
-                : username;
+        FakePlayerName newName = username;
+        if (newName == null || newName.isInvalid()) {
+            newName = nextConfiguredName(this.getRandom(), this.level().getServer());
+            if (newName == null) {
+                return;
+            }
+        }
         FakePlayerName oldName = this.hasUsername() ? this.getUsername() : null;
 
         useName(newName);
@@ -293,26 +279,97 @@ public class FakePlayer extends PathfinderMob {
         this.elytraAvailable = false;
     }
 
-    private static FakePlayerName nextHardcodedName(RandomSource random) {
+    private static @Nullable FakePlayerName nextConfiguredName(RandomSource random, @Nullable MinecraftServer server) {
         synchronized (NAME_POOL) {
+            List<FakePlayerName> configuredNames = configuredNames();
+            if (configuredNames.isEmpty()) {
+                return null;
+            }
+
+            Set<String> usedNameKeys = server == null
+                    ? Set.of()
+                    : PlayerNpcForceTickManager.livingNpcNameKeys(server);
+            NAME_POOL.removeIf(name -> isNameUsed(name, usedNameKeys));
             if (NAME_POOL.isEmpty()) {
-                List<FakePlayerName> shuffled = new ArrayList<>(HARDCODED_NAMES);
+                List<FakePlayerName> shuffled = new ArrayList<>();
+                for (FakePlayerName name : configuredNames) {
+                    if (!isNameUsed(name, usedNameKeys)) {
+                        shuffled.add(name);
+                    }
+                }
                 Collections.shuffle(shuffled, new java.util.Random(random.nextLong()));
                 NAME_POOL.addAll(shuffled);
             }
-            FakePlayerName name = NAME_POOL.poll();
-            return name == null ? new FakePlayerName("Steve") : name;
+            return NAME_POOL.poll();
         }
     }
 
     private static void useName(FakePlayerName name) {
         synchronized (NAME_POOL) {
-            NAME_POOL.remove(name);
+            configuredNames();
+            NAME_POOL.removeIf(candidate -> sameName(candidate, name));
         }
     }
 
     public static String getRandomHardcodedName(RandomSource random) {
-        return nextHardcodedName(random).getCombinedNames();
+        FakePlayerName name = nextConfiguredName(random, null);
+        return name == null ? "" : name.getCombinedNames();
+    }
+
+    public static boolean hasAvailableConfiguredName(MinecraftServer server) {
+        List<FakePlayerName> configuredNames = configuredNames();
+        if (configuredNames.isEmpty()) {
+            return false;
+        }
+
+        Set<String> usedNameKeys = PlayerNpcForceTickManager.livingNpcNameKeys(server);
+        for (FakePlayerName name : configuredNames) {
+            if (!isNameUsed(name, usedNameKeys)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<FakePlayerName> configuredNames() {
+        synchronized (NAME_POOL) {
+            List<String> configuredEntries = SmartNpcNamesConfig.getPlayerNpcNameEntries();
+            if (nameConfigInitialized && configuredEntries.equals(cachedNameEntries)) {
+                return cachedNames;
+            }
+
+            List<FakePlayerName> names = new ArrayList<>();
+            Set<String> usedSkinNames = new HashSet<>();
+            for (String configuredEntry : configuredEntries) {
+                SmartNpcNamesConfig.parseNameEntry(configuredEntry).ifPresent(entry -> {
+                    if (!usedSkinNames.add(normalizeName(entry.skinName()))) {
+                        return;
+                    }
+                    PlayerNpcInterest[] interests = entry.interests().toArray(PlayerNpcInterest[]::new);
+                    names.add(new FakePlayerName(entry.skinName(), entry.displayName(), interests));
+                });
+            }
+
+            cachedNameEntries = List.copyOf(configuredEntries);
+            cachedNames = List.copyOf(names);
+            nameConfigInitialized = true;
+            NAME_POOL.clear();
+            return cachedNames;
+        }
+    }
+
+    private static boolean isNameUsed(FakePlayerName name, Set<String> usedNameKeys) {
+        return usedNameKeys.contains(normalizeName(name.getSkinName()))
+                || usedNameKeys.contains(normalizeName(name.getDisplayName()));
+    }
+
+    private static boolean sameName(FakePlayerName first, FakePlayerName second) {
+        return normalizeName(first.getSkinName()).equals(normalizeName(second.getSkinName()))
+                || normalizeName(first.getDisplayName()).equals(normalizeName(second.getDisplayName()));
+    }
+
+    private static String normalizeName(String name) {
+        return name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
     }
 
     private static void requestProfileUpdate(FakePlayer entity) {
@@ -356,13 +413,13 @@ public class FakePlayer extends PathfinderMob {
             String[] names = combinedName == null ? new String[] {""} : combinedName.split(":", 2);
             this.skinName = names[0];
             this.displayName = names.length > 1 && !StringUtil.isNullOrEmpty(names[1]) ? names[1] : null;
-            this.interests = hardcodedInterests(this.skinName);
+            this.interests = configuredInterests(this.skinName);
         }
 
         public FakePlayerName(String skinName, String displayName) {
             this.skinName = skinName;
             this.displayName = StringUtil.isNullOrEmpty(displayName) ? null : displayName;
-            this.interests = hardcodedInterests(this.skinName);
+            this.interests = configuredInterests(this.skinName);
         }
 
         public FakePlayerName(String skinName, PlayerNpcInterest... interests) {
@@ -427,10 +484,10 @@ public class FakePlayer extends PathfinderMob {
             return List.copyOf(result);
         }
 
-        private static List<PlayerNpcInterest> hardcodedInterests(String skinName) {
+        private static List<PlayerNpcInterest> configuredInterests(String skinName) {
             if (!StringUtil.isNullOrEmpty(skinName)) {
-                for (FakePlayerName name : HARDCODED_NAMES) {
-                    if (skinName.equals(name.skinName)) {
+                for (FakePlayerName name : configuredNames()) {
+                    if (skinName.equalsIgnoreCase(name.skinName)) {
                         return name.interests;
                     }
                 }

@@ -9,6 +9,7 @@ import com.pla.smart_npc.entity.goal.BuildHouseGoal;
 import com.pla.smart_npc.entity.goal.GatherMissingBuildMaterialGoal;
 import com.pla.smart_npc.entity.goal.GatherStoneGoal;
 import com.pla.smart_npc.entity.goal.InterestGatedGoal;
+import com.pla.smart_npc.entity.goal.StartupWorkGatedGoal;
 import com.pla.smart_npc.entity.goal.TerraformBuildSiteGoal;
 import com.pla.smart_npc.network.PlayerNpcInspectatorModePacket;
 import net.minecraft.core.BlockPos;
@@ -417,8 +418,11 @@ public final class PlayerNpcGoalTraceLogger {
     }
 
     private static Goal unwrapGoal(Goal goal) {
+        if (goal instanceof StartupWorkGatedGoal startupWorkGatedGoal) {
+            return unwrapGoal(startupWorkGatedGoal.getDelegateGoal());
+        }
         if (goal instanceof InterestGatedGoal interestGatedGoal) {
-            return interestGatedGoal.getDelegateGoal();
+            return unwrapGoal(interestGatedGoal.getDelegateGoal());
         }
         return goal;
     }

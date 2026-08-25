@@ -774,7 +774,7 @@ public final class FarmCropGoal extends Goal {
             }
             return;
         }
-        if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+        if (this.repathTicks-- <= 0) {
             if (!this.moveToStand(serverLevel)) {
                 this.routeFailureTicks++;
             }

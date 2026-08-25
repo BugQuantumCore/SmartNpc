@@ -20,6 +20,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
     private final Mob mob;
     private final double speed;
     private final double searchRadius;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(10);
 
     private ItemEntity targetItem;
     private int inventoryWeaponSlot = -1;
@@ -31,6 +32,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
     private int repathCooldown;
 
     private static final int MAX_LOCK_TICKS = 60;
+    private static final int REPATH_INTERVAL_TICKS = 10;
 
     public RecoverWeaponInCombatGoal(Mob mob, double speed, double searchRadius) {
         this.mob = mob;
@@ -63,6 +65,10 @@ public class RecoverWeaponInCombatGoal extends Goal {
         }
 
         if (!mainWeaponIsEmpty()) {
+            return false;
+        }
+        if (mob instanceof PlayerNpcEntity playerNpcEntity
+                && !this.canUseThrottle.canCheck(playerNpcEntity)) {
             return false;
         }
 
@@ -135,6 +141,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
             mob.setTarget(null);
             mob.getNavigation().stop();
             mob.getNavigation().moveTo(targetItem, speed);
+            this.repathCooldown = REPATH_INTERVAL_TICKS;
         }
     }
 
@@ -260,8 +267,8 @@ public class RecoverWeaponInCombatGoal extends Goal {
             return;
         }
 
-        if (repathCooldown-- <= 0 || mob.getNavigation().isDone()) {
-            repathCooldown = 4;
+        if (repathCooldown-- <= 0) {
+            repathCooldown = REPATH_INTERVAL_TICKS;
 
             mob.getNavigation().moveTo(
                     targetItem.getX(),

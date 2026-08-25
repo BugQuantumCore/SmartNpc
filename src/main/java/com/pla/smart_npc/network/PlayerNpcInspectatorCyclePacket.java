@@ -8,7 +8,6 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.network.NetworkEvent;
 import net.minecraftforge.network.PacketDistributor;
 
-import java.util.Optional;
 import java.util.function.Supplier;
 
 public class PlayerNpcInspectatorCyclePacket {
@@ -50,14 +49,16 @@ public class PlayerNpcInspectatorCyclePacket {
                 return;
             }
 
-            Optional<PlayerNpcEntity> currentNpc = PlayerNpcForceTickManager.findTrackedByEntityId(
+            if (!(sender.getCamera() instanceof PlayerNpcEntity currentNpc)
+                    || currentNpc.getId() != packet.currentEntityId
+                    || !PlayerNpcInspectatorModePacket.isInspecting(sender, currentNpc)) {
+                PlayerNpcInspectatorModePacket.restorePlayerAndClearInspector(sender);
+                sendResult(sender, PlayerNpcInspectatorCycleResultPacket.handled(-1));
+                return;
+            }
+            var nextNpc = PlayerNpcForceTickManager.findNextForInspectator(
                     sender.server,
-                    sender.serverLevel(),
-                    packet.currentEntityId
-            );
-            Optional<PlayerNpcEntity> nextNpc = PlayerNpcForceTickManager.findNextForInspectator(
-                    sender.server,
-                    currentNpc.orElse(null),
+                    currentNpc,
                     packet.direction
             );
             if (nextNpc.isEmpty()) {

@@ -50,6 +50,8 @@ public class CraftBasicGearGoal extends Goal {
     private static final double TEMP_CRAFTING_TABLE_REUSE_DISTANCE_SQR = 32.0D * 32.0D;
     private static final double CRAFTING_TABLE_USE_DISTANCE_SQR = 2.25D * 2.25D;
     private static final int CRAFT_ACTION_DELAY_TICKS = 12;
+    private static final int CRAFTING_REPATH_INTERVAL_TICKS = 20;
+    private static final int CONTINUE_SUPPLY_RECHECK_TICKS = 20;
     private static final double DIRECT_CRAFTING_STEP_DISTANCE_SQR = 8.0D * 8.0D;
 
     public static boolean hasTemporaryCraftingTable(PlayerNpcEntity playerNpc) {
@@ -58,12 +60,17 @@ public class CraftBasicGearGoal extends Goal {
 
     public static boolean hasValidTemporaryCraftingTable(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         BlockPos pos = getTemporaryCraftingTablePos(playerNpc);
-        return pos != null && serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE);
+        return pos != null
+                && serverLevel.hasChunkAt(pos)
+                && serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE);
     }
 
     public static boolean isTemporaryCraftingTable(PlayerNpcEntity playerNpc, ServerLevel serverLevel, BlockPos pos) {
         BlockPos tablePos = getTemporaryCraftingTablePos(playerNpc);
-        return tablePos != null && tablePos.equals(pos) && serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE);
+        return tablePos != null
+                && tablePos.equals(pos)
+                && serverLevel.hasChunkAt(pos)
+                && serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE);
     }
 
     public static boolean shouldKeepTemporaryCraftingTableForGear(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -95,10 +102,10 @@ public class CraftBasicGearGoal extends Goal {
         if (logGatheringEpisodeActive && !emergencyPickaxeCraft) {
             return false;
         }
-        if (blockedByVerticalEscape && !missingPickaxe) {
+        if (shouldYieldToResourceSupply(playerNpc, serverLevel) && !emergencyPickaxeCraft) {
             return false;
         }
-        if (probe.isMiningProspectingState() && !missingPickaxe) {
+        if (blockedByVerticalEscape && !missingPickaxe) {
             return false;
         }
         return probe.canCraftUsefulGear(serverLevel);
@@ -146,6 +153,9 @@ public class CraftBasicGearGoal extends Goal {
     private boolean emergencyPickaxeCraft;
     private boolean craftingTableInteracted;
     private int failedCraftRetryAfterTick;
+    private int nextCraftingPathAttemptTick;
+    private int nextContinueSupplyCheckTick;
+    private boolean cachedStopForResourceSupply;
 
     public CraftBasicGearGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -165,6 +175,9 @@ public class CraftBasicGearGoal extends Goal {
                 || "ai.player_npc.gathering_materials".equals(this.playerNpc.getCurrentAiState())) {
             return false;
         }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
 
         boolean logGatheringEpisodeActive = GatherLogsGoal.isLogGatheringEpisodeActive(this.playerNpc);
         boolean missingPickaxe = !this.hasTool(PickaxeItem.class);
@@ -173,10 +186,10 @@ public class CraftBasicGearGoal extends Goal {
         if (logGatheringEpisodeActive && !emergencyPickaxeCraft) {
             return false;
         }
-        if (blockedByVerticalEscape && !missingPickaxe) {
+        if (shouldYieldToResourceSupply(this.playerNpc, serverLevel) && !emergencyPickaxeCraft) {
             return false;
         }
-        if (this.isMiningProspectingState() && !missingPickaxe) {
+        if (blockedByVerticalEscape && !missingPickaxe) {
             return false;
         }
         boolean needsTerraformShovel = this.needsTerraformShovel(serverLevel);
@@ -184,9 +197,6 @@ public class CraftBasicGearGoal extends Goal {
         boolean needsCriticalStarterTool = this.needsCriticalStarterToolForCooldown();
         boolean priorityCrafting = this.playerNpc.isStoneAccessClearing()
                 && this.canCraftUsefulGear(serverLevel);
-        if (!priorityCrafting && !this.canUseThrottle.canCheck(this.playerNpc)) {
-            return false;
-        }
         if (this.playerNpc.getCraftGearCooldown() > 0
                 && !priorityCrafting
                 && !needsCriticalStarterTool
@@ -243,7 +253,24 @@ public class CraftBasicGearGoal extends Goal {
                 && !this.playerNpc.isHealing()
                 && (this.emergencyPickaxeCraft || this.playerNpc.getUpwardEscapeTarget() == null)
                 && (this.emergencyPickaxeCraft || this.playerNpc.getHoleEscapeCooldown() <= 0)
+                && !this.shouldStopForResourceSupply()
                 && this.playerNpc.getTarget() == null;
+    }
+
+    private boolean shouldStopForResourceSupply() {
+        if (this.emergencyPickaxeCraft || !(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (this.playerNpc.tickCount >= this.nextContinueSupplyCheckTick) {
+            this.nextContinueSupplyCheckTick = this.playerNpc.tickCount + CONTINUE_SUPPLY_RECHECK_TICKS;
+            this.cachedStopForResourceSupply = shouldYieldToResourceSupply(this.playerNpc, serverLevel);
+        }
+        return this.cachedStopForResourceSupply;
+    }
+
+    private static boolean shouldYieldToResourceSupply(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return GatherLogsGoal.hasLogSupplyDemand(playerNpc, serverLevel)
+                || GatherStoneGoal.isStoneSupplyPhaseActive(playerNpc, serverLevel);
     }
 
     private static boolean isBlockedByVerticalEscape(PlayerNpcEntity playerNpc, boolean logGatheringEpisodeActive) {
@@ -260,6 +287,9 @@ public class CraftBasicGearGoal extends Goal {
         this.finished = false;
         this.craftedTool = false;
         this.craftingTableInteracted = false;
+        this.nextCraftingPathAttemptTick = this.playerNpc.tickCount;
+        this.nextContinueSupplyCheckTick = this.playerNpc.tickCount + CONTINUE_SUPPLY_RECHECK_TICKS;
+        this.cachedStopForResourceSupply = false;
         this.playerNpc.setCurrentAiState("ai.player_npc.crafting_gear");
         this.playerNpc.setCurrentAiDetail("moving to crafting table");
     }
@@ -295,7 +325,7 @@ public class CraftBasicGearGoal extends Goal {
 
         if (!this.isAtCraftingStand()) {
             this.playerNpc.setCurrentAiDetail("walking to crafting table");
-            this.moveToCraftingStand();
+            this.moveToCraftingStandOnCadence();
             return;
         }
 
@@ -330,6 +360,9 @@ public class CraftBasicGearGoal extends Goal {
         }
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
+        this.nextCraftingPathAttemptTick = 0;
+        this.nextContinueSupplyCheckTick = 0;
+        this.cachedStopForResourceSupply = false;
         this.resetPlan();
     }
 
@@ -353,7 +386,8 @@ public class CraftBasicGearGoal extends Goal {
         if (!this.isAtCraftingStand()) {
             this.actionDelayTicks = 0;
             this.playerNpc.setCurrentAiDetail("walking to crafting table placement");
-            if (!this.moveToCraftingStand()) {
+            if (this.playerNpc.tickCount >= this.nextCraftingPathAttemptTick
+                    && !this.moveToCraftingStandOnCadence()) {
                 this.finished = true;
             }
             return;
@@ -408,7 +442,13 @@ public class CraftBasicGearGoal extends Goal {
         }
 
         int rawLogReserve = this.rawLogReserveForRecipe(recipe);
-        if (!PlayerNpcCraftingUtil.canCraft(serverLevel, this.playerNpc.getInventory(), recipe.result().getItem(), true)
+        boolean canCraftRecipe = PlayerNpcCraftingUtil.canCraft(
+                serverLevel,
+                this.playerNpc.getInventory(),
+                recipe.result().getItem(),
+                true
+        );
+        if (!canCraftRecipe
                 && PlayerNpcCraftingUtil.countSticks(this.playerNpc.getInventory()) < recipe.sticksNeeded()) {
             if (PlayerNpcCraftingUtil.tryCraftSticks(serverLevel, this.playerNpc.getInventory(), rawLogReserve)) {
                 this.playCraftStep(serverLevel, "crafting planks into sticks");
@@ -418,7 +458,7 @@ public class CraftBasicGearGoal extends Goal {
             return;
         }
 
-        if (!PlayerNpcCraftingUtil.canCraft(serverLevel, this.playerNpc.getInventory(), recipe.result().getItem(), true)
+        if (!canCraftRecipe
                 && PlayerNpcCraftingUtil.countLogs(this.playerNpc.getInventory()) > rawLogReserve) {
             if (PlayerNpcCraftingUtil.tryConvertOneLogToPlanks(this.playerNpc.getInventory(), rawLogReserve)) {
                 this.playCraftStep(serverLevel, "crafting logs into planks");
@@ -428,7 +468,7 @@ public class CraftBasicGearGoal extends Goal {
             return;
         }
 
-        if (!PlayerNpcCraftingUtil.canCraft(serverLevel, this.playerNpc.getInventory(), recipe.result().getItem(), true)) {
+        if (!canCraftRecipe) {
             this.finished = true;
             return;
         }
@@ -880,7 +920,8 @@ public class CraftBasicGearGoal extends Goal {
         for (BlockPos pos : BlockPos.betweenClosed(
                 origin.offset(-CRAFTING_TABLE_SCAN_RADIUS, -2, -CRAFTING_TABLE_SCAN_RADIUS),
                 origin.offset(CRAFTING_TABLE_SCAN_RADIUS, 2, CRAFTING_TABLE_SCAN_RADIUS))) {
-            if (serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE)) {
+            if (serverLevel.hasChunkAt(pos)
+                    && serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE)) {
                 candidates.add(pos.immutable());
             }
         }
@@ -960,6 +1001,14 @@ public class CraftBasicGearGoal extends Goal {
         return this.playerNpc.getNavigation().moveTo(path, 1.0D);
     }
 
+    private boolean moveToCraftingStandOnCadence() {
+        if (this.playerNpc.tickCount < this.nextCraftingPathAttemptTick) {
+            return true;
+        }
+        this.nextCraftingPathAttemptTick = this.playerNpc.tickCount + CRAFTING_REPATH_INTERVAL_TICKS;
+        return this.moveToCraftingStand();
+    }
+
     private double distanceToTableSqr(BlockPos standPos, BlockPos tablePos) {
         if (tablePos == null) {
             return Double.MAX_VALUE;
@@ -1003,8 +1052,9 @@ public class CraftBasicGearGoal extends Goal {
     private CraftingTableUse findReusableTemporaryCraftingTable(ServerLevel serverLevel) {
         BlockPos pos = this.getTemporaryCraftingTablePos();
         if (pos == null
-                || !serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE)
-                || this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) > TEMP_CRAFTING_TABLE_REUSE_DISTANCE_SQR) {
+                || this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) > TEMP_CRAFTING_TABLE_REUSE_DISTANCE_SQR
+                || !serverLevel.hasChunkAt(pos)
+                || !serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE)) {
             return null;
         }
 
@@ -1017,7 +1067,16 @@ public class CraftBasicGearGoal extends Goal {
         if (pos == null) {
             return;
         }
-        if (this.findReusableTemporaryCraftingTable(serverLevel) == null) {
+        // An obstructed stand can make a nearby table temporarily unusable. Keep
+        // ownership in that case so mining/path-clearing goals do not destroy it,
+        // but release tables that are gone or genuinely outside the reuse area.
+        if (this.playerNpc.distanceToSqr(
+                pos.getX() + 0.5D,
+                pos.getY() + 0.5D,
+                pos.getZ() + 0.5D
+        ) > TEMP_CRAFTING_TABLE_REUSE_DISTANCE_SQR
+                || serverLevel.hasChunkAt(pos)
+                && !serverLevel.getBlockState(pos).is(Blocks.CRAFTING_TABLE)) {
             this.clearTemporaryCraftingTable();
         }
     }

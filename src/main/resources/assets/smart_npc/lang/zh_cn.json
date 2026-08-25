@@ -46,6 +46,7 @@
   "ai.player_npc.calling_for_help": "呼救",
   "ai.player_npc.assisting_alert": "响应警报",
   "ai.player_npc.avoiding_alert": "躲避威胁",
+  "ai.player_npc.cautious_avoiding": "躲避威胁",
   "ai.player_npc.engaging": "交战",
   "ai.player_npc.engaging_player_like": "攻击玩家",
   "ai.player_npc.engaging_monster": "攻击怪物",

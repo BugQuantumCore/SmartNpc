@@ -19,8 +19,10 @@ import java.util.EnumSet;
 public class BoatStockpileGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 40;
     private static final int CRAFTING_TABLE_SCAN_RADIUS = 5;
+    private static final int CAN_USE_CHECK_INTERVAL_TICKS = 40;
 
     private final PlayerNpcEntity playerNpc;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(CAN_USE_CHECK_INTERVAL_TICKS);
 
     public BoatStockpileGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -37,7 +39,10 @@ public class BoatStockpileGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || !this.playerNpc.isBoatCollector()
                 || this.playerNpc.getBoatStockCooldown() > 0
-                || this.countBoats() >= this.playerNpc.getDesiredBoatCount()
+                || this.countBoats() >= this.playerNpc.getDesiredBoatCount()) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)
                 || !this.hasNearbyCraftingTable(serverLevel)) {
             return false;
         }

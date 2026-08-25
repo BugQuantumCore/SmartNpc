@@ -72,7 +72,8 @@ public final class PlayerNpcBuildMaterialUtil {
             Items.COBBLED_DEEPSLATE,
             Items.BLACKSTONE,
             Items.SANDSTONE,
-            Items.RED_SANDSTONE
+            Items.RED_SANDSTONE,
+            Items.PACKED_MUD
     );
     private static final List<Item> LOOSE_FILL = List.of(
             Items.DIRT,
@@ -108,7 +109,8 @@ public final class PlayerNpcBuildMaterialUtil {
             Items.CUT_SANDSTONE,
             Items.RED_SANDSTONE,
             Items.SMOOTH_RED_SANDSTONE,
-            Items.CUT_RED_SANDSTONE
+            Items.CUT_RED_SANDSTONE,
+            Items.MUD_BRICKS
     );
     private static final List<Item> STONE_STAIRS = List.of(
             Items.COBBLESTONE_STAIRS,

@@ -156,7 +156,7 @@ public class EatHealingFoodGoal extends Goal {
             this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
         }
 
-        if (this.pathRecalculateTicks-- <= 0 || this.playerNpc.getNavigation().isDone()) {
+        if (this.pathRecalculateTicks-- <= 0) {
             this.updateEatingMovement();
             this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
         }

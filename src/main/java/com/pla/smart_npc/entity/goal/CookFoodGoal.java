@@ -46,6 +46,7 @@ public class CookFoodGoal extends Goal {
     private static final int ACTION_DELAY_TICKS = 12;
     private static final int MAX_RECOVER_FURNACE_TICKS = 20 * 10;
     private static final int MAX_COOK_TICKS = 20 * 30;
+    private static final int MOVEMENT_REPATH_TICKS = 20;
 
     private final PlayerNpcEntity playerNpc;
     private final ToolAi toolAi;
@@ -60,6 +61,7 @@ public class CookFoodGoal extends Goal {
     private ItemStack previousMainHand = ItemStack.EMPTY;
     private int actionDelayTicks;
     private int cookTicks;
+    private int movementRepathTicks;
     private boolean finished;
     private boolean acted;
     private boolean temporaryFurnace;
@@ -179,6 +181,7 @@ public class CookFoodGoal extends Goal {
     public void start() {
         this.actionDelayTicks = 0;
         this.cookTicks = 0;
+        this.movementRepathTicks = 0;
         this.finished = false;
         this.acted = false;
         this.breakingBlockAi.stop();
@@ -381,12 +384,15 @@ public class CookFoodGoal extends Goal {
         ) > RECOVER_FURNACE_BREAK_DISTANCE_SQR) {
             this.breakingBlockAi.stop();
             this.toolAi.restoreMainHand();
-            this.playerNpc.getNavigation().moveTo(
-                    this.furnacePos.getX() + 0.5D,
-                    this.furnacePos.getY(),
-                    this.furnacePos.getZ() + 0.5D,
-                    RECOVER_FURNACE_MOVE_SPEED
-            );
+            if (this.movementRepathTicks-- <= 0) {
+                this.playerNpc.getNavigation().moveTo(
+                        this.furnacePos.getX() + 0.5D,
+                        this.furnacePos.getY(),
+                        this.furnacePos.getZ() + 0.5D,
+                        RECOVER_FURNACE_MOVE_SPEED
+                );
+                this.movementRepathTicks = MOVEMENT_REPATH_TICKS;
+            }
             this.updateDetail(serverLevel);
             return;
         }
@@ -651,6 +657,10 @@ public class CookFoodGoal extends Goal {
         if (this.furnaceStandPos == null) {
             return false;
         }
+        if (this.movementRepathTicks-- > 0) {
+            return true;
+        }
+        this.movementRepathTicks = MOVEMENT_REPATH_TICKS;
         Path path = this.playerNpc.getNavigation().createPath(this.furnaceStandPos, 0);
         if (path == null
                 || !path.canReach()

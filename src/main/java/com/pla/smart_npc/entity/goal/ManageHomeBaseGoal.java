@@ -42,6 +42,7 @@ public class ManageHomeBaseGoal extends Goal {
     private static final double RECOVER_TABLE_BREAK_DISTANCE_SQR = 3.0D * 3.0D;
     private static final double RECOVER_TABLE_MOVE_SPEED = 1.0D;
     private static final int MAX_RECOVER_TABLE_TICKS = 20 * 8;
+    private static final int MOVEMENT_REPATH_TICKS = 20;
     private static final int DEPOSIT_INTERVAL_TICKS = 6;
     private static final int BUILD_SITE_CRAFTING_TABLE_MARGIN = 5;
     private static final int BUILD_SITE_CRAFTING_TABLE_SCAN_BELOW = 2;
@@ -60,6 +61,7 @@ public class ManageHomeBaseGoal extends Goal {
     private BlockPos pendingCraftingTableStandPos;
     private ItemStack previousMainHand = ItemStack.EMPTY;
     private int depositDelayTicks;
+    private int movementRepathTicks;
     private boolean usingTemporaryTool;
     private boolean returnTemporaryMainHandOnRestore;
     private boolean depositChestOpen;
@@ -180,6 +182,7 @@ public class ManageHomeBaseGoal extends Goal {
         this.pendingCraftingTablePos = null;
         this.pendingCraftingTableStandPos = null;
         this.depositDelayTicks = 0;
+        this.movementRepathTicks = 0;
         this.previousMainHand = ItemStack.EMPTY;
         this.usingTemporaryTool = false;
         this.returnTemporaryMainHandOnRestore = false;
@@ -248,12 +251,15 @@ public class ManageHomeBaseGoal extends Goal {
         ) > RECOVER_TABLE_BREAK_DISTANCE_SQR) {
             this.breakingBlockAi.stop();
             this.toolAi.restoreMainHand();
-            this.playerNpc.getNavigation().moveTo(
-                    this.recoveryTablePos.getX() + 0.5D,
-                    this.recoveryTablePos.getY(),
-                    this.recoveryTablePos.getZ() + 0.5D,
-                    RECOVER_TABLE_MOVE_SPEED
-            );
+            if (this.movementRepathTicks-- <= 0) {
+                this.playerNpc.getNavigation().moveTo(
+                        this.recoveryTablePos.getX() + 0.5D,
+                        this.recoveryTablePos.getY(),
+                        this.recoveryTablePos.getZ() + 0.5D,
+                        RECOVER_TABLE_MOVE_SPEED
+                );
+                this.movementRepathTicks = MOVEMENT_REPATH_TICKS;
+            }
             this.updateRecoveryDetail(serverLevel);
             return;
         }
@@ -304,6 +310,7 @@ public class ManageHomeBaseGoal extends Goal {
         this.pendingCraftingTablePos = null;
         this.pendingCraftingTableStandPos = null;
         this.depositDelayTicks = 0;
+        this.movementRepathTicks = 0;
         this.depositChestOpen = false;
         this.depositFinished = false;
         this.depositMovedAny = false;
@@ -575,8 +582,11 @@ public class ManageHomeBaseGoal extends Goal {
                     + this.depositChestPos.getX() + " "
                     + this.depositChestPos.getY() + " "
                     + this.depositChestPos.getZ());
-            if (!ChestAi.moveToStand(this.playerNpc, this.depositChestStandPos, 1.0D)) {
-                this.finishHomeAction(this.depositMovedAny);
+            if (this.movementRepathTicks-- <= 0) {
+                if (!ChestAi.moveToStand(this.playerNpc, this.depositChestStandPos, 1.0D)) {
+                    this.finishHomeAction(this.depositMovedAny);
+                }
+                this.movementRepathTicks = MOVEMENT_REPATH_TICKS;
             }
             return;
         }
@@ -865,6 +875,10 @@ public class ManageHomeBaseGoal extends Goal {
         if (this.pendingCraftingTableStandPos == null) {
             return false;
         }
+        if (this.movementRepathTicks-- > 0) {
+            return true;
+        }
+        this.movementRepathTicks = MOVEMENT_REPATH_TICKS;
         Path path = this.playerNpc.getNavigation().createPath(this.pendingCraftingTableStandPos, 0);
         if (path == null || !path.canReach()) {
             return false;

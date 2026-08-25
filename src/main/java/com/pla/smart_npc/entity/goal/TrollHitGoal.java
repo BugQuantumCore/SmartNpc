@@ -30,6 +30,7 @@ public class TrollHitGoal extends Goal {
     private Vec3 fleePos;
     private int runTicks;
     private int pathRecalculateTicks;
+    private int nextWorldScanTick;
     private boolean hitOnce;
 
     public TrollHitGoal(PlayerNpcEntity playerNpc) {
@@ -50,7 +51,6 @@ public class TrollHitGoal extends Goal {
 
         LivingEntity currentTarget = this.playerNpc.getTarget();
         if (this.isValidVictim(currentTarget)
-                && this.playerNpc.tickCount % 20 == 0
                 && this.playerNpc.getRandom().nextFloat() < 0.18F) {
             this.victim = currentTarget;
             return true;
@@ -58,7 +58,11 @@ public class TrollHitGoal extends Goal {
         if (currentTarget != null) {
             return false;
         }
-        if (this.playerNpc.tickCount % 40 != 0 || this.playerNpc.getRandom().nextFloat() > 0.035F) {
+        if (this.playerNpc.tickCount < this.nextWorldScanTick) {
+            return false;
+        }
+        this.nextWorldScanTick = this.playerNpc.tickCount + 40;
+        if (this.playerNpc.getRandom().nextFloat() > 0.035F) {
             return false;
         }
 
@@ -90,6 +94,7 @@ public class TrollHitGoal extends Goal {
             this.playerNpc.setCurrentAiState("ai.player_npc.troll_hit");
             this.playerNpc.setCurrentAiDetail(this.victim.getDisplayName().getString());
             this.playerNpc.getNavigation().moveTo(this.victim, RUN_SPEED);
+            this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
         }
     }
 
@@ -102,7 +107,7 @@ public class TrollHitGoal extends Goal {
 
         this.runTicks--;
         this.playerNpc.setTarget(null);
-        if (this.pathRecalculateTicks-- <= 0 || this.playerNpc.getNavigation().isDone()) {
+        if (this.pathRecalculateTicks-- <= 0) {
             this.fleePos = this.findFleePos();
             this.moveToFleePos();
             this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
@@ -134,7 +139,10 @@ public class TrollHitGoal extends Goal {
 
         this.playerNpc.getLookControl().setLookAt(this.victim, 60.0F, 60.0F);
         if (this.playerNpc.distanceToSqr(this.victim) > ATTACK_DISTANCE_SQR) {
-            this.playerNpc.getNavigation().moveTo(this.victim, RUN_SPEED);
+            if (this.pathRecalculateTicks-- <= 0) {
+                this.playerNpc.getNavigation().moveTo(this.victim, RUN_SPEED);
+                this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
+            }
             return;
         }
 
@@ -145,6 +153,7 @@ public class TrollHitGoal extends Goal {
         this.playerNpc.setCurrentAiState("ai.player_npc.troll_running");
         this.fleePos = this.findFleePos();
         this.moveToFleePos();
+        this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
     }
 
     private LivingEntity findVictim() {

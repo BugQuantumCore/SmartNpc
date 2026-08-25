@@ -22,7 +22,7 @@ public class SmartNpcModEntities {
 
     public static final DeferredRegister<EntityType<?>> REGISTRY = DeferredRegister.create(ForgeRegistries.ENTITY_TYPES, SmartNpc.MODID);
     public static final String PLAYER_NPC_ID = "player_npc";
-    public static final RegistryObject<EntityType<PlayerNpcEntity>> PLAYER_NPC = register(PLAYER_NPC_ID, Builder.<PlayerNpcEntity>of(PlayerNpcEntity::new, MobCategory.MONSTER).setShouldReceiveVelocityUpdates(true).setTrackingRange(256).setUpdateInterval(3).setCustomClientFactory(PlayerNpcEntity::new).sized(0.6F, 1.8F));
+    public static final RegistryObject<EntityType<PlayerNpcEntity>> PLAYER_NPC = register(PLAYER_NPC_ID, Builder.<PlayerNpcEntity>of(PlayerNpcEntity::new, MobCategory.CREATURE).setShouldReceiveVelocityUpdates(true).setTrackingRange(256).setUpdateInterval(3).setCustomClientFactory(PlayerNpcEntity::new).sized(0.6F, 1.8F));
     public static final String PLAYER_NPC_FISHING_BOBBER_ID = "player_npc_fishing_bobber";
     public static final RegistryObject<EntityType<PlayerNpcFishingBobberEntity>> PLAYER_NPC_FISHING_BOBBER = register(PLAYER_NPC_FISHING_BOBBER_ID, Builder.<PlayerNpcFishingBobberEntity>of(PlayerNpcFishingBobberEntity::new, MobCategory.MISC).setShouldReceiveVelocityUpdates(true).setTrackingRange(64).setUpdateInterval(5).setCustomClientFactory(PlayerNpcFishingBobberEntity::new).sized(0.25F, 0.25F));
 

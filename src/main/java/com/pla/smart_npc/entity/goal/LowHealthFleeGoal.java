@@ -110,7 +110,7 @@ public class LowHealthFleeGoal extends Goal {
             return;
         }
 
-        if (this.pathRecalculateTicks-- <= 0 || this.playerNpc.getNavigation().isDone()) {
+        if (this.pathRecalculateTicks-- <= 0) {
             Vec3 nextPos = this.findFleePos(this.threat);
             if (nextPos != null) {
                 this.fleePos = nextPos;

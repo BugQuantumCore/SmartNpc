@@ -124,9 +124,7 @@ public class FillWaterBucketGoal extends Goal {
         );
 
         if (this.mob.distanceToSqr(Vec3.atCenterOf(this.fluidPos)) > 4.0D) {
-            if (this.useTicks % 20 == 0
-                    || this.mob.getNavigation().isDone()
-                    || this.mob.getNavigation().isStuck()) {
+            if (this.useTicks % 20 == 0) {
                 if (!this.moveToFluid()) {
                     this.useTicks = MAX_USE_TICKS;
                 }

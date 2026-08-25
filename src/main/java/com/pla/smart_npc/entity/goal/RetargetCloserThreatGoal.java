@@ -16,6 +16,7 @@ public class RetargetCloserThreatGoal extends TargetGoal {
 
     private final int scanInterval;
     private final TargetingConditions targetConditions;
+    private int nextScanTick;
     @Nullable
     private LivingEntity nextTarget;
 
@@ -32,10 +33,10 @@ public class RetargetCloserThreatGoal extends TargetGoal {
 
     @Override
     public boolean canUse() {
-        if (this.mob.level().isClientSide
-                || this.mob.tickCount % this.scanInterval != 0) {
+        if (this.mob.level().isClientSide || this.mob.tickCount < this.nextScanTick) {
             return false;
         }
+        this.nextScanTick = this.mob.tickCount + Math.max(20, this.scanInterval);
 
         this.nextTarget = this.findCloserThreatTarget();
         return this.nextTarget != null;

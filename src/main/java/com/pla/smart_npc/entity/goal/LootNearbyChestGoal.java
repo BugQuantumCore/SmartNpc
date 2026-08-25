@@ -24,15 +24,18 @@ public class LootNearbyChestGoal extends Goal {
     private static final int SEARCH_RADIUS = 10;
     private static final double STAND_DISTANCE_SQR = 1.5D * 1.5D;
     private static final int TAKE_INTERVAL_TICKS = 6;
+    private static final int REPATH_INTERVAL_TICKS = 20;
 
     private final PlayerNpcEntity playerNpc;
     private final double speed;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(40);
     private BlockPos chestPos;
     private BlockPos standPos;
     private boolean chestOpen;
     private boolean finishedLooting;
     private int nextLootSlot;
     private int takeDelayTicks;
+    private int repathTicks;
 
     public LootNearbyChestGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -49,6 +52,9 @@ public class LootNearbyChestGoal extends Goal {
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getLootChestCooldown() > 0) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
@@ -73,6 +79,7 @@ public class LootNearbyChestGoal extends Goal {
         this.finishedLooting = false;
         this.nextLootSlot = 0;
         this.takeDelayTicks = 0;
+        this.repathTicks = REPATH_INTERVAL_TICKS;
         this.playerNpc.setCurrentAiState("ai.player_npc.looting_chest");
         if (this.chestPos != null && this.standPos != null) {
             this.playerNpc.setCurrentAiDetail(this.chestPos.getX() + " " + this.chestPos.getY() + " " + this.chestPos.getZ());
@@ -92,8 +99,9 @@ public class LootNearbyChestGoal extends Goal {
                 this.closeChest(serverLevel, this.chestPos);
                 this.chestOpen = false;
             }
-            if (this.playerNpc.getNavigation().isDone()) {
+            if (this.repathTicks-- <= 0) {
                 this.moveToStandPos();
+                this.repathTicks = REPATH_INTERVAL_TICKS;
             }
             return;
         }
@@ -143,6 +151,7 @@ public class LootNearbyChestGoal extends Goal {
         this.finishedLooting = false;
         this.nextLootSlot = 0;
         this.takeDelayTicks = 0;
+        this.repathTicks = 0;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }
 

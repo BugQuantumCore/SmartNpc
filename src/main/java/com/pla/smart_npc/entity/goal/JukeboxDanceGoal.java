@@ -27,14 +27,18 @@ public class JukeboxDanceGoal extends Goal {
     private static final int MIN_DANCE_TICKS = 80;
     private static final int MAX_DANCE_TICKS = 180;
     private static final int COOLDOWN_TICKS = 20 * 70;
+    private static final int CAN_USE_CHECK_INTERVAL_TICKS = 40;
+    private static final int REPATH_INTERVAL_TICKS = 20;
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(CAN_USE_CHECK_INTERVAL_TICKS);
     private final double speed;
     private Action action = Action.NONE;
     private BlockPos jukeboxPos;
     private PlayerNpcEntity dancerToDisturb;
     private int danceTicks;
+    private int repathTicks;
 
     public JukeboxDanceGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -52,6 +56,9 @@ public class JukeboxDanceGoal extends Goal {
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getJukeboxDanceCooldown() > 0) {
+            return false;
+        }
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
@@ -131,7 +138,9 @@ public class JukeboxDanceGoal extends Goal {
         this.playerNpc.setDancing(true);
         this.playerNpc.getLookControl().setLookAt(this.jukeboxPos.getX() + 0.5D, this.jukeboxPos.getY() + 0.5D, this.jukeboxPos.getZ() + 0.5D, 40.0F, 40.0F);
         if (this.playerNpc.distanceToSqr(this.jukeboxPos.getX() + 0.5D, this.jukeboxPos.getY(), this.jukeboxPos.getZ() + 0.5D) > DANCE_DISTANCE_SQR) {
-            this.playerNpc.getNavigation().moveTo(this.jukeboxPos.getX() + 0.5D, this.jukeboxPos.getY(), this.jukeboxPos.getZ() + 0.5D, this.speed);
+            if (this.repathTicks-- <= 0) {
+                this.moveToJukebox();
+            }
             return;
         }
 
@@ -160,6 +169,7 @@ public class JukeboxDanceGoal extends Goal {
         this.jukeboxPos = null;
         this.dancerToDisturb = null;
         this.danceTicks = 0;
+        this.repathTicks = 0;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }
 
@@ -221,12 +231,26 @@ public class JukeboxDanceGoal extends Goal {
 
     private void startDancing() {
         this.danceTicks = MIN_DANCE_TICKS + this.playerNpc.getRandom().nextInt(MAX_DANCE_TICKS - MIN_DANCE_TICKS + 1);
+        this.repathTicks = 0;
         this.playerNpc.setDancing(true);
         this.playerNpc.setCurrentAiState("ai.player_npc.dancing");
         if (this.jukeboxPos != null) {
             this.playerNpc.setCurrentAiDetail(this.jukeboxPos.getX() + " " + this.jukeboxPos.getY() + " " + this.jukeboxPos.getZ());
-            this.playerNpc.getNavigation().moveTo(this.jukeboxPos.getX() + 0.5D, this.jukeboxPos.getY(), this.jukeboxPos.getZ() + 0.5D, this.speed);
+            this.moveToJukebox();
         }
+    }
+
+    private void moveToJukebox() {
+        if (this.jukeboxPos == null) {
+            return;
+        }
+        this.playerNpc.getNavigation().moveTo(
+                this.jukeboxPos.getX() + 0.5D,
+                this.jukeboxPos.getY(),
+                this.jukeboxPos.getZ() + 0.5D,
+                this.speed
+        );
+        this.repathTicks = REPATH_INTERVAL_TICKS;
     }
 
     private void finishInstantAction() {

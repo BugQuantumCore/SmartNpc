@@ -1,11 +1,11 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.compat.EpicFightCompat;
-import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.FarmAi;
+import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
@@ -19,6 +19,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.SimpleContainer;
@@ -71,12 +72,17 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final double BREAK_DISTANCE_SQR = 3.0D * 3.0D;
     private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int MAX_FAILED_PATH_TICKS = 20 * 3;
+    private static final int MAX_GATHER_PATH_FALLBACK_ATTEMPTS = 3;
+    private static final int GATHER_PATH_RECOVERY_MAX_TICKS = 20 * 30;
+    private static final int GATHER_PATH_FALLBACK_FAILED_COOLDOWN_TICKS = 20 * 30;
     private static final int PILLAR_SEARCH_RADIUS = 5;
     private static final int PILLAR_PLAN_RETRY_TICKS = 20;
     private static final int PILLAR_SURFACE_SCAN_UP = 96;
     private static final double PILLAR_BASE_REACHED_SQR = 1.2D * 1.2D;
     private static final int PILLAR_STUCK_MIN_TICKS = 20 * 5;
     private static final int PILLAR_STUCK_RECHECK_TICKS = 20 * 5;
+    private static final int PILLAR_CLEAR_RETURN_NO_PROGRESS_TICKS = 20;
+    private static final int PILLAR_CLEAR_RETURN_FAILED_PATH_WEIGHT = 4;
     private static final double PILLAR_CENTER_EPSILON = 0.05D;
     private static final double PILLAR_COLLISION_BLOCKER_PADDING = 0.08D;
     private static final double PILLAR_COLLISION_TOP_PADDING = 0.45D;
@@ -95,7 +101,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int FAILED_EXPLORATION_CLIMB_RETRY_TICKS = 20 * 30;
     private static final double EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
     private static final int EXPLORATION_CLIMB_STEP_OFF_STUCK_TICKS = PILLAR_STUCK_MIN_TICKS;
-    private static final int EXPLORATION_CLIMB_STEP_OFF_TICKS = 20;
+    private static final int EXPLORATION_CLIMB_STEP_OFF_TICKS = 40;
     private static final int EXPLORATION_CLIMB_STEP_OFF_RADIUS = 5;
     private static final int EXPLORATION_CLIMB_STEP_OFF_MAX_FALL = 16;
     private static final double EXPLORATION_CLIMB_STEP_OFF_SPEED = 0.28D;
@@ -122,6 +128,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private final ToolAi toolAi;
     private final BreakingBlockAi breakingBlockAi;
     private final ClearBlockAi clearBlockAi;
+    private final PathStuckFallbackAi gatherPathStuckFallbackAi;
     private EscapeMode mode = EscapeMode.NONE;
     private BlockPos placePos;
     private BlockPos minePos;
@@ -133,6 +140,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private BlockPos settlingPillarSupportPos;
     private BlockPos lastConfirmedPillarSupportPos;
     private BlockPos pillarStuckWatchPos;
+    private BlockPos pillarClearReturnWatchPos;
     private BlockPos exitClearPos;
     private BlockPos explorationClimbStepOffWatchPos;
     private BlockPos explorationClimbStepOffWatchTarget;
@@ -173,6 +181,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private int mineTicks;
     private int repathTicks;
     private int failedPathTicks;
+    private int gatherPathFallbackAttempts;
+    private int gatherPathRecoveryDeadlineTick;
+    private int gatherPathFinalAttemptDeadlineTick;
     private int goalTicks;
     private int requiredEscapeBlocks;
     private int maxPillarBlocks;
@@ -182,8 +193,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private int pillarStuckWatchStartTick;
     private int nextPillarStuckRecoveryTick;
     private int pillarStuckWatchPillarsPlaced;
+    private int pillarClearReturnNoProgressTicks;
     private int explorationClimbStepOffWatchStartTick;
     private int explorationClimbStepOffTicks;
+    private boolean explorationClimbStepOffCompleted;
     private final Set<BlockPos> placedPillarSupports = new LinkedHashSet<>();
     private boolean usingTemporaryPickaxe;
     private boolean usingTemporaryBlock;
@@ -196,6 +209,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
         this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
+        this.gatherPathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.JUMP, Flag.LOOK));
     }
 
@@ -218,7 +232,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
-                || this.playerNpc.isInWaterOrBubble()
+                || this.isInWater(serverLevel)
                 || this.playerNpc.isStoneAccessClearing()) {
             return false;
         }
@@ -374,7 +388,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || this.goalTicks >= MAX_GOAL_TICKS
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
-                || !(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+                || !(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || this.isInWater(serverLevel)) {
             return false;
         }
 
@@ -384,8 +399,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
                     && !this.isRouteNavigationComplete(serverLevel, this.playerNpc.blockPosition());
         }
         if (this.mode == EscapeMode.GATHER_BLOCKS) {
-            return this.countEscapeBlocks() < this.requiredEscapeBlocks
-                    && (this.minePos != null || this.findEscapeMaterialTarget(serverLevel) != null);
+            // Target acquisition belongs to tickGatherBlocks. This continuation predicate is
+            // polled every tick and must not rescan the nearby block volume after recovery clears
+            // the stale target.
+            return this.countEscapeBlocks() < this.requiredEscapeBlocks;
         }
         if (this.mode == EscapeMode.CLEAR_EXIT) {
             return this.exitClearPos != null || this.findExitClearTarget(serverLevel, this.playerNpc.blockPosition(), this.climbTargetPos) != null;
@@ -414,6 +431,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return true;
         }
 
+        if (this.mode == EscapeMode.PILLAR && this.needsCompletedExplorationClimbStepOff(serverLevel)) {
+            return true;
+        }
+
         if (this.mode == EscapeMode.PILLAR
                 && this.climbTargetPos != null
                 && this.shouldStopOpenSkyRouteClimb(serverLevel, this.playerNpc.blockPosition())) {
@@ -429,6 +450,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 && this.countEscapeBlocks() > 0;
     }
 
+    private boolean isInWater(ServerLevel serverLevel) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        return this.playerNpc.isInWaterOrBubble()
+                || serverLevel.getFluidState(feet).is(FluidTags.WATER)
+                || serverLevel.getFluidState(feet.above()).is(FluidTags.WATER)
+                || !this.playerNpc.onGround() && serverLevel.getFluidState(feet.below()).is(FluidTags.WATER);
+    }
+
     @Override
     public void start() {
         this.goalTicks = 0;
@@ -442,11 +471,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.mineTicks = 0;
         this.repathTicks = 0;
         this.failedPathTicks = 0;
+        this.gatherPathFallbackAttempts = 0;
         this.pillarsPlaced = 0;
         this.failedPillarPlaceAttempts = 0;
         this.resetPillarStuckWatch();
+        this.resetPillarClearReturnWatch();
         this.resetExplorationClimbStepOffWatch();
         this.clearExplorationClimbStepOff();
+        this.explorationClimbStepOffCompleted = false;
         this.finished = false;
         this.previousMainHand = ItemStack.EMPTY;
         this.previousPillarMainHand = ItemStack.EMPTY;
@@ -511,7 +543,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         BlockPos failedExplorationTarget = this.explorationClimbEpisode && this.climbTargetPos != null
                 ? this.climbTargetPos.immutable()
                 : null;
-        boolean explorationClimbCompleted = failedExplorationTarget != null
+        boolean explorationClimbCompleted = this.explorationClimbStepOffCompleted
+                || failedExplorationTarget != null
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
                 && this.hasReachedRequestedSurfaceExit(serverLevel, this.playerNpc.blockPosition(), failedExplorationTarget)
                 && this.hasReachedOpenSky(serverLevel, this.playerNpc.blockPosition())
@@ -521,6 +554,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.playerNpc.clearBlockBreakProgress(this.pillarClearPos);
         this.playerNpc.clearBlockBreakProgress(this.exitClearPos);
         this.clearBlockAi.stop();
+        this.gatherPathStuckFallbackAi.stop();
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
         this.restorePreviousMainHand();
@@ -1186,9 +1220,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.failedPathTicks += ROUTE_NAV_REPATH_TICKS;
         }
 
-        if (this.repathTicks-- <= 0
-                || this.playerNpc.getNavigation().isDone()
-                || this.playerNpc.getNavigation().isStuck()) {
+        if (this.repathTicks-- <= 0) {
             if (this.moveToRouteNavigationTarget()) {
                 this.failedPathTicks = 0;
             } else {
@@ -1204,7 +1236,12 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     private void tickGatherBlocks(ServerLevel serverLevel) {
         if (this.countEscapeBlocks() >= this.requiredEscapeBlocks) {
+            this.gatherPathStuckFallbackAi.stop();
             this.switchToPillar(serverLevel);
+            return;
+        }
+
+        if (this.tickGatherPathFallback(serverLevel)) {
             return;
         }
 
@@ -1232,6 +1269,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.playerNpc.clearBlockBreakProgress(this.minePos);
             this.minePos = null;
             this.mineTicks = 0;
+            this.resetGatherPathRecovery();
             return;
         }
         if (!this.equipPreferredToolForPillarClear(state)) {
@@ -1241,6 +1279,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.playerNpc.clearBlockBreakProgress(this.minePos);
             this.minePos = null;
             this.mineTicks = 0;
+            this.resetGatherPathRecovery();
             return;
         }
 
@@ -1254,11 +1293,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
         );
 
         if (this.playerNpc.distanceToSqr(this.minePos.getX() + 0.5D, this.minePos.getY() + 0.5D, this.minePos.getZ() + 0.5D) > BREAK_DISTANCE_SQR) {
+            if (this.gatherPathRecoveryDeadlineTick <= 0) {
+                this.gatherPathRecoveryDeadlineTick = this.playerNpc.tickCount + GATHER_PATH_RECOVERY_MAX_TICKS;
+            }
             this.breakingBlockAi.stop();
             this.toolAi.restoreMainHand();
             this.restorePreviousMainHand();
             this.playerNpc.clearBlockBreakProgress(this.minePos);
-            if (this.repathTicks-- <= 0 || this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck()) {
+            if (this.repathTicks-- <= 0) {
                 if (this.moveToMineTarget()) {
                     this.failedPathTicks = 0;
                 } else {
@@ -1270,8 +1312,29 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 }
                 this.repathTicks = REPATH_INTERVAL_TICKS;
             }
+            if (this.gatherPathFallbackAttempts < MAX_GATHER_PATH_FALLBACK_ATTEMPTS
+                    && this.gatherPathStuckFallbackAi.watchAndStart(
+                    serverLevel,
+                    this.mineStandPos,
+                    this.minePos,
+                    "escape material recovery",
+                    this::avoidGatherFallbackStand
+            )) {
+                this.beginGatherPathFallback();
+                return;
+            }
+            if (this.playerNpc.tickCount >= this.gatherPathRecoveryDeadlineTick) {
+                this.failGatherPathRecovery("could not enter mining reach before recovery deadline");
+            } else if (this.gatherPathFallbackAttempts >= MAX_GATHER_PATH_FALLBACK_ATTEMPTS
+                    && this.gatherPathFinalAttemptDeadlineTick > 0
+                    && this.playerNpc.tickCount >= this.gatherPathFinalAttemptDeadlineTick) {
+                this.failGatherPathRecovery("still outside mining reach after "
+                        + this.gatherPathFallbackAttempts + " step-off attempts");
+            }
             return;
         }
+
+        this.resetGatherPathRecovery();
 
         this.playerNpc.getNavigation().stop();
         BlockPos minedPos = this.minePos.immutable();
@@ -1366,6 +1429,81 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.mineTicks = 0;
     }
 
+    private boolean tickGatherPathFallback(ServerLevel serverLevel) {
+        if (!this.gatherPathStuckFallbackAi.isRunning()) {
+            return false;
+        }
+
+        boolean stillRunning = this.gatherPathStuckFallbackAi.tick(serverLevel, "escape material recovery");
+        this.playerNpc.setCurrentAiDetail(this.gatherPathStuckFallbackAi.detail("escape material recovery"));
+        if (stillRunning) {
+            return true;
+        }
+        if (this.gatherPathFallbackAttempts >= MAX_GATHER_PATH_FALLBACK_ATTEMPTS) {
+            // Give the final forced step enough time to reacquire and approach one fresh exact
+            // stand. If that also cannot enter reach, terminate this escape episode instead of
+            // starting an unbounded sequence of forced movement attempts.
+            this.gatherPathFinalAttemptDeadlineTick = this.playerNpc.tickCount + 20 * 5;
+        }
+        return false;
+    }
+
+    private void beginGatherPathFallback() {
+        this.gatherPathFallbackAttempts++;
+        this.gatherPathFinalAttemptDeadlineTick = 0;
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
+        this.restorePreviousMainHand();
+        this.playerNpc.clearBlockBreakProgress(this.minePos);
+        this.minePos = null;
+        this.mineStandPos = null;
+        this.mineTicks = 0;
+        this.repathTicks = 0;
+        this.failedPathTicks = 0;
+        this.playerNpc.setCurrentAiDetail(this.gatherPathStuckFallbackAi.detail("escape material recovery"));
+    }
+
+    private boolean avoidGatherFallbackStand(BlockPos stand) {
+        return stand == null
+                || stand.equals(this.mineStandPos)
+                || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, stand)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, stand);
+    }
+
+    private void resetGatherPathRecovery() {
+        this.gatherPathStuckFallbackAi.stop();
+        this.gatherPathFallbackAttempts = 0;
+        this.gatherPathRecoveryDeadlineTick = 0;
+        this.gatherPathFinalAttemptDeadlineTick = 0;
+    }
+
+    private void failGatherPathRecovery(String reason) {
+        BlockPos failedRoute = this.climbTargetPos != null
+                ? this.climbTargetPos.immutable()
+                : this.playerNpc.getUpwardEscapeTarget();
+        this.gatherPathStuckFallbackAi.stop();
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
+        this.restorePreviousMainHand();
+        this.playerNpc.clearBlockBreakProgress(this.minePos);
+        this.minePos = null;
+        this.mineStandPos = null;
+        this.nextPillarPlanTick = this.playerNpc.tickCount + GATHER_PATH_FALLBACK_FAILED_COOLDOWN_TICKS;
+        this.playerNpc.setHoleEscapeCooldown(Math.max(
+                this.playerNpc.getHoleEscapeCooldown(),
+                GATHER_PATH_FALLBACK_FAILED_COOLDOWN_TICKS
+        ));
+        if (this.explorationClimbEpisode) {
+            this.abandonExplorationClimb(failedRoute, reason);
+        } else if (this.playerNpc.getUpwardEscapeTarget() != null) {
+            // Release the mining/exploration owner after the bounded escape episode. It may
+            // choose a different target and issue a fresh request after the cooldown.
+            this.playerNpc.clearUpwardEscapeTarget();
+        }
+        this.playerNpc.setIdleTraceDetail("escape material recovery abandoned: " + reason, 20 * 3);
+        this.finished = true;
+    }
+
     private void tickExplorationClimbClear(ServerLevel serverLevel) {
         if (!this.clearBlockAi.isRunning()) {
             this.finished = true;
@@ -1408,6 +1546,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void switchToPillar(ServerLevel serverLevel) {
+        this.resetGatherPathRecovery();
         this.playerNpc.clearBlockBreakProgress(this.minePos);
         this.restorePreviousMainHand();
         this.restorePreviousPillarMainHand();
@@ -1441,6 +1580,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private void tickPillar(ServerLevel serverLevel) {
         if (this.explorationClimbStepOffTargetPos != null) {
             this.tickExplorationClimbStepOff(serverLevel);
+            return;
+        }
+
+        if (this.tryStartCompletedExplorationClimbStepOff(serverLevel)) {
             return;
         }
 
@@ -1747,7 +1890,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean tryStartStuckExplorationClimbStepOff(ServerLevel serverLevel) {
-        if (!this.isBuildingExplorationClimbRequest() || this.pillarBasePos == null || !this.playerNpc.onGround()) {
+        if (!this.isExplorationClimbRequest() || this.pillarBasePos == null || !this.playerNpc.onGround()) {
             this.resetExplorationClimbStepOffWatch();
             return false;
         }
@@ -1786,20 +1929,55 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
 
-        this.explorationClimbStepOffStartPos = feet.immutable();
-        this.explorationClimbStepOffTargetPos = stepOffTarget.immutable();
-        this.explorationClimbStepOffTicks = EXPLORATION_CLIMB_STEP_OFF_TICKS;
-        this.playerNpc.clearUpwardEscapeTarget();
-        this.playerNpc.getNavigation().stop();
-        this.forceExplorationClimbStepOff();
+        return this.startExplorationClimbStepOff(feet, stepOffTarget);
+    }
+
+    private boolean tryStartCompletedExplorationClimbStepOff(ServerLevel serverLevel) {
+        if (!this.needsCompletedExplorationClimbStepOff(serverLevel)) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos routeTarget = this.climbTargetPos;
+        BlockPos stepOffTarget = this.findExplorationClimbStepOffTarget(serverLevel, feet, routeTarget);
+        if (stepOffTarget != null) {
+            return this.startExplorationClimbStepOff(feet, stepOffTarget);
+        }
+
+        this.abandonExplorationClimb(routeTarget, "no safe landing away from completed pillar");
+        this.finished = true;
         return true;
     }
 
-    private boolean isBuildingExplorationClimbRequest() {
-        return this.climbTargetPos != null
-                && this.playerNpc.isExplorationUpwardEscapeRequested()
-                && this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
-                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING);
+    private boolean needsCompletedExplorationClimbStepOff(ServerLevel serverLevel) {
+        if (this.explorationClimbStepOffTargetPos != null
+                || this.explorationClimbStepOffCompleted
+                || this.placePos != null
+                || this.settlingPillarSupportPos != null
+                || this.pillarClearPos != null
+                || !this.isExplorationClimbRequest()
+                || !this.playerNpc.onGround()) {
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        return this.playerNpc.isTemporaryPillarSupport(feet.below())
+                && this.hasReachedRequestedSurfaceExit(serverLevel, feet, this.climbTargetPos)
+                && this.hasReachedOpenSky(serverLevel, feet)
+                && !this.isActuallyTrapped(serverLevel, feet);
+    }
+
+    private boolean isExplorationClimbRequest() {
+        return this.explorationClimbEpisode && this.climbTargetPos != null;
+    }
+
+    private boolean startExplorationClimbStepOff(BlockPos feet, BlockPos stepOffTarget) {
+        this.explorationClimbStepOffStartPos = feet.immutable();
+        this.explorationClimbStepOffTargetPos = stepOffTarget.immutable();
+        this.explorationClimbStepOffTicks = EXPLORATION_CLIMB_STEP_OFF_TICKS;
+        this.playerNpc.getNavigation().stop();
+        this.forceExplorationClimbStepOff();
+        return true;
     }
 
     private BlockPos findExplorationClimbStepOffTarget(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
@@ -1918,13 +2096,28 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return;
         }
 
-        this.explorationClimbStepOffTicks--;
         this.forceExplorationClimbStepOff();
 
         BlockPos feet = this.playerNpc.blockPosition();
-        boolean movedAwayAndLanded = !feet.equals(this.explorationClimbStepOffStartPos) && this.playerNpc.onGround();
-        if (movedAwayAndLanded || this.explorationClimbStepOffTicks <= 0) {
+        boolean movedHorizontally = feet.getX() != this.explorationClimbStepOffStartPos.getX()
+                || feet.getZ() != this.explorationClimbStepOffStartPos.getZ();
+        boolean movedAwayAndLanded = movedHorizontally
+                && this.playerNpc.onGround()
+                && !this.playerNpc.isTemporaryPillarSupport(feet.below());
+        if (movedAwayAndLanded) {
+            this.explorationClimbStepOffCompleted = true;
             this.playerNpc.clearUpwardEscapeTarget();
+            this.finished = true;
+            this.clearExplorationClimbStepOff();
+            return;
+        }
+
+        this.explorationClimbStepOffTicks--;
+        if (this.explorationClimbStepOffTicks <= 0) {
+            BlockPos failedRoute = this.climbTargetPos == null
+                    ? this.playerNpc.getUpwardEscapeTarget()
+                    : this.climbTargetPos.immutable();
+            this.abandonExplorationClimb(failedRoute, "could not land away from completed pillar");
             this.finished = true;
             this.clearExplorationClimbStepOff();
         }
@@ -2162,10 +2355,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.breakingBlockAi.stop();
             this.toolAi.restoreMainHand();
             this.updatePillarClearDetail(state);
-            this.moveToPillarBase();
+            boolean moving = this.moveToPillarBase();
+            if (this.tickPillarClearReturnWatch(moving)) {
+                this.replanAfterUnreachablePillarClear(serverLevel);
+            }
             return;
         }
 
+        this.resetPillarClearReturnWatch();
         this.restorePreviousPillarMainHand();
         this.playerNpc.getNavigation().stop();
         BlockPos clearPos = this.pillarClearPos;
@@ -2225,11 +2422,13 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void clearPillarClearance() {
+        this.playerNpc.clearBlockBreakProgress(this.pillarClearPos);
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
         this.pillarClearPos = null;
         this.mineTicks = 0;
         this.restorePreviousPillarMainHand();
+        this.resetPillarClearReturnWatch();
     }
 
     private void startPillarClearance(ServerLevel serverLevel, BlockPos obstruction) {
@@ -2247,7 +2446,79 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.toolAi.restoreMainHand();
         this.restorePreviousPillarMainHand();
         this.playerNpc.getNavigation().stop();
+        this.resetPillarClearReturnWatch();
         this.updatePillarClearDetail(serverLevel.getBlockState(this.pillarClearPos));
+    }
+
+    private boolean tickPillarClearReturnWatch(boolean moving) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.pillarClearReturnWatchPos == null
+                || !this.pillarClearReturnWatchPos.equals(feet)) {
+            this.pillarClearReturnWatchPos = feet.immutable();
+            this.pillarClearReturnNoProgressTicks = 0;
+            return false;
+        }
+
+        boolean failedPath = !moving
+                || this.playerNpc.getNavigation().isDone()
+                || this.playerNpc.getNavigation().isStuck();
+        this.pillarClearReturnNoProgressTicks += failedPath
+                ? PILLAR_CLEAR_RETURN_FAILED_PATH_WEIGHT
+                : 1;
+        return this.pillarClearReturnNoProgressTicks >= PILLAR_CLEAR_RETURN_NO_PROGRESS_TICKS;
+    }
+
+    private void replanAfterUnreachablePillarClear(ServerLevel serverLevel) {
+        BlockPos abandonedBase = this.pillarBasePos == null ? null : this.pillarBasePos.immutable();
+        BlockPos abandonedClear = this.pillarClearPos == null ? null : this.pillarClearPos.immutable();
+        this.clearPillarClearance();
+        this.playerNpc.getNavigation().stop();
+        this.placePos = null;
+        this.settlingPillarSupportPos = null;
+        this.lastConfirmedPillarSupportPos = null;
+        this.placeDelayTicks = 0;
+        this.placeWaitTicks = 0;
+        this.pillarSettleTicks = 0;
+        this.pillarSettleWaitTicks = 0;
+        this.placedPillarSupports.clear();
+        this.pillarsPlaced = 0;
+        this.failedPillarPlaceAttempts = 0;
+        this.resetPillarStuckWatch();
+        this.resetExplorationClimbStepOffWatch();
+        this.clearExplorationClimbStepOff();
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        PillarPlan newPlan = this.findPillarPlan(serverLevel, feet, this.climbTargetPos);
+        if (newPlan == null
+                || (this.climbTargetPos != null && this.exceedsRequestedRouteMax(newPlan))) {
+            this.finished = true;
+            this.playerNpc.setIdleTraceDetail(
+                    "pillar clear return failed; no replan from " + posText(feet)
+                            + " oldBase=" + posText(abandonedBase)
+                            + " oldClear=" + posText(abandonedClear),
+                    60
+            );
+            return;
+        }
+
+        int escapeBlocks = this.countEscapeBlocks();
+        if (escapeBlocks <= 0) {
+            this.finished = true;
+            this.playerNpc.setIdleTraceDetail("pillar clear return failed; no blocks @ " + posText(feet), 60);
+            return;
+        }
+
+        this.pillarBasePos = newPlan.basePos();
+        this.pillarExitY = newPlan.exitY();
+        this.requiredEscapeBlocks = this.climbTargetPos == null
+                ? 1
+                : Math.max(1, newPlan.blocksNeeded());
+        this.maxPillarBlocks = this.climbTargetPos == null
+                ? 1
+                : Math.min(escapeBlocks, Math.max(1, Math.min(this.requiredEscapeBlocks, newPlan.blocksNeeded())));
+        this.updatePillarRecoveryDetail("replanned after unreachable clear base from "
+                + posText(abandonedBase) + " to " + posText(this.pillarBasePos));
+        this.beginPillarStep(serverLevel);
     }
 
     private void beginPillarSettlement(BlockPos supportPos) {
@@ -2874,11 +3145,22 @@ public class EscapeHoleWithBlockGoal extends Goal {
         for (BlockPos candidate : candidates) {
             BlockPos immutable = candidate.immutable();
             if (this.canStandAt(serverLevel, immutable)
-                    && immutable.distSqr(target) <= BREAK_DISTANCE_SQR + 1.0D) {
+                    && this.isWithinMiningReachFromStand(immutable, target)) {
                 return immutable;
             }
         }
         return null;
+    }
+
+    private boolean isWithinMiningReachFromStand(BlockPos stand, BlockPos target) {
+        // Navigation targets the centre of the stand block while block breaking measures from the
+        // entity's feet to the target block centre. Use that same geometry here; BlockPos-to-
+        // BlockPos distance plus slack can accept a stand that navigation reaches successfully but
+        // from which the target is still physically outside BREAK_DISTANCE_SQR.
+        double dx = stand.getX() + 0.5D - (target.getX() + 0.5D);
+        double dy = stand.getY() - (target.getY() + 0.5D);
+        double dz = stand.getZ() + 0.5D - (target.getZ() + 0.5D);
+        return dx * dx + dy * dy + dz * dz <= BREAK_DISTANCE_SQR;
     }
 
     private BlockPos findReachableRouteNavigationTarget(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
@@ -3793,6 +4075,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private void resetPlan() {
         setEscapeMode(EscapeMode.NONE);
         this.clearBlockAi.stop();
+        this.gatherPathStuckFallbackAi.stop();
         this.resetFarmEgressNavigation();
         this.resetFarmEgressClearContext();
         this.farmEgressNavigationBlockedThisTick = false;
@@ -3806,6 +4089,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.pillarBasePos = null;
         this.pillarClearPos = null;
         this.pillarStuckWatchPos = null;
+        this.pillarClearReturnWatchPos = null;
         this.exitClearPos = null;
         this.explorationClimbStepOffWatchPos = null;
         this.explorationClimbStepOffWatchTarget = null;
@@ -3822,6 +4106,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.mineTicks = 0;
         this.repathTicks = 0;
         this.failedPathTicks = 0;
+        this.gatherPathFallbackAttempts = 0;
+        this.gatherPathRecoveryDeadlineTick = 0;
+        this.gatherPathFinalAttemptDeadlineTick = 0;
         this.goalTicks = 0;
         this.requiredEscapeBlocks = 0;
         this.maxPillarBlocks = 0;
@@ -3831,8 +4118,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.pillarStuckWatchStartTick = 0;
         this.nextPillarStuckRecoveryTick = 0;
         this.pillarStuckWatchPillarsPlaced = 0;
+        this.pillarClearReturnNoProgressTicks = 0;
         this.explorationClimbStepOffWatchStartTick = 0;
         this.explorationClimbStepOffTicks = 0;
+        this.explorationClimbStepOffCompleted = false;
         this.usingTemporaryPickaxe = false;
         this.usingTemporaryBlock = false;
         this.explorationClimbEpisode = false;
@@ -3844,6 +4133,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.pillarStuckWatchStartTick = 0;
         this.nextPillarStuckRecoveryTick = 0;
         this.pillarStuckWatchPillarsPlaced = this.pillarsPlaced;
+    }
+
+    private void resetPillarClearReturnWatch() {
+        this.pillarClearReturnWatchPos = null;
+        this.pillarClearReturnNoProgressTicks = 0;
     }
 
     private int getRemainingGoalSeconds() {

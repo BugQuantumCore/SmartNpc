@@ -246,7 +246,7 @@ public class PickupNearbyItemGoal extends Goal {
         if (playerNpc.level() instanceof ServerLevel serverLevel && tryActivePickupApproach(serverLevel)) {
             return;
         }
-        if (repathTicks-- <= 0 || playerNpc.getNavigation().isDone() || playerNpc.getNavigation().isStuck()) {
+        if (repathTicks-- <= 0) {
             repathTicks = REPATH_INTERVAL_TICKS;
             moveToTarget();
         }
@@ -470,7 +470,10 @@ public class PickupNearbyItemGoal extends Goal {
 
         activeApproachTicks++;
         double approachSpeed = Math.min(1.0D, Math.max(speed, 0.95D));
-        playerNpc.getNavigation().moveTo(targetItem, approachSpeed);
+        if (repathTicks-- <= 0) {
+            playerNpc.getNavigation().moveTo(targetItem, approachSpeed);
+            repathTicks = REPATH_INTERVAL_TICKS;
+        }
         playerNpc.getMoveControl().setWantedPosition(
                 targetItem.getX(),
                 targetItem.getY(),

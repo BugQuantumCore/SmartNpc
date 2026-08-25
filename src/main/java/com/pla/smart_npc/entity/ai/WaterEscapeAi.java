@@ -44,10 +44,13 @@ public final class WaterEscapeAi {
     private static final int DRY_EXIT_FALLBACK_VERTICAL_DOWN = 2;
     private static final int DRY_EXIT_FALLBACK_VERTICAL_UP = 2;
     private static final int DRY_EXIT_FALLBACK_RANDOM_POOL = 8;
-    private static final int DESTINATION_EXIT_RECHECK_TICKS = 10;
+    private static final int DESTINATION_RECOVERY_SCAN_INTERVAL_TICKS = 20;
+    private static final int MAX_DESTINATION_SWIM_TICKS = 20 * 20;
     private static final int DESTINATION_STALL_TICKS = 20 * 2;
     private static final int MAX_DESTINATION_STALL_EPISODES = 3;
     private static final double DESTINATION_PROGRESS_EPSILON_SQR = 0.04D;
+    private static final double DESTINATION_SWIM_ACCELERATION = 0.035D;
+    private static final double DESTINATION_SWIM_MAX_HORIZONTAL_SPEED = 0.16D;
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
@@ -66,6 +69,7 @@ public final class WaterEscapeAi {
     private int destinationSwimTicks;
     private int destinationStallTicks;
     private int destinationStallEpisodes;
+    private int nextDestinationRecoveryScanTick;
     private double bestDestinationDistanceSqr = Double.MAX_VALUE;
     private String detail = "";
 
@@ -79,8 +83,9 @@ public final class WaterEscapeAi {
             return false;
         }
         BlockPos feet = this.playerNpc.blockPosition();
-        return this.findDryStepOut(serverLevel, feet) != null
-                || this.findWaterStandTarget(serverLevel) != null
+        boolean hasDryExit = this.findDryStepOut(serverLevel, feet) != null;
+        return hasDryExit
+                || this.findWaterStandTarget(serverLevel, false) != null
                 || this.findWaterCurrentTarget(serverLevel) != null;
     }
 
@@ -127,14 +132,13 @@ public final class WaterEscapeAi {
             return TickResult.FAILED;
         }
 
-        if (!this.swimmingToDestination && this.escapeTicks++ >= MAX_ESCAPE_TICKS) {
-            this.failOrStopPreferredDestination();
-            return TickResult.FAILED;
-        }
-
         double safeSpeed = Math.min(1.0D, Math.max(0.1D, speed));
         if (this.swimmingToDestination) {
             return this.tickDestinationSwim(serverLevel, safeSpeed);
+        }
+        if (this.escapeTicks++ >= MAX_ESCAPE_TICKS) {
+            this.failOrStopPreferredDestination();
+            return TickResult.FAILED;
         }
         if (this.movingToDryExit) {
             return this.tickDryExit(serverLevel, safeSpeed);
@@ -168,6 +172,7 @@ public final class WaterEscapeAi {
         this.destinationSwimTicks = 0;
         this.destinationStallTicks = 0;
         this.destinationStallEpisodes = 0;
+        this.nextDestinationRecoveryScanTick = 0;
         this.bestDestinationDistanceSqr = Double.MAX_VALUE;
         this.detail = "";
     }
@@ -179,18 +184,23 @@ public final class WaterEscapeAi {
         this.preferredDestination = preferredDestination == null ? null : preferredDestination.immutable();
 
         BlockPos feet = this.playerNpc.blockPosition();
+        if (this.preferredDestination != null) {
+            // The owning goal knows why the NPC entered the water and where it was going. Keep
+            // that route instead of selecting the nearest bank, which can be the bank it just
+            // left and creates a cross-river ping-pong loop.
+            this.beginDestinationSwim(feet, this.preferredDestination);
+            return true;
+        }
+
         BlockPos dryExit = this.findDryStepOut(serverLevel, feet, this.preferredDestination);
         if (dryExit != null) {
             this.beginDryExit(feet, dryExit);
             return true;
         }
 
-        if (this.preferredDestination != null) {
-            this.beginDestinationSwim(feet, this.preferredDestination);
-            return true;
-        }
-
-        WaterStandTarget standTarget = this.findWaterStandTarget(serverLevel);
+        // Survival comes before continuing work. Do not swim directly at a stone/log target
+        // while a usable footing block can get the NPC out of the water.
+        WaterStandTarget standTarget = this.findWaterStandTarget(serverLevel, false);
         if (standTarget != null) {
             this.waterPos = standTarget.waterPos();
             this.standPlacePos = standTarget.placePos();
@@ -203,17 +213,16 @@ public final class WaterEscapeAi {
         }
 
         WaterCurrentTarget currentTarget = this.findWaterCurrentTarget(serverLevel);
+        if (currentTarget != null && currentTarget.plugPos() != null) {
+            this.beginCurrentEscape(currentTarget);
+            return true;
+        }
+
         if (currentTarget == null) {
             return false;
         }
 
-        this.waterPos = currentTarget.waterPos();
-        this.plugPos = currentTarget.plugPos();
-        this.standPlacePos = null;
-        this.dryExitPos = null;
-        this.placingStandBlock = false;
-        this.movingToDryExit = false;
-        this.updateDetail();
+        this.beginCurrentEscape(currentTarget);
         return true;
     }
 
@@ -225,14 +234,11 @@ public final class WaterEscapeAi {
 
         BlockPos feet = this.playerNpc.blockPosition();
         this.waterPos = feet.immutable();
-        if (this.destinationSwimTicks++ % DESTINATION_EXIT_RECHECK_TICKS == 0) {
-            BlockPos dryExit = this.findDryStepOut(serverLevel, feet, this.preferredDestination);
-            if (dryExit != null) {
-                this.beginDryExit(feet, dryExit);
-                return TickResult.RUNNING;
-            }
+        this.destinationSwimTicks++;
+        if (this.destinationSwimTicks >= MAX_DESTINATION_SWIM_TICKS) {
+            this.failOrStopPreferredDestination();
+            return TickResult.FAILED;
         }
-
         double distanceSqr = horizontalDistanceToCenterSqr(this.playerNpc.position(), this.preferredDestination);
         if (distanceSqr + DESTINATION_PROGRESS_EPSILON_SQR < this.bestDestinationDistanceSqr) {
             this.bestDestinationDistanceSqr = distanceSqr;
@@ -241,19 +247,31 @@ public final class WaterEscapeAi {
             this.destinationStallTicks++;
         }
 
-        if (this.destinationStallTicks >= DESTINATION_STALL_TICKS
-                && this.tryStartDestinationFallback(serverLevel, feet)) {
-            return TickResult.RUNNING;
-        }
-        if (this.destinationStallTicks >= DESTINATION_STALL_TICKS) {
-            this.destinationStallEpisodes++;
-            if (this.destinationStallEpisodes >= MAX_DESTINATION_STALL_EPISODES) {
-                this.failOrStopPreferredDestination();
-                return TickResult.FAILED;
+        // Dry-exit and footing discovery scan dozens/hundreds of world positions. Keep the cheap
+        // steering below at 20 Hz, but run all recovery discovery on one shared absolute
+        // one-second cadence so goal tick-rate changes cannot accidentally multiply world scans.
+        if (this.playerNpc.tickCount >= this.nextDestinationRecoveryScanTick) {
+            this.nextDestinationRecoveryScanTick = this.playerNpc.tickCount
+                    + DESTINATION_RECOVERY_SCAN_INTERVAL_TICKS;
+            if (this.destinationStallTicks >= DESTINATION_STALL_TICKS) {
+                if (this.tryStartDestinationFallback(serverLevel, feet)) {
+                    return TickResult.RUNNING;
+                }
+                this.destinationStallEpisodes++;
+                if (this.destinationStallEpisodes >= MAX_DESTINATION_STALL_EPISODES) {
+                    this.failOrStopPreferredDestination();
+                    return TickResult.FAILED;
+                }
+                this.destinationStallTicks = 0;
+                this.destinationSwimTicks = 0;
+                this.bestDestinationDistanceSqr = distanceSqr;
+            } else {
+                BlockPos dryExit = this.findDestinationSideDryStepOut(serverLevel, feet);
+                if (dryExit != null) {
+                    this.beginDryExit(feet, dryExit);
+                    return TickResult.RUNNING;
+                }
             }
-            this.destinationStallTicks = 0;
-            this.destinationSwimTicks = 0;
-            this.bestDestinationDistanceSqr = distanceSqr;
         }
 
         this.playerNpc.getNavigation().stop();
@@ -275,18 +293,19 @@ public final class WaterEscapeAi {
                 this.preferredDestination.getZ() + 0.5D,
                 speed
         );
+        this.steerThroughWaterToward(this.preferredDestination, speed);
         this.updateDetail();
         return TickResult.RUNNING;
     }
 
     private boolean tryStartDestinationFallback(ServerLevel serverLevel, BlockPos feet) {
-        BlockPos dryExit = this.findDryStepOut(serverLevel, feet, this.preferredDestination);
+        BlockPos dryExit = this.findDestinationSideDryStepOut(serverLevel, feet);
         if (dryExit != null) {
             this.beginDryExit(feet, dryExit);
             return true;
         }
 
-        WaterStandTarget standTarget = this.findWaterStandTarget(serverLevel);
+        WaterStandTarget standTarget = this.findDestinationStandTarget(serverLevel, feet);
         if (standTarget != null) {
             this.waterPos = standTarget.waterPos();
             this.standPlacePos = standTarget.placePos();
@@ -295,29 +314,15 @@ public final class WaterEscapeAi {
             this.placingStandBlock = true;
             this.movingToDryExit = false;
             this.swimmingToDestination = false;
-            this.escapeTicks = 0;
             this.placeDelayTicks = PLACE_DELAY_TICKS;
             this.placeWaitTicks = 0;
             this.updateDetail();
             return true;
         }
 
-        WaterCurrentTarget currentTarget = this.findWaterCurrentTarget(serverLevel);
-        if (currentTarget != null) {
-            this.waterPos = currentTarget.waterPos();
-            this.plugPos = currentTarget.plugPos();
-            this.standPlacePos = null;
-            this.dryExitPos = null;
-            this.placingStandBlock = false;
-            this.movingToDryExit = false;
-            this.swimmingToDestination = false;
-            this.escapeTicks = 0;
-            this.updateDetail();
-            return true;
-        }
-
-        // Source water with no carried block keeps swimming until the bounded stall budget above
-        // is exhausted; the owning goal can then choose another destination without pillaring.
+        // Keep swimming toward the owner's target. Footing blocks are reserved for shallow water
+        // or a wall/shore obstruction, so an ordinary river crossing does not become a bridge-
+        // building or bank-selection behavior.
         return false;
     }
 
@@ -330,10 +335,11 @@ public final class WaterEscapeAi {
         this.placingStandBlock = false;
         this.movingToDryExit = false;
         this.swimmingToDestination = true;
-        this.escapeTicks = 0;
         this.destinationSwimTicks = 0;
         this.destinationStallTicks = 0;
         this.destinationStallEpisodes = 0;
+        this.nextDestinationRecoveryScanTick = this.playerNpc.tickCount
+                + DESTINATION_RECOVERY_SCAN_INTERVAL_TICKS;
         this.bestDestinationDistanceSqr = horizontalDistanceToCenterSqr(
                 this.playerNpc.position(),
                 this.preferredDestination
@@ -349,7 +355,17 @@ public final class WaterEscapeAi {
         this.placingStandBlock = false;
         this.movingToDryExit = true;
         this.swimmingToDestination = false;
-        this.escapeTicks = 0;
+        this.updateDetail();
+    }
+
+    private void beginCurrentEscape(WaterCurrentTarget target) {
+        this.waterPos = target.waterPos();
+        this.plugPos = target.plugPos();
+        this.standPlacePos = null;
+        this.dryExitPos = null;
+        this.placingStandBlock = false;
+        this.movingToDryExit = false;
+        this.swimmingToDestination = false;
         this.updateDetail();
     }
 
@@ -374,12 +390,15 @@ public final class WaterEscapeAi {
         }
 
         if (!this.canStandDryAt(serverLevel, this.dryExitPos)) {
-            this.dryExitPos = this.findDryStepOut(
-                    serverLevel,
-                    this.playerNpc.blockPosition(),
-                    this.preferredDestination
-            );
+            BlockPos feet = this.playerNpc.blockPosition();
+            this.dryExitPos = this.preferredDestination == null
+                    ? this.findDryStepOut(serverLevel, feet, null)
+                    : this.findDestinationSideDryStepOut(serverLevel, feet);
             if (this.dryExitPos == null) {
+                if (this.preferredDestination != null) {
+                    this.beginDestinationSwim(feet, this.preferredDestination);
+                    return TickResult.RUNNING;
+                }
                 this.failOrStopPreferredDestination();
                 return TickResult.FAILED;
             }
@@ -401,6 +420,7 @@ public final class WaterEscapeAi {
                 this.dryExitPos.getZ() + 0.5D,
                 speed
         );
+        this.steerThroughWaterToward(this.dryExitPos, speed);
         this.updateDetail();
         return TickResult.RUNNING;
     }
@@ -423,8 +443,15 @@ public final class WaterEscapeAi {
         this.updateDetail();
 
         if (!this.canPlaceStandBlockAt(serverLevel, this.standPlacePos)) {
-            WaterStandTarget target = this.findWaterStandTarget(serverLevel);
+            BlockPos feet = this.playerNpc.blockPosition();
+            WaterStandTarget target = this.preferredDestination == null
+                    ? this.findWaterStandTarget(serverLevel)
+                    : this.findDestinationStandTarget(serverLevel, feet);
             if (target == null) {
+                if (this.preferredDestination != null) {
+                    this.beginDestinationSwim(feet, this.preferredDestination);
+                    return TickResult.RUNNING;
+                }
                 this.stop();
                 return TickResult.DONE;
             }
@@ -450,6 +477,12 @@ public final class WaterEscapeAi {
         }
 
         if (this.tryPlaceStandBlock(serverLevel, this.standPlacePos)) {
+            BlockPos placedPos = this.standPlacePos;
+            BlockPos dryStandPos = placedPos.above();
+            if (this.canStandDryAt(serverLevel, dryStandPos)) {
+                this.beginDryExit(this.playerNpc.blockPosition(), dryStandPos);
+                return TickResult.RUNNING;
+            }
             this.stop();
             return TickResult.DONE;
         }
@@ -497,12 +530,16 @@ public final class WaterEscapeAi {
     }
 
     private WaterStandTarget findWaterStandTarget(ServerLevel serverLevel) {
+        return this.findWaterStandTarget(serverLevel, true);
+    }
+
+    private WaterStandTarget findWaterStandTarget(ServerLevel serverLevel, boolean checkDryExit) {
         if (!this.isInWater(serverLevel) || !this.hasWaterPlugBlock()) {
             return null;
         }
 
         BlockPos feet = this.playerNpc.blockPosition();
-        if (this.findDryStepOut(serverLevel, feet) != null) {
+        if (checkDryExit && this.findDryStepOut(serverLevel, feet) != null) {
             return null;
         }
 
@@ -510,15 +547,69 @@ public final class WaterEscapeAi {
         return place == null ? null : new WaterStandTarget(feet.immutable(), place);
     }
 
-    private BlockPos findStandPlacePos(ServerLevel serverLevel, BlockPos feet) {
+    @Nullable
+    private WaterStandTarget findDestinationStandTarget(ServerLevel serverLevel, BlockPos feet) {
+        if (this.preferredDestination == null
+                || !this.hasWaterPlugBlock()
+                || !this.canBuildDestinationFooting(serverLevel, feet)) {
+            return null;
+        }
+
         List<BlockPos> candidates = new ArrayList<>();
         candidates.add(feet);
         candidates.add(feet.below());
         for (Direction direction : Direction.Plane.HORIZONTAL) {
             candidates.add(feet.relative(direction));
         }
+        candidates.removeIf(candidate -> !this.canPlaceStandBlockAt(serverLevel, candidate));
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos candidate) -> horizontalDistanceSqr(candidate, this.preferredDestination))
+                .thenComparingDouble(feet::distSqr));
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        return new WaterStandTarget(feet.immutable(), candidates.get(0).immutable());
+    }
 
-        candidates.sort(Comparator.comparingDouble(feet::distSqr));
+    private boolean canBuildDestinationFooting(ServerLevel serverLevel, BlockPos feet) {
+        FluidState feetFluid = serverLevel.getFluidState(feet);
+        boolean oneBlockDeep = feetFluid.is(FluidTags.WATER)
+                && !serverLevel.getFluidState(feet.above()).is(FluidTags.WATER)
+                && !serverLevel.getFluidState(feet.below()).is(FluidTags.WATER)
+                && this.isWalkableFloor(serverLevel, feet.below());
+        if (oneBlockDeep) {
+            return true;
+        }
+
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            if (this.hasBlockingCollision(serverLevel, feet.relative(direction))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private BlockPos findStandPlacePos(ServerLevel serverLevel, BlockPos feet) {
+        List<BlockPos> sideCandidates = new ArrayList<>();
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            sideCandidates.add(feet.relative(direction));
+        }
+
+        // Prefer a step beside the NPC when its top is already dry. This avoids repeatedly
+        // jumping until the body clears its own water cell before a block can be placed there.
+        sideCandidates.sort(Comparator.comparingDouble(feet::distSqr));
+        for (BlockPos candidate : sideCandidates) {
+            BlockPos immutable = candidate.immutable();
+            if (this.canPlaceStandBlockAt(serverLevel, immutable)
+                    && this.hasDryStandingRoomAbove(serverLevel, immutable)) {
+                return immutable;
+            }
+        }
+
+        List<BlockPos> candidates = new ArrayList<>();
+        candidates.add(feet.below());
+        candidates.addAll(sideCandidates);
+        candidates.add(feet);
         for (BlockPos candidate : candidates) {
             BlockPos immutable = candidate.immutable();
             if (this.canPlaceStandBlockAt(serverLevel, immutable)) {
@@ -526,6 +617,14 @@ public final class WaterEscapeAi {
             }
         }
         return null;
+    }
+
+    private boolean hasDryStandingRoomAbove(ServerLevel serverLevel, BlockPos floorPos) {
+        BlockPos feetPos = floorPos.above();
+        return !serverLevel.getFluidState(feetPos).is(FluidTags.WATER)
+                && !serverLevel.getFluidState(feetPos.above()).is(FluidTags.WATER)
+                && !this.hasBlockingCollision(serverLevel, feetPos)
+                && !this.hasBlockingCollision(serverLevel, feetPos.above());
     }
 
     private BlockPos findPlugPos(ServerLevel serverLevel, BlockPos waterCandidate) {
@@ -572,6 +671,36 @@ public final class WaterEscapeAi {
                 Math.max(motion.y, 0.22D),
                 motion.z - flow.z * 0.08D
         );
+        this.playerNpc.hasImpulse = true;
+    }
+
+    /**
+     * MoveControl turns the NPC and selects its movement speed, but it does not give this
+     * PathfinderMob any forward swimming input after navigation has been stopped. Apply a small,
+     * bounded water-only impulse so destination swimming actually makes horizontal progress while
+     * collision handling remains with the entity physics.
+     */
+    private void steerThroughWaterToward(BlockPos destination, double speed) {
+        double dx = destination.getX() + 0.5D - this.playerNpc.getX();
+        double dz = destination.getZ() + 0.5D - this.playerNpc.getZ();
+        double length = Math.sqrt(dx * dx + dz * dz);
+        if (length < 1.0E-4D) {
+            return;
+        }
+
+        double safeSpeed = Math.min(1.0D, Math.max(0.1D, speed));
+        double acceleration = DESTINATION_SWIM_ACCELERATION * safeSpeed;
+        double maxSpeed = DESTINATION_SWIM_MAX_HORIZONTAL_SPEED * safeSpeed;
+        Vec3 motion = this.playerNpc.getDeltaMovement();
+        double nextX = motion.x + dx / length * acceleration;
+        double nextZ = motion.z + dz / length * acceleration;
+        double horizontalSpeed = Math.sqrt(nextX * nextX + nextZ * nextZ);
+        if (horizontalSpeed > maxSpeed) {
+            nextX = nextX / horizontalSpeed * maxSpeed;
+            nextZ = nextZ / horizontalSpeed * maxSpeed;
+        }
+
+        this.playerNpc.setDeltaMovement(nextX, motion.y, nextZ);
         this.playerNpc.hasImpulse = true;
     }
 
@@ -699,7 +828,8 @@ public final class WaterEscapeAi {
         BlockPos feet = this.playerNpc.blockPosition();
         return this.playerNpc.isInWaterOrBubble()
                 || serverLevel.getFluidState(feet).is(FluidTags.WATER)
-                || serverLevel.getFluidState(feet.above()).is(FluidTags.WATER);
+                || serverLevel.getFluidState(feet.above()).is(FluidTags.WATER)
+                || !this.playerNpc.onGround() && serverLevel.getFluidState(feet.below()).is(FluidTags.WATER);
     }
 
     private BlockPos findDryStepOut(ServerLevel serverLevel, BlockPos feet) {
@@ -734,6 +864,21 @@ public final class WaterEscapeAi {
         Vec3 look = this.playerNpc.getLookAngle();
         candidates.sort(this.dryExitComparator(feet, look, preferredDestination));
         return candidates.get(0);
+    }
+
+    @Nullable
+    private BlockPos findDestinationSideDryStepOut(ServerLevel serverLevel, BlockPos feet) {
+        if (this.preferredDestination == null) {
+            return null;
+        }
+        BlockPos candidate = this.findDryStepOut(serverLevel, feet, this.preferredDestination);
+        if (candidate == null) {
+            return null;
+        }
+
+        double currentDistance = horizontalDistanceSqr(feet, this.preferredDestination);
+        double exitDistance = horizontalDistanceSqr(candidate, this.preferredDestination);
+        return exitDistance + DESTINATION_PROGRESS_EPSILON_SQR < currentDistance ? candidate : null;
     }
 
     private BlockPos findNearbyDryStepOut(

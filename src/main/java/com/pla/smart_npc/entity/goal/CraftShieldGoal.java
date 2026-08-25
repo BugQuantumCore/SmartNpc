@@ -20,6 +20,7 @@ public class CraftShieldGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 75;
 
     private final PlayerNpcEntity playerNpc;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(40);
 
     public CraftShieldGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -36,9 +37,9 @@ public class CraftShieldGoal extends Goal {
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.getShieldCraftCooldown() > 0
                 || this.hasShield()
-                || !this.hasNearbyCraftingTable(serverLevel)
-                || this.playerNpc.tickCount % 40 != 0
-                || this.playerNpc.getRandom().nextFloat() > 0.40F) {
+                || !this.canUseThrottle.canCheck(this.playerNpc)
+                || this.playerNpc.getRandom().nextFloat() > 0.40F
+                || !this.hasNearbyCraftingTable(serverLevel)) {
             return false;
         }
 
