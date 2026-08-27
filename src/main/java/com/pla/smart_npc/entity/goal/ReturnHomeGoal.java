@@ -91,7 +91,8 @@ public class ReturnHomeGoal extends Goal {
         }
         return serverLevel.isNight()
                 || serverLevel.isThundering()
-                || BuildHouseGoal.hasReadyHomeBuildWork(playerNpc, serverLevel)
+                || (playerNpc.getReturnHomeCooldown() <= 0
+                    && BuildHouseGoal.hasReadyHomeBuildWork(playerNpc, serverLevel))
                 || PlayerNpcBuildMaterialUtil.needsStoneSmelting(serverLevel, playerNpc)
                 || PlayerNpcBuildMaterialUtil.needsTorchCharcoalSmelting(serverLevel, playerNpc);
     }
@@ -128,6 +129,7 @@ public class ReturnHomeGoal extends Goal {
         boolean inventoryHalfFull = this.inventoryMoreThanHalfFull();
         boolean inventoryMostlyFull = this.inventoryMostlyFull();
         boolean miningShelterOnly = isMiningShelterOnly(this.playerNpc);
+        boolean insideHomeWorkArea = this.isInsideHomeWorkArea(homeArea);
         if (miningShelterOnly
                 && !forcedExplorationReturn
                 && !forcedHomeSurfaceRecovery
@@ -146,7 +148,13 @@ public class ReturnHomeGoal extends Goal {
             this.completedStoneTripReturn = false;
             return false;
         }
-        this.buildReturn = !miningShelterOnly && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
+        // A build-readiness refresh scans blueprint/world state in admitted slices. It cannot make
+        // this goal runnable while the NPC is already home or the ordinary return cooldown is
+        // active, so avoid starting that work in those cases.
+        this.buildReturn = !miningShelterOnly
+                && !insideHomeWorkArea
+                && this.playerNpc.getReturnHomeCooldown() <= 0
+                && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
         this.completedStoneTripReturn = !miningShelterOnly && shouldReturnAfterCompletedStoneTrip(this.playerNpc, serverLevel, homeArea);
         if (miningShelterOnly
                 && !this.shelterReturn
@@ -176,7 +184,7 @@ public class ReturnHomeGoal extends Goal {
             }
             return true;
         }
-        if (this.shelterReturn && distanceSqr > STOP_DISTANCE_SQR && !this.isInsideHomeWorkArea(homeArea)) {
+        if (this.shelterReturn && distanceSqr > STOP_DISTANCE_SQR && !insideHomeWorkArea) {
             this.utilityReturn = false;
             this.buildReturn = false;
             this.completedStoneTripReturn = false;
@@ -185,7 +193,7 @@ public class ReturnHomeGoal extends Goal {
             return true;
         }
 
-        if (this.completedStoneTripReturn && !this.isInsideHomeWorkArea(homeArea)) {
+        if (this.completedStoneTripReturn && !insideHomeWorkArea) {
             this.utilityReturn = false;
             this.buildReturn = false;
             this.shelterReturn = false;
@@ -194,8 +202,7 @@ public class ReturnHomeGoal extends Goal {
             return true;
         }
 
-        if (this.buildReturn
-                && !this.isInsideHomeWorkArea(homeArea)) {
+        if (this.buildReturn && !insideHomeWorkArea) {
             this.utilityReturn = false;
             this.shelterReturn = false;
             this.completedStoneTripReturn = false;

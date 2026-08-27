@@ -31,7 +31,9 @@ public final class ChestAi {
         }
 
         BlockPos ownedChestPos = playerNpc.getOwnedChestPos();
-        if (ownedChestPos != null && !serverLevel.getBlockState(ownedChestPos).is(Blocks.CHEST)) {
+        if (ownedChestPos != null && !serverLevel.hasChunkAt(ownedChestPos)) {
+            ownedChestPos = null;
+        } else if (ownedChestPos != null && !serverLevel.getBlockState(ownedChestPos).is(Blocks.CHEST)) {
             playerNpc.setOwnedChestPos(null);
             ownedChestPos = null;
         }
@@ -49,7 +51,35 @@ public final class ChestAi {
         return ownedChestPos == null ? null : ownedChestPos.immutable();
     }
 
+    /** Returns only this NPC's explicitly tracked chest, used by farm and camp bases. */
+    public static BlockPos findOwnedSupplyChest(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null || serverLevel == null) {
+            return null;
+        }
+        BlockPos ownedChestPos = playerNpc.getOwnedChestPos();
+        if (ownedChestPos == null) {
+            return null;
+        }
+        if (!serverLevel.hasChunkAt(ownedChestPos)) {
+            return null;
+        }
+        if (!serverLevel.getBlockState(ownedChestPos).is(Blocks.CHEST)) {
+            playerNpc.setOwnedChestPos(null);
+            return null;
+        }
+        return ownedChestPos.immutable();
+    }
+
     public static BlockPos findAdjacentStand(PlayerNpcEntity playerNpc, ServerLevel serverLevel, BlockPos chestPos) {
+        return findAdjacentStand(playerNpc, serverLevel, chestPos, new NavigationPathBudget(4));
+    }
+
+    public static BlockPos findAdjacentStand(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            BlockPos chestPos,
+            NavigationPathBudget pathBudget
+    ) {
         if (playerNpc == null || serverLevel == null || chestPos == null) {
             return null;
         }
@@ -68,6 +98,9 @@ public final class ChestAi {
             if (candidate.equals(current)) {
                 return candidate;
             }
+            if (pathBudget == null || !pathBudget.tryConsume()) {
+                break;
+            }
             Path path = playerNpc.getNavigation().createPath(candidate, 0);
             if (path != null && path.canReach()) {
                 return candidate;
@@ -79,6 +112,7 @@ public final class ChestAi {
     public static boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
         return serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
+                && serverLevel.hasChunkAt(pos)
                 && serverLevel.getBlockState(pos).isAir()
                 && serverLevel.getBlockState(pos.above()).isAir()
                 && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
@@ -291,6 +325,27 @@ public final class ChestAi {
                 container.setItem(slot, moved);
             }
             remainder.shrink(moving);
+        }
+    }
+
+    /** Mutable total budget shared by every candidate in one chest-placement search. */
+    public static final class NavigationPathBudget {
+        private int remaining;
+
+        public NavigationPathBudget(int maximumPaths) {
+            this.remaining = Math.max(0, maximumPaths);
+        }
+
+        public boolean tryConsume() {
+            if (this.remaining <= 0) {
+                return false;
+            }
+            this.remaining--;
+            return true;
+        }
+
+        public boolean exhausted() {
+            return this.remaining <= 0;
         }
     }
 }

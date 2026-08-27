@@ -50,15 +50,25 @@ The overlay displays:
 
 If the detail string is empty, the overlay falls back to `ai.player_npc.looking_for_work` while the state is idle, otherwise it displays the translated AI state as the task text.
 
-Inventory snapshots refresh through `PlayerNpcInspectorRequestPacket` every 10 game ticks. The server validates that the entity is still a live `PlayerNpcEntity` and that the player is within 64 blocks before sending a fresh snapshot; otherwise it sends a clear packet.
+Inventory snapshots refresh through `PlayerNpcInspectorRequestPacket` every 20 game ticks. The server validates that the entity is still a live `PlayerNpcEntity` and that the player is within 64 blocks before sending a fresh snapshot; otherwise it sends a clear packet.
 
 Formatted display text is cached for 500 ms. Keep this throttling for FPS-sensitive UI, similar to Minecraft's F3 debug screen pattern.
+
+## Standalone AI Resource Monitor
+
+Shift-right-clicking air with the inspector item opens a standalone overall scheduler monitor. Normal right-clicking air retains its original clear/hide behavior. Shift-right-clicking an NPC retains the same NPC inspection behavior as an ordinary NPC click; it must not enter inspectator or open the overall monitor.
+
+The standalone view uses `PlayerNpcInspectorPacket.OVERALL_ENTITY_ID` (`-2`) and `PlayerNpcInspectorPacket.overall(...)`, so it has no entity target and does not enter inspectator camera/mode. `PlayerNpcInspectorRequestPacket` recognizes that sentinel and refreshes the server-authored monitor every 20 ticks. The payload comes from `PlayerNpcAiWorkBudget.resourceSnapshot(...)` and `PlayerNpcPerformanceMonitor`: TPS/MSPT, holder count, active/waiting/effective worker limit, and holder name/state/detail with worker/probe/expensive roles.
+
+The payload is capped at eight holders and each name/state/detail field at 96 characters. Probe-only UUID resolution uses direct per-level UUID lookup only within that cap; do not add per-tick entity scans. The overall and single-NPC render branches are mutually exclusive.
+
+Receiving the overall sentinel must stop any active inspectator session, clear trace/requirements UI state, replace the selected NPC panel, and render only the standalone monitor. This makes Shift-right-click air a safe atomic view switch. Receiving the ordinary clear sentinel (`-1`) continues to close both views.
 
 ## Inspectator View
 
 While the inspector overlay is open, holding E for the configured short hold threshold toggles inspectator view. The hold only triggers the toggle; the player does not need to keep holding E after mode changes. While the inspector overlay is active and E is being held for inspectator, vanilla inventory opening is canceled/drained so the hold can complete.
 
-The trace toggle uses effective trace state. If `/smart_npc trace all on` is active, any inspected or inspectated NPC should render the trace indicator as on. Pressing the per-NPC trace toggle while all-trace is active disables all-trace; pressing it again after that enables only the currently inspected NPC's individual trace.
+The trace toggle uses effective trace state. If `/smart_npc trace all on` is active, a currently inspected scheduler-resource holder renders the trace indicator as on; a waiting/non-holder does not, because trace-all is holder-only. Turning trace off on a holder disables trace-all. Turning trace on for a non-holder enables only that NPC's individual trace without broadening trace-all.
 
 Entering inspectator view does all of these:
 

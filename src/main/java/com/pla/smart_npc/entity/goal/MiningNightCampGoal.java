@@ -14,6 +14,7 @@ import com.pla.smart_npc.entity.ai.SneakingAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
+import com.pla.smart_npc.util.PlayerNpcBaseUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -126,6 +127,7 @@ public class MiningNightCampGoal extends Goal {
     private boolean farmingCamp;
     private boolean buildingBootstrapCamp;
     private boolean farmingBootstrapCamp;
+    private boolean persistentBaseCamp;
     private int farmingBootstrapPlanCheckTicks;
     private boolean walkSneaking;
     private boolean usingTemporaryMainHand;
@@ -165,6 +167,12 @@ public class MiningNightCampGoal extends Goal {
         // normal-camp gate is consulted.
         if (playerNpc.hasInterest(PlayerNpcInterest.BUILDING)) {
             return false;
+        }
+
+        if (PlayerNpcBaseUtil.hasCampBaseJobs(playerNpc)) {
+            return serverLevel.isNight()
+                    && (PlayerNpcBaseUtil.getCampBase(playerNpc, serverLevel).isPresent()
+                    || !PlayerNpcBaseUtil.hasStoredCampBase(playerNpc));
         }
 
         boolean miningJob = GatherStoneGoal.isMiningJobActive(playerNpc);
@@ -227,16 +235,9 @@ public class MiningNightCampGoal extends Goal {
             return false;
         }
 
-        // A Player NPC loaded/spawned after the daytime fallback window legitimately has no
-        // selected job for this day. Its FARMING interest must still provide night shelter.
-        // Conversely, a current-day roll for another job keeps ownership of that NPC's night.
-        long currentDay = serverLevel.getDayTime() / 24_000L;
-        if (playerNpc.getSelectedDailyJobDay() != currentDay) {
-            return true;
-        }
-        return playerNpc.getSelectedDailyJobInterest()
-                .map(selected -> selected == PlayerNpcInterest.FARMING)
-                .orElse(true);
+        // Farming is the persistent base whenever no builder home exists, even when another
+        // assigned job owns today's work roll.
+        return true;
     }
 
     @Override
@@ -264,9 +265,24 @@ public class MiningNightCampGoal extends Goal {
         this.farmingCamp = !this.buildingBootstrapCamp
                 && !this.farmingBootstrapCamp
                 && isFarmingNightCampJob(this.playerNpc, serverLevel);
-        this.campCenter = this.farmingCamp
-                ? this.resolveFarmCampCenter(serverLevel)
-                : this.playerNpc.blockPosition().immutable();
+        this.persistentBaseCamp = !this.buildingBootstrapCamp
+                && !this.farmingBootstrapCamp
+                && !this.farmingCamp
+                && serverLevel.isNight()
+                && PlayerNpcBaseUtil.hasCampBaseJobs(this.playerNpc)
+                && (PlayerNpcBaseUtil.getCampBase(this.playerNpc, serverLevel).isPresent()
+                || !PlayerNpcBaseUtil.hasStoredCampBase(this.playerNpc));
+        if (this.farmingCamp) {
+            this.campCenter = this.resolveFarmCampCenter(serverLevel);
+        } else if (this.persistentBaseCamp) {
+            this.campCenter = PlayerNpcBaseUtil.setCampBaseIfAbsent(
+                    this.playerNpc,
+                    serverLevel,
+                    this.playerNpc.blockPosition()
+            ).orElse(null);
+        } else {
+            this.campCenter = this.playerNpc.blockPosition().immutable();
+        }
         if (this.buildingBootstrapCamp || this.farmingBootstrapCamp) {
             if (this.farmingBootstrapCamp) {
                 this.playerNpc.setIdleTraceDetail("farming night camp: no valid farm plan, job="
@@ -285,7 +301,9 @@ public class MiningNightCampGoal extends Goal {
             } else if (!shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
                     || !this.canReuseOwnedFurnace(serverLevel, ownedFurnace)) {
                 return this.planFurnaceRecovery(ownedFurnace);
-            } else if (!this.farmingCamp && GatherStoneGoal.isMiningJobActive(this.playerNpc)) {
+            } else if (!this.farmingCamp
+                    && !this.persistentBaseCamp
+                    && GatherStoneGoal.isMiningJobActive(this.playerNpc)) {
                 this.campCenter = ownedFurnace.pos().immutable();
                 this.reusableCampAnchor = true;
             }
@@ -293,7 +311,7 @@ public class MiningNightCampGoal extends Goal {
         if (!shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
             return false;
         }
-        return !this.farmingCamp || this.campCenter != null;
+        return (!this.farmingCamp && !this.persistentBaseCamp) || this.campCenter != null;
     }
 
     @Override
@@ -336,7 +354,7 @@ public class MiningNightCampGoal extends Goal {
         this.walkTarget = null;
         this.walkSneaking = false;
         this.playerNpc.getNavigation().stop();
-        if (this.farmingCamp && this.campCenter != null) {
+        if ((this.farmingCamp || this.persistentBaseCamp) && this.campCenter != null) {
             this.returnPositionAi.start(this.campCenter);
         }
         this.playerNpc.setCurrentAiState(this.activeAiState());
@@ -344,7 +362,9 @@ public class MiningNightCampGoal extends Goal {
                 ? "camping before choosing build area"
                 : this.farmingBootstrapCamp ? "camping before choosing farm area; job="
                         + this.playerNpc.getSelectedDailyJobDisplayText()
-                : this.farmingCamp ? "returning to farm camp" : "setting up night camp");
+                : this.farmingCamp ? "returning to farm camp"
+                : this.persistentBaseCamp ? "returning to permanent camp base"
+                : "setting up night camp");
     }
 
     @Override
@@ -401,6 +421,19 @@ public class MiningNightCampGoal extends Goal {
                     "clearing farm camp route"
             );
             this.playerNpc.setCurrentAiDetail(this.returnPositionAi.detail("returning to farm camp"));
+            return;
+        }
+        if (this.persistentBaseCamp && !this.isWithinPersistentBaseCamp()) {
+            this.returnPositionAi.tick(
+                    serverLevel,
+                    this.campCenter,
+                    pos -> PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                            || FarmAi.isProtectedFarmBlock(this.playerNpc, pos),
+                    "returning to permanent camp base",
+                    "clearing permanent camp route",
+                    true
+            );
+            this.playerNpc.setCurrentAiDetail(this.returnPositionAi.detail("returning to permanent camp base"));
             return;
         }
         // A farm fence stand may lie just across the camp boundary. Once lighting owns
@@ -565,7 +598,9 @@ public class MiningNightCampGoal extends Goal {
             return;
         }
 
-        if (!this.farmingCamp && GatherStoneGoal.isMiningJobActive(this.playerNpc)) {
+        if (!this.farmingCamp
+                && !this.persistentBaseCamp
+                && GatherStoneGoal.isMiningJobActive(this.playerNpc)) {
             this.campCenter = this.furnacePos.immutable();
             this.reusableCampAnchor = true;
         }
@@ -697,6 +732,7 @@ public class MiningNightCampGoal extends Goal {
     private boolean shouldUseResourcelessMiningNightWalk() {
         return !this.buildingBootstrapCamp
                 && !this.farmingCamp
+                && !this.persistentBaseCamp
                 && GatherStoneGoal.isMiningJobActive(this.playerNpc)
                 && ResourceAi.countLogs(this.playerNpc) <= 0
                 && ResourceAi.countStone(this.playerNpc) <= 0;
@@ -1542,7 +1578,10 @@ public class MiningNightCampGoal extends Goal {
         while (!candidates.isEmpty() && checks++ < 32) {
             BlockPos candidate = candidates.remove(this.playerNpc.getRandom().nextInt(candidates.size())).immutable();
             if (!PathNavigationAi.canStandAt(serverLevel, candidate)
-                    || (keepUnderground && serverLevel.canSeeSky(candidate.above()))) {
+                    || (keepUnderground && serverLevel.canSeeSky(candidate.above()))
+                    || this.persistentBaseCamp
+                    && this.campCenter != null
+                    && horizontalDistanceSqr(candidate, this.campCenter) > FARM_CAMP_REACHED_SQR) {
                 continue;
             }
             Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
@@ -1554,6 +1593,12 @@ public class MiningNightCampGoal extends Goal {
             }
         }
         return null;
+    }
+
+    private static double horizontalDistanceSqr(BlockPos first, BlockPos second) {
+        double dx = first.getX() - second.getX();
+        double dz = first.getZ() - second.getZ();
+        return dx * dx + dz * dz;
     }
 
     private List<BlockPos> farmCampWalkCandidates(ServerLevel serverLevel) {
@@ -1677,6 +1722,16 @@ public class MiningNightCampGoal extends Goal {
                 && Math.abs(this.playerNpc.getY() - this.campCenter.getY()) <= CAMP_WALK_VERTICAL_RADIUS + 1;
     }
 
+    private boolean isWithinPersistentBaseCamp() {
+        if (!this.persistentBaseCamp || this.campCenter == null) {
+            return true;
+        }
+        double dx = this.playerNpc.getX() - (this.campCenter.getX() + 0.5D);
+        double dz = this.playerNpc.getZ() - (this.campCenter.getZ() + 0.5D);
+        return dx * dx + dz * dz <= FARM_CAMP_REACHED_SQR
+                && Math.abs(this.playerNpc.getY() - this.campCenter.getY()) <= CAMP_WALK_VERTICAL_RADIUS + 1;
+    }
+
     private boolean hasReachedWalkTarget() {
         return this.walkTarget != null
                 && this.playerNpc.distanceToSqr(
@@ -1747,7 +1802,9 @@ public class MiningNightCampGoal extends Goal {
         if (this.buildingBootstrapCamp || this.farmingBootstrapCamp) {
             return this.farmingBootstrapCamp ? "temporary farm camp" : "temporary night camp";
         }
-        return this.farmingCamp ? "farm camp" : "mining camp";
+        return this.farmingCamp ? "farm camp"
+                : this.persistentBaseCamp ? "permanent camp base"
+                : "mining camp";
     }
 
     private void lookAtFurnace() {
@@ -1880,8 +1937,14 @@ public class MiningNightCampGoal extends Goal {
         if (ownedFurnace.level() != currentLevel) {
             return false;
         }
+        BlockPos anchor = this.persistentBaseCamp && this.campCenter != null
+                ? this.campCenter
+                : this.playerNpc.blockPosition();
+        int dx = ownedFurnace.pos().getX() - anchor.getX();
+        int dz = ownedFurnace.pos().getZ() - anchor.getZ();
         return !this.isInsideOwnedFarmFurnaceExclusion(ownedFurnace.pos())
-                && this.isWithinLocalFurnaceScan(ownedFurnace.pos());
+                && Math.abs(ownedFurnace.pos().getY() - anchor.getY()) <= 2
+                && dx * dx + dz * dz <= FURNACE_SCAN_RADIUS * FURNACE_SCAN_RADIUS;
     }
 
     private boolean isInsideOwnedFarmFurnaceExclusion(BlockPos pos) {
@@ -2084,6 +2147,7 @@ public class MiningNightCampGoal extends Goal {
         this.farmingCamp = false;
         this.buildingBootstrapCamp = false;
         this.farmingBootstrapCamp = false;
+        this.persistentBaseCamp = false;
         this.farmingBootstrapPlanCheckTicks = 0;
         this.walkSneaking = false;
         this.usingTemporaryMainHand = false;

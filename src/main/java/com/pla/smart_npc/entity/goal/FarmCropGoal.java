@@ -1,6 +1,5 @@
 package com.pla.smart_npc.entity.goal;
 
-import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
@@ -223,9 +222,13 @@ public final class FarmCropGoal extends Goal {
                 || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.playerNpc.getFarmCooldown() > 0
                 || serverLevel.isNight()
-                || serverLevel.isThundering()
-                || this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
-                && !BuildHouseGoal.isHomeLayoutFinished(this.playerNpc, serverLevel)) {
+                || serverLevel.isThundering()) {
+            return false;
+        }
+        // Readiness and planting-demand checks walk the owned plot. Keep them behind the same
+        // staggered activation cadence as target selection instead of repeating on every goal
+        // selector pass while several farmers are idle or exploring for supplies.
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
         boolean activeLogRoute = GatherLogsGoal.isLogGatheringEpisodeActive(this.playerNpc);
@@ -239,10 +242,6 @@ public final class FarmCropGoal extends Goal {
                     : "farm crop deferred: required log supply", 40);
             return false;
         }
-        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
-            return false;
-        }
-
         this.resetPlan();
         if (!FarmAi.isReadyForCropWork(this.playerNpc, serverLevel)) {
             this.playerNpc.setIdleTraceDetail("farm crop deferred: setup repair/till pending", 40);

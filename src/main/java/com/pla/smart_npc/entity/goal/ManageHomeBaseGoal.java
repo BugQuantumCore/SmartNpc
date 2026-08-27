@@ -1,8 +1,10 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ChestAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
@@ -10,7 +12,9 @@ import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcBuildStatusUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
+import com.pla.smart_npc.util.PlayerNpcBaseUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -32,6 +36,7 @@ import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
@@ -47,6 +52,10 @@ public class ManageHomeBaseGoal extends Goal {
     private static final int BUILD_SITE_CRAFTING_TABLE_MARGIN = 5;
     private static final int BUILD_SITE_CRAFTING_TABLE_SCAN_BELOW = 2;
     private static final int BUILD_SITE_CRAFTING_TABLE_SCAN_ABOVE = 3;
+    private static final int NON_BUILDER_CHEST_CANDIDATES_PER_PASS = 24;
+    private static final int NON_BUILDER_CHEST_PATHS_PER_PASS = 4;
+    private static final int NON_BUILDER_CHEST_NEGATIVE_BACKOFF_TICKS = 20 * 15;
+    private static final List<ChestPlacementOffset> NON_BUILDER_CHEST_OFFSETS = createNonBuilderChestOffsets();
 
     private final PlayerNpcEntity playerNpc;
     private final ToolAi toolAi;
@@ -54,6 +63,8 @@ public class ManageHomeBaseGoal extends Goal {
     private final PlacingBlockAi placingBlockAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private PlayerNpcHomeUtil.HomeArea homeArea;
+    private BlockPos baseAnchor;
+    private boolean nonBuilderBase;
     private BlockPos recoveryTablePos;
     private BlockPos depositChestPos;
     private BlockPos depositChestStandPos;
@@ -67,6 +78,8 @@ public class ManageHomeBaseGoal extends Goal {
     private boolean depositChestOpen;
     private boolean depositFinished;
     private boolean depositMovedAny;
+    private boolean nonBuilderChestPlacementPlanned;
+    private int nonBuilderChestSearchCursor;
     private String planDetail = "";
 
     public ManageHomeBaseGoal(PlayerNpcEntity playerNpc) {
@@ -105,24 +118,51 @@ public class ManageHomeBaseGoal extends Goal {
             return false;
         }
 
+        this.nonBuilderBase = !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING);
         Optional<PlayerNpcHomeUtil.HomeArea> savedHome = PlayerNpcHomeUtil.getHome(this.playerNpc);
-        this.homeArea = savedHome.orElse(null);
+        this.homeArea = this.nonBuilderBase ? null : savedHome.orElse(null);
+        this.baseAnchor = this.homeArea == null
+                ? PlayerNpcBaseUtil.getNonBuilderBase(this.playerNpc, serverLevel).orElse(null)
+                : PlayerNpcHomeUtil.center(this.homeArea);
+        if (this.nonBuilderBase && this.baseAnchor == null) {
+            return false;
+        }
         if (this.canRecoverTemporaryCraftingTable(serverLevel)) {
             this.planDetail = "recovering temporary crafting table";
             return true;
         }
-        if (this.homeArea == null) {
+        if (!this.nonBuilderBase && this.homeArea == null) {
             return false;
         }
-        if (this.playerNpc.shouldPrioritizeLogGathering() && !this.inventoryMoreThanHalfFull()) {
+        if (!this.nonBuilderBase
+                && this.playerNpc.shouldPrioritizeLogGathering()
+                && !this.inventoryMoreThanHalfFull()) {
             return false;
         }
         if (!this.isNearHome()) {
             return false;
         }
 
-        if (this.shouldYieldToBuildMaterialGathering(serverLevel)) {
+        if (!this.nonBuilderBase && this.shouldYieldToBuildMaterialGathering(serverLevel)) {
             return false;
+        }
+
+        if (this.nonBuilderBase) {
+            boolean needsChest = this.needsChest(serverLevel);
+            if (needsChest) {
+                if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+                    return false;
+                }
+                this.nonBuilderChestPlacementPlanned = true;
+                this.planDetail = "placing base supply chest";
+                return true;
+            }
+            this.nonBuilderChestPlacementPlanned = false;
+            boolean deposit = this.shouldDepositToChest(serverLevel);
+            if (deposit) {
+                this.planDetail = "depositing inventory to base chest";
+            }
+            return deposit;
         }
 
         boolean needsCraftingTable = this.needsCraftingTable(serverLevel);
@@ -193,6 +233,27 @@ public class ManageHomeBaseGoal extends Goal {
         if (this.canRecoverTemporaryCraftingTable(serverLevel)) {
             this.recoveryTablePos = this.getTemporaryCraftingTablePos();
             this.updateRecoveryDetail(serverLevel);
+            return;
+        }
+
+        if (this.nonBuilderBase) {
+            boolean acted = this.placeChest(serverLevel);
+            if (acted) {
+                this.finishHomeAction(true);
+                return;
+            }
+            if (this.nonBuilderChestPlacementPlanned) {
+                this.finishHomeAction(false);
+                this.playerNpc.setManageHomeCooldown(
+                        NON_BUILDER_CHEST_NEGATIVE_BACKOFF_TICKS
+                                + this.playerNpc.getRandom().nextInt(20 * 10)
+                );
+                return;
+            }
+            if (this.beginDepositToChest(serverLevel)) {
+                return;
+            }
+            this.finishHomeAction(false);
             return;
         }
 
@@ -304,6 +365,8 @@ public class ManageHomeBaseGoal extends Goal {
         this.toolAi.restoreMainHand();
         this.restorePreviousMainHand();
         this.homeArea = null;
+        this.baseAnchor = null;
+        this.nonBuilderBase = false;
         this.recoveryTablePos = null;
         this.depositChestPos = null;
         this.depositChestStandPos = null;
@@ -314,6 +377,7 @@ public class ManageHomeBaseGoal extends Goal {
         this.depositChestOpen = false;
         this.depositFinished = false;
         this.depositMovedAny = false;
+        this.nonBuilderChestPlacementPlanned = false;
         this.planDetail = "";
         this.playerNpc.setCurrentAiDetail("");
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -370,9 +434,10 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private boolean needsChest(ServerLevel serverLevel) {
+        int logReserve = this.nonBuilderBase ? 0 : this.playerNpc.getRawLogReserveTarget();
         return this.findHomeChest(serverLevel) == null
                 && (InventoryUtils.hasItem(this.playerNpc, Items.CHEST)
-                || PlayerNpcCraftingUtil.canCraftChest(this.playerNpc.getInventory(), this.playerNpc.getRawLogReserveTarget()));
+                || PlayerNpcCraftingUtil.canCraftChest(this.playerNpc.getInventory(), logReserve));
     }
 
     private boolean beginPlaceCraftingTable(ServerLevel serverLevel) {
@@ -432,12 +497,14 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private boolean isNearHome() {
-        if (this.homeArea == null) {
+        if (this.baseAnchor == null) {
             return false;
         }
-
-        BlockPos homeCenter = this.homeArea.origin().offset(this.homeArea.width() / 2, 1, this.homeArea.depth() / 2);
-        return this.playerNpc.distanceToSqr(homeCenter.getX() + 0.5D, homeCenter.getY(), homeCenter.getZ() + 0.5D) <= HOME_ACTION_DISTANCE_SQR;
+        return this.playerNpc.distanceToSqr(
+                this.baseAnchor.getX() + 0.5D,
+                this.baseAnchor.getY(),
+                this.baseAnchor.getZ() + 0.5D
+        ) <= HOME_ACTION_DISTANCE_SQR;
     }
 
     private boolean placeChest(ServerLevel serverLevel) {
@@ -445,13 +512,16 @@ public class ManageHomeBaseGoal extends Goal {
             return false;
         }
 
-        BlockPos pos = this.findUtilityPlacement(serverLevel, this.homeArea.width() - 2, 1);
+        BlockPos pos = this.nonBuilderBase
+                ? this.findNonBuilderChestPlacement(serverLevel)
+                : this.findUtilityPlacement(serverLevel, this.homeArea.width() - 2, 1);
         if (pos == null) {
             return false;
         }
 
         ItemStack chest = this.playerNpc.consumeInventoryItem(Items.CHEST, 1).orElse(ItemStack.EMPTY);
-        if (chest.isEmpty() && !PlayerNpcCraftingUtil.tryCraftChest(serverLevel, this.playerNpc.getInventory(), this.playerNpc.getRawLogReserveTarget())) {
+        int logReserve = this.nonBuilderBase ? 0 : this.playerNpc.getRawLogReserveTarget();
+        if (chest.isEmpty() && !PlayerNpcCraftingUtil.tryCraftChest(serverLevel, this.playerNpc.getInventory(), logReserve)) {
             return false;
         }
         if (chest.isEmpty()) {
@@ -913,6 +983,63 @@ public class ManageHomeBaseGoal extends Goal {
         return null;
     }
 
+    private BlockPos findNonBuilderChestPlacement(ServerLevel serverLevel) {
+        if (this.baseAnchor == null || NON_BUILDER_CHEST_OFFSETS.isEmpty()) {
+            return null;
+        }
+        ChestAi.NavigationPathBudget pathBudget = new ChestAi.NavigationPathBudget(NON_BUILDER_CHEST_PATHS_PER_PASS);
+        int checked = 0;
+        while (checked++ < NON_BUILDER_CHEST_CANDIDATES_PER_PASS) {
+            ChestPlacementOffset offset = NON_BUILDER_CHEST_OFFSETS.get(this.nonBuilderChestSearchCursor);
+            this.nonBuilderChestSearchCursor = (this.nonBuilderChestSearchCursor + 1) % NON_BUILDER_CHEST_OFFSETS.size();
+            BlockPos candidate = this.baseAnchor.offset(offset.dx(), offset.dy(), offset.dz()).immutable();
+            if (this.canPlaceNonBuilderChestAt(serverLevel, candidate)
+                    && ChestAi.findAdjacentStand(this.playerNpc, serverLevel, candidate, pathBudget) != null) {
+                this.nonBuilderChestSearchCursor = 0;
+                return candidate;
+            }
+            if (pathBudget.exhausted()) {
+                break;
+            }
+        }
+        return null;
+    }
+
+    private boolean canPlaceNonBuilderChestAt(ServerLevel serverLevel, BlockPos pos) {
+        return serverLevel.isInWorldBounds(pos)
+                && serverLevel.getWorldBorder().isWithinBounds(pos)
+                && serverLevel.hasChunkAt(pos)
+                && PlayerNpcHomeUtil.isReplaceableForNpcBuild(serverLevel, pos)
+                && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below())
+                && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                && !FarmAi.isProtectedFarmBlock(this.playerNpc, pos)
+                && !FarmAi.isInsideOwnedFarmWorkOrEntranceFootprint(this.playerNpc, pos);
+    }
+
+    private static List<ChestPlacementOffset> createNonBuilderChestOffsets() {
+        List<ChestPlacementOffset> offsets = new ArrayList<>();
+        for (int radius = 1; radius <= 5; radius++) {
+            for (int dy : new int[]{0, 1, -1, 2, -2}) {
+                for (int dx = -radius; dx <= radius; dx++) {
+                    offsets.add(new ChestPlacementOffset(dx, dy, -radius));
+                    offsets.add(new ChestPlacementOffset(dx, dy, radius));
+                }
+                for (int dz = -radius + 1; dz < radius; dz++) {
+                    offsets.add(new ChestPlacementOffset(-radius, dy, dz));
+                    offsets.add(new ChestPlacementOffset(radius, dy, dz));
+                }
+            }
+        }
+        offsets.sort(Comparator.comparingInt(ChestPlacementOffset::distanceSqr));
+        return List.copyOf(offsets);
+    }
+
+    private record ChestPlacementOffset(int dx, int dy, int dz) {
+        private int distanceSqr() {
+            return this.dx * this.dx + this.dz * this.dz + this.dy * this.dy * 4;
+        }
+    }
+
     private boolean canPlaceUtilityAt(ServerLevel serverLevel, BlockPos pos) {
         return PlayerNpcHomeUtil.isInside(this.homeArea, pos)
                 && PlayerNpcHomeUtil.isReplaceableForNpcBuild(serverLevel, pos)
@@ -931,7 +1058,18 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private BlockPos findHomeChest(ServerLevel serverLevel) {
-        return ChestAi.findHomeSupplyChest(this.playerNpc, serverLevel, this.homeArea);
+        if (!this.nonBuilderBase) {
+            return ChestAi.findHomeSupplyChest(this.playerNpc, serverLevel, this.homeArea);
+        }
+        BlockPos ownedChest = ChestAi.findOwnedSupplyChest(this.playerNpc, serverLevel);
+        if (ownedChest == null || this.baseAnchor == null) {
+            return null;
+        }
+        if (this.baseAnchor.distSqr(ownedChest) <= HOME_ACTION_DISTANCE_SQR) {
+            return ownedChest;
+        }
+        this.playerNpc.setOwnedChestPos(null);
+        return null;
     }
 
     private BlockPos findBed(ServerLevel serverLevel) {

@@ -2,6 +2,7 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -22,7 +23,7 @@ public final class MiningCaveStrollGoal extends Goal {
     private static final int MIN_HORIZONTAL_DISTANCE = 9;
     private static final int CAVE_DIRECTION_SECTORS = 8;
     private static final int MAX_SECTION_CHECKS = 24;
-    private static final int MAX_PATH_CHECKS_PER_SCAN = 2;
+    private static final int MAX_PATH_CHECKS_PER_SCAN = 1;
     private static final int MAX_REACHABLE_TARGETS = 1;
     private static final int CAVE_SCAN_CACHE_TICKS = 20;
     private static final double CAVE_SCAN_CACHE_MOVE_SQR = 2.0D * 2.0D;
@@ -66,6 +67,10 @@ public final class MiningCaveStrollGoal extends Goal {
         }
         if (!this.canStrollInCurrentCave(serverLevel)) {
             this.scheduleRetry();
+            return false;
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.nextAttemptTick = this.playerNpc.tickCount + 1 + this.playerNpc.getRandom().nextInt(4);
             return false;
         }
 
@@ -133,6 +138,10 @@ public final class MiningCaveStrollGoal extends Goal {
                 30.0F
         );
         if (this.repathTicks-- <= 0) {
+            if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+                this.repathTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+                return;
+            }
             if (!this.moveToTarget(serverLevel)) {
                 this.strollFailed = true;
                 this.targetPos = null;

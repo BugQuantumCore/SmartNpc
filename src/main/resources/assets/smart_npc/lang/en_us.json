@@ -1,10 +1,11 @@
 {
   "item.smart_npc.player_npc_inspector": "Player NPC Inspector",
   "item.smart_npc.player_npc_spawn_egg": "Player NPC Spawn Egg",
-  "tooltip.player_npc.player_npc_inspector": "Inspect a Player NPC. Right-click air to hide the inspector.",
-  "tooltip.player_npc.player_npc_inspector.inspectator": "While inspecting, press X to show build requirements or Alt to toggle inspectator view. In inspectator view, Z toggles trace logging; F5, T chat, and Up/Down zoom work while active.",
+  "tooltip.player_npc.player_npc_inspector": "Inspect a Player NPC. Shift-right-click air for overall AI monitoring; right-click air hides the inspector.",
+  "tooltip.player_npc.player_npc_inspector.inspectator": "While inspecting an NPC, X shows build requirements and Alt toggles inspectator view; Z toggles trace logging while active.",
   "message.player_npc.inspector.unsupported": "This tool can only inspect Player NPCs.",
   "gui.player_npc.inspector.title": "Inspecting %s",
+  "gui.player_npc.inspector.ai_resources_title": "AI scheduler resources",
   "gui.player_npc.inspector.health": "Current health: %s / %s",
   "gui.player_npc.inspector.ai": "AI playing: %s",
   "gui.player_npc.inspector.interests": "Interests: %s",

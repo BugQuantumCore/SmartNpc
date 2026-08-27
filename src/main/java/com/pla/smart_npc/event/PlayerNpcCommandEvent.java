@@ -8,6 +8,7 @@ import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.init.SmartNpcModEntities;
 import com.pla.smart_npc.clazz.Difficulty;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcForceTickManager;
 import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
 import com.pla.smart_npc.util.ProgressionUtil;
@@ -15,6 +16,7 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.DifficultyInstance;
@@ -24,6 +26,9 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+
+import java.util.StringJoiner;
+import java.util.UUID;
 
 @Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PlayerNpcCommandEvent {
@@ -69,7 +74,9 @@ public final class PlayerNpcCommandEvent {
                                 .then(Commands.literal("off")
                                         .executes(context -> setTraceAll(context.getSource(), false)))
                                 .then(Commands.literal("status")
-                                        .executes(context -> getTraceAllStatus(context.getSource()))))));
+                                        .executes(context -> getTraceAllStatus(context.getSource())))))
+                .then(Commands.literal("resources")
+                        .executes(context -> getAiResources(context.getSource()))));
     }
 
     private static int spawnPlayer(CommandSourceStack source, String name) {
@@ -132,9 +139,12 @@ public final class PlayerNpcCommandEvent {
     private static int setTraceAll(CommandSourceStack source, boolean enabled) {
         PlayerNpcGoalTraceLogger.setAllTraceEnabled(enabled, sourceName(source));
         int loadedCount = PlayerNpcGoalTraceLogger.countLoadedPlayerNpcs(source.getServer());
-        source.sendSuccess(() -> Component.literal("Player NPC all trace "
+        int holderCount = PlayerNpcAiWorkBudget.resourceSnapshot(source.getServer()).holders().size();
+        source.sendSuccess(() -> Component.literal("Player NPC scheduler-resource trace "
                 + (enabled ? "enabled" : "disabled")
-                + " for "
+                + "; tracing "
+                + holderCount
+                + " resource holder(s) of "
                 + loadedCount
                 + " loaded NPC(s)"), true);
         return 1;
@@ -142,12 +152,99 @@ public final class PlayerNpcCommandEvent {
 
     private static int getTraceAllStatus(CommandSourceStack source) {
         int loadedCount = PlayerNpcGoalTraceLogger.countLoadedPlayerNpcs(source.getServer());
-        source.sendSuccess(() -> Component.literal("Player NPC all trace is "
+        int holderCount = PlayerNpcAiWorkBudget.resourceSnapshot(source.getServer()).holders().size();
+        source.sendSuccess(() -> Component.literal("Player NPC scheduler-resource trace is "
                 + (PlayerNpcGoalTraceLogger.isAllTraceEnabled() ? "enabled" : "disabled")
-                + " with "
+                + "; current holders="
+                + holderCount
+                + ", loaded="
                 + loadedCount
-                + " loaded NPC(s)"), false);
+                + " NPC(s)"), false);
         return 1;
+    }
+
+    private static int getAiResources(CommandSourceStack source) {
+        PlayerNpcAiWorkBudget.ResourceSnapshot snapshot = PlayerNpcAiWorkBudget.resourceSnapshot(source.getServer());
+        String mode = snapshot.automatic() ? "auto" : "configured";
+        source.sendSuccess(() -> Component.literal("Player NPC AI resources: mode="
+                + mode
+                + ", workerLimit="
+                + snapshot.effectiveWorkerLimit()
+                + ", active="
+                + snapshot.activeWorkerCount()
+                + ", probes="
+                + snapshot.probeCount()
+                + ", expensiveSlicesThisTick="
+                + snapshot.expensiveCount()
+                + ", waiting="
+                + snapshot.waitingNpcCount()), false);
+
+        if (snapshot.holders().isEmpty()) {
+            source.sendSuccess(() -> Component.literal("No Player NPC currently holds an AI scheduler resource"), false);
+            return 1;
+        }
+
+        for (PlayerNpcAiWorkBudget.ResourceHolder holder : snapshot.holders()) {
+            PlayerNpcEntity playerNpc = holder.playerNpc() != null
+                    ? holder.playerNpc()
+                    : findLoadedPlayerNpc(source.getServer(), holder.npcId());
+            StringJoiner roles = new StringJoiner(",");
+            if (holder.worker()) {
+                roles.add("worker");
+            }
+            if (holder.probeTurn()) {
+                roles.add("probe");
+            }
+            if (holder.expensiveSlice()) {
+                roles.add("expensive-slice");
+            }
+            String identity = playerNpc == null
+                    ? holder.npcId().toString()
+                    : clean(playerNpc.getDisplayName().getString()) + "#" + playerNpc.getId();
+            String location = playerNpc == null
+                    ? "unloaded"
+                    : playerNpc.level().dimension().location()
+                    + "@"
+                    + playerNpc.blockPosition().getX()
+                    + ","
+                    + playerNpc.blockPosition().getY()
+                    + ","
+                    + playerNpc.blockPosition().getZ();
+            String state = playerNpc == null ? "unknown" : clean(playerNpc.getCurrentAiState());
+            String detail = playerNpc == null ? "unknown" : clean(playerNpc.getCurrentAiDetail());
+            String line = "- "
+                    + identity
+                    + " resource="
+                    + roles
+                    + " goals="
+                    + holder.runningGoals()
+                    + " heldTicks="
+                    + holder.heldTicks()
+                    + " location="
+                    + location
+                    + " state="
+                    + state
+                    + " detail=\""
+                    + detail
+                    + "\"";
+            source.sendSuccess(() -> Component.literal(line), false);
+        }
+        return snapshot.holders().size();
+    }
+
+    private static PlayerNpcEntity findLoadedPlayerNpc(MinecraftServer server, UUID npcId) {
+        for (ServerLevel level : server.getAllLevels()) {
+            if (level.getEntity(npcId) instanceof PlayerNpcEntity playerNpc
+                    && playerNpc.isAlive()
+                    && !playerNpc.isRemoved()) {
+                return playerNpc;
+            }
+        }
+        return null;
+    }
+
+    private static String clean(String text) {
+        return text == null ? "" : text.replace('\r', ' ').replace('\n', ' ').trim();
     }
 
     private static String sourceName(CommandSourceStack source) {

@@ -12,12 +12,14 @@ import java.util.List;
 import java.util.function.Supplier;
 
 public class PlayerNpcInspectorPacket {
+    public static final int OVERALL_ENTITY_ID = -2;
     private final int entityId;
     private final List<ItemStack> items;
     private final String buildStatusText;
     private final String performanceText;
     private final String dailyJobText;
     private final String requirementsText;
+    private final String aiResourceText;
     private final boolean traceEnabled;
 
     public PlayerNpcInspectorPacket(int entityId, List<ItemStack> items) {
@@ -44,7 +46,7 @@ public class PlayerNpcInspectorPacket {
             String requirementsText,
             boolean traceEnabled
     ) {
-        this(entityId, items, buildStatusText, performanceText, "", requirementsText, traceEnabled);
+        this(entityId, items, buildStatusText, performanceText, "", requirementsText, "", traceEnabled);
     }
 
     public PlayerNpcInspectorPacket(
@@ -56,12 +58,26 @@ public class PlayerNpcInspectorPacket {
             String requirementsText,
             boolean traceEnabled
     ) {
+        this(entityId, items, buildStatusText, performanceText, dailyJobText, requirementsText, "", traceEnabled);
+    }
+
+    public PlayerNpcInspectorPacket(
+            int entityId,
+            List<ItemStack> items,
+            String buildStatusText,
+            String performanceText,
+            String dailyJobText,
+            String requirementsText,
+            String aiResourceText,
+            boolean traceEnabled
+    ) {
         this.entityId = entityId;
         this.items = List.copyOf(items);
         this.buildStatusText = buildStatusText == null ? "" : buildStatusText;
         this.performanceText = performanceText == null ? "" : performanceText;
         this.dailyJobText = dailyJobText == null ? "" : dailyJobText;
         this.requirementsText = requirementsText == null ? "" : requirementsText;
+        this.aiResourceText = aiResourceText == null ? "" : aiResourceText;
         this.traceEnabled = traceEnabled;
     }
 
@@ -85,6 +101,10 @@ public class PlayerNpcInspectorPacket {
         return performanceText;
     }
 
+    public static PlayerNpcInspectorPacket overall(String aiResourceText) {
+        return new PlayerNpcInspectorPacket(OVERALL_ENTITY_ID, List.of(), "", "", "", "", aiResourceText, false);
+    }
+
     public String dailyJobText() {
         return dailyJobText;
     }
@@ -97,6 +117,10 @@ public class PlayerNpcInspectorPacket {
         return traceEnabled;
     }
 
+    public String aiResourceText() {
+        return aiResourceText;
+    }
+
     public static void encode(PlayerNpcInspectorPacket packet, FriendlyByteBuf buffer) {
         buffer.writeVarInt(packet.entityId);
         buffer.writeVarInt(packet.items.size());
@@ -107,6 +131,7 @@ public class PlayerNpcInspectorPacket {
         buffer.writeUtf(packet.performanceText);
         buffer.writeUtf(packet.dailyJobText);
         buffer.writeUtf(packet.requirementsText);
+        buffer.writeUtf(packet.aiResourceText);
         buffer.writeBoolean(packet.traceEnabled);
     }
 
@@ -121,8 +146,9 @@ public class PlayerNpcInspectorPacket {
         String performanceText = buffer.readUtf();
         String dailyJobText = buffer.readUtf();
         String requirementsText = buffer.readUtf();
+        String aiResourceText = buffer.readUtf();
         boolean traceEnabled = buffer.readBoolean();
-        return new PlayerNpcInspectorPacket(entityId, items, buildStatusText, performanceText, dailyJobText, requirementsText, traceEnabled);
+        return new PlayerNpcInspectorPacket(entityId, items, buildStatusText, performanceText, dailyJobText, requirementsText, aiResourceText, traceEnabled);
     }
 
     public static void handle(PlayerNpcInspectorPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {

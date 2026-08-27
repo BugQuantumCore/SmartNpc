@@ -51,8 +51,12 @@ public final class PlayerNpcBuildMaterialUtil {
     private static final int BUILD_CRAFT_RAW_LOG_RESERVE = 0;
     private static final int GLASS_PANE_CRAFT_INPUT = 6;
     private static final int MISSING_NEED_CACHE_TICKS = 20 * 3;
+    // Missing-material refreshes run from goal predicates on the server thread. Resume the
+    // existing cursor after eight blocks instead of turning one admission into a layout sweep.
+    private static final int MAX_MISSING_NEED_BLOCKS_PER_SLICE = 8;
     private static final EnumMap<MaterialFamily, List<Item>> CANDIDATE_CACHE = new EnumMap<>(MaterialFamily.class);
     private static final Map<PlayerNpcEntity, MissingNeedCache> MISSING_NEED_CACHE = new WeakHashMap<>();
+    private static final Map<PlayerNpcEntity, MissingNeedSearch> MISSING_NEED_SEARCHES = new WeakHashMap<>();
     private static final Set<String> WOOD_PREFIXES = Set.of(
             "oak",
             "spruce",
@@ -435,13 +439,15 @@ public final class PlayerNpcBuildMaterialUtil {
     public static Optional<MissingBuildMaterialNeed> findMissingBuildMaterialNeed(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
         if (home.isEmpty()) {
+            MISSING_NEED_SEARCHES.remove(playerNpc);
             return Optional.empty();
         }
 
         Optional<String> layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc);
+        String currentLayoutId = layoutId.orElse("");
         int inventoryHash = missingNeedInventoryHash(playerNpc);
         MissingNeedCache cache = MISSING_NEED_CACHE.get(playerNpc);
-        if (cache != null && cache.matches(playerNpc.tickCount, home.get(), layoutId.orElse(""), inventoryHash)) {
+        if (cache != null && cache.matches(playerNpc.tickCount, home.get(), currentLayoutId, inventoryHash)) {
             return cache.need();
         }
 
@@ -449,20 +455,47 @@ public final class PlayerNpcBuildMaterialUtil {
         if (layout.isEmpty()
                 || layout.get().width() != home.get().width()
                 || layout.get().depth() != home.get().depth()) {
+            MISSING_NEED_SEARCHES.remove(playerNpc);
             MISSING_NEED_CACHE.put(playerNpc, new MissingNeedCache(
                     playerNpc.tickCount,
                     home.get().origin(),
                     home.get().width(),
                     home.get().depth(),
-                    layoutId.orElse(""),
+                    currentLayoutId,
                     inventoryHash,
                     Optional.empty()
             ));
             return Optional.empty();
         }
 
+        Optional<MissingBuildMaterialNeed> staleAnswer = cache != null
+                && cache.sameContext(home.get(), currentLayoutId, inventoryHash)
+                ? cache.need()
+                : Optional.empty();
+        MissingNeedSearch search = MISSING_NEED_SEARCHES.get(playerNpc);
+        if (search == null || !search.matches(
+                serverLevel.dimension().location(),
+                home.get(),
+                currentLayoutId,
+                inventoryHash
+        )) {
+            search = MissingNeedSearch.create(
+                    serverLevel.dimension().location(),
+                    home.get(),
+                    currentLayoutId,
+                    inventoryHash
+            );
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, playerNpc)) {
+            MISSING_NEED_SEARCHES.put(playerNpc, search);
+            return staleAnswer;
+        }
+
         BlockPos origin = home.get().origin();
-        for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
+        List<PlayerNpcBuildLayout.RelativeBlock> blocks = layout.get().blocks();
+        int endIndex = Math.min(blocks.size(), search.nextBlockIndex() + MAX_MISSING_NEED_BLOCKS_PER_SLICE);
+        for (int index = search.nextBlockIndex(); index < endIndex; index++) {
+            PlayerNpcBuildLayout.RelativeBlock block = blocks.get(index);
             if (block.optional()
                     || block.state().isAir()
                     || isBlueprintPlaceholder(block.state())
@@ -479,18 +512,25 @@ public final class PlayerNpcBuildMaterialUtil {
                     home.get().origin(),
                     home.get().width(),
                     home.get().depth(),
-                    layoutId.orElse(""),
+                    currentLayoutId,
                     inventoryHash,
                     need
             ));
+            MISSING_NEED_SEARCHES.remove(playerNpc);
             return need;
         }
+        if (endIndex < blocks.size()) {
+            MISSING_NEED_SEARCHES.put(playerNpc, search.withNextBlockIndex(endIndex));
+            return staleAnswer;
+        }
+
+        MISSING_NEED_SEARCHES.remove(playerNpc);
         MISSING_NEED_CACHE.put(playerNpc, new MissingNeedCache(
                 playerNpc.tickCount,
                 home.get().origin(),
                 home.get().width(),
                 home.get().depth(),
-                layoutId.orElse(""),
+                currentLayoutId,
                 inventoryHash,
                 Optional.empty()
         ));
@@ -1518,12 +1558,71 @@ public final class PlayerNpcBuildMaterialUtil {
             int inventoryHash,
             Optional<MissingBuildMaterialNeed> need) {
         private boolean matches(int currentTick, PlayerNpcHomeUtil.HomeArea homeArea, String currentLayoutId, int currentInventoryHash) {
-            return currentTick - this.tick <= MISSING_NEED_CACHE_TICKS
+            int age = currentTick - this.tick;
+            return age >= 0
+                    && age <= MISSING_NEED_CACHE_TICKS
+                    && this.sameContext(homeArea, currentLayoutId, currentInventoryHash);
+        }
+
+        private boolean sameContext(PlayerNpcHomeUtil.HomeArea homeArea, String currentLayoutId, int currentInventoryHash) {
+            return this.homeOrigin.equals(homeArea.origin())
+                    && this.homeWidth == homeArea.width()
+                    && this.homeDepth == homeArea.depth()
+                    && this.layoutId.equals(currentLayoutId)
+                    && this.inventoryHash == currentInventoryHash;
+        }
+    }
+
+    private record MissingNeedSearch(
+            ResourceLocation dimension,
+            BlockPos homeOrigin,
+            int homeWidth,
+            int homeDepth,
+            String layoutId,
+            int inventoryHash,
+            int nextBlockIndex
+    ) {
+        private static MissingNeedSearch create(
+                ResourceLocation dimension,
+                PlayerNpcHomeUtil.HomeArea homeArea,
+                String layoutId,
+                int inventoryHash
+        ) {
+            return new MissingNeedSearch(
+                    dimension,
+                    homeArea.origin(),
+                    homeArea.width(),
+                    homeArea.depth(),
+                    layoutId,
+                    inventoryHash,
+                    0
+            );
+        }
+
+        private boolean matches(
+                ResourceLocation currentDimension,
+                PlayerNpcHomeUtil.HomeArea homeArea,
+                String currentLayoutId,
+                int currentInventoryHash
+        ) {
+            return this.dimension.equals(currentDimension)
                     && this.homeOrigin.equals(homeArea.origin())
                     && this.homeWidth == homeArea.width()
                     && this.homeDepth == homeArea.depth()
                     && this.layoutId.equals(currentLayoutId)
                     && this.inventoryHash == currentInventoryHash;
+        }
+
+        private MissingNeedSearch withNextBlockIndex(int nextBlockIndex) {
+            return new MissingNeedSearch(
+                    this.dimension,
+                    this.homeOrigin,
+                    this.homeWidth,
+                    this.homeDepth,
+                    this.layoutId,
+                    this.inventoryHash,
+                    nextBlockIndex
+            );
         }
     }
 

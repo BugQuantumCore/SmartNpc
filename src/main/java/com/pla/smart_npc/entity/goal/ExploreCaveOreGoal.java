@@ -10,6 +10,7 @@ import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
@@ -48,9 +49,9 @@ public class ExploreCaveOreGoal extends Goal {
     private static final int LOCAL_RESOURCE_RADIUS = 96;
     private static final int SEARCH_DOWN = 15;
     private static final int SEARCH_UP = 15;
-    private static final int MAX_ORE_SCAN_BLOCKS_PER_ATTEMPT = 4096;
+    private static final int MAX_ORE_SCAN_BLOCKS_PER_ATTEMPT = 512;
     private static final int MAX_ORE_TARGET_PATH_CHECKS = 6;
-    private static final int MAX_ORE_SELECTION_NAVIGATION_PATHS = 4;
+    private static final int MAX_ORE_SELECTION_NAVIGATION_PATHS = 1;
     private static final int MAX_CLUSTER_TARGET_CHECKS = 12;
     private static final int NEARBY_ORE_CACHE_TICKS = 20;
     private static final double NEARBY_ORE_CACHE_MOVE_SQR = 2.0D * 2.0D;
@@ -121,6 +122,7 @@ public class ExploreCaveOreGoal extends Goal {
     private int nextOreSearchTick;
     private int oreSearchCursor;
     private int oreSelectionNavigationPathsRemaining = -1;
+    private boolean lastOreSearchCompletedPass;
     private int nextGearPriorityCheckTick;
     private int nextContinueEligibilityCheckTick;
     private boolean usingTemporaryPickaxe;
@@ -233,15 +235,21 @@ public class ExploreCaveOreGoal extends Goal {
                     + " placeable=" + InventoryUtils.hasPlaceableBlock(this.playerNpc));
             return false;
         }
-        this.nextOreSearchTick = this.playerNpc.tickCount + ORE_SEARCH_INTERVAL_TICKS;
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            int retryTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+            this.nextOreSearchTick = this.playerNpc.tickCount + retryTicks;
+            this.canUseThrottle.retryIn(this.playerNpc, retryTicks);
+            return false;
+        }
 
         if (this.resumeOrePos != null) {
             BlockPos resumePos = this.resumeOrePos;
             this.resumeOrePos = null;
             OreTarget resumeTarget = this.isOreSearchTarget(serverLevel, resumePos)
-                    ? this.createClusterOreTarget(serverLevel, resumePos)
+                    ? this.createBoundedClusterOreTarget(serverLevel, resumePos)
                     : null;
             if (resumeTarget != null) {
+                this.nextOreSearchTick = this.playerNpc.tickCount + ORE_SEARCH_INTERVAL_TICKS;
                 this.resumeInterruptedOreWork = false;
                 this.targetPos = resumeTarget.targetPos();
                 this.standPos = resumeTarget.standPos();
@@ -253,10 +261,21 @@ public class ExploreCaveOreGoal extends Goal {
         OreTarget target = this.findOreTarget(serverLevel);
         this.resumeInterruptedOreWork = false;
         if (target == null) {
+            // A 512-offset slice is PENDING until the cursor completes the whole bounded
+            // search volume. Retrying partial slices promptly preserves mining liveness while
+            // the shared admission gate still permits only one small batch per server tick.
+            int retryTicks = this.lastOreSearchCompletedPass
+                    ? FAILED_RETRY_COOLDOWN_TICKS
+                    : 1 + this.playerNpc.getRandom().nextInt(4);
+            this.nextOreSearchTick = this.playerNpc.tickCount + retryTicks;
+            if (!this.lastOreSearchCompletedPass) {
+                this.canUseThrottle.retryIn(this.playerNpc, retryTicks);
+            }
             this.traceOreCanUseBlocked("ore goal blocked: no reachable ore");
             return false;
         }
 
+        this.nextOreSearchTick = this.playerNpc.tickCount + ORE_SEARCH_INTERVAL_TICKS;
         this.targetPos = target.targetPos();
         this.standPos = target.standPos();
         this.targetRequiresUpwardApproach = target.requiresUpwardApproach();
@@ -360,6 +379,10 @@ public class ExploreCaveOreGoal extends Goal {
         if (!this.isOreBlock(state)) {
             this.playerNpc.clearBlockBreakProgress(this.targetPos);
             this.breakingBlockAi.stop();
+            if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+                this.playerNpc.setCurrentAiDetail("ore cluster selection queued for shared search slice");
+                return;
+            }
             OreTarget nextOre = this.findNextOreInCluster(serverLevel, this.targetPos);
             if (!this.switchToNextClusterOre(serverLevel, nextOre)) {
                 this.targetPos = null;
@@ -400,6 +423,10 @@ public class ExploreCaveOreGoal extends Goal {
                 return;
             }
             if (this.repathTicks-- <= 0) {
+                if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+                    this.repathTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+                    return;
+                }
                 if (this.tryStartPathObstructionMining(serverLevel)) {
                     return;
                 } else if (this.tryStepDownToward(serverLevel, this.standPos)) {
@@ -459,6 +486,10 @@ public class ExploreCaveOreGoal extends Goal {
             this.skipCurrentOreTarget();
         }
         this.playerNpc.clearBlockBreakProgress(minedPos);
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.playerNpc.setCurrentAiDetail("ore cluster selection queued for shared search slice");
+            return;
+        }
         OreTarget nextOre = this.findNextOreInCluster(serverLevel, minedPos);
         if (this.switchToNextClusterOre(serverLevel, nextOre)) {
             return;
@@ -528,9 +559,10 @@ public class ExploreCaveOreGoal extends Goal {
         }
         int offsetCount = ORE_SEARCH_OFFSETS.size();
         int start = Math.floorMod(this.oreSearchCursor, offsetCount);
-        int scanCount = Math.min(MAX_ORE_SCAN_BLOCKS_PER_ATTEMPT, offsetCount);
+        int scanCount = Math.min(MAX_ORE_SCAN_BLOCKS_PER_ATTEMPT, offsetCount - start);
+        this.lastOreSearchCompletedPass = start + scanCount >= offsetCount;
         for (int checked = 0; checked < scanCount; checked++) {
-            BlockPos offset = ORE_SEARCH_OFFSETS.get((start + checked) % offsetCount);
+            BlockPos offset = ORE_SEARCH_OFFSETS.get(start + checked);
             BlockPos immutable = center.offset(offset).immutable();
             if (!serverLevel.hasChunkAt(immutable)) {
                 continue;
@@ -545,7 +577,7 @@ public class ExploreCaveOreGoal extends Goal {
 
             oreCandidates.add(immutable);
         }
-        this.oreSearchCursor = (start + scanCount) % offsetCount;
+        this.oreSearchCursor = this.lastOreSearchCompletedPass ? 0 : start + scanCount;
 
         oreCandidates.sort(Comparator
                 .comparingInt((BlockPos pos) -> this.orePriority(serverLevel.getBlockState(pos)))
@@ -601,6 +633,15 @@ public class ExploreCaveOreGoal extends Goal {
         }
         BlockPos coveredStand = this.findCoveredClusterStand(serverLevel, orePos);
         return coveredStand == null ? null : new OreTarget(orePos, coveredStand, false);
+    }
+
+    private OreTarget createBoundedClusterOreTarget(ServerLevel serverLevel, BlockPos orePos) {
+        this.oreSelectionNavigationPathsRemaining = MAX_ORE_SELECTION_NAVIGATION_PATHS;
+        try {
+            return this.createClusterOreTarget(serverLevel, orePos);
+        } finally {
+            this.oreSelectionNavigationPathsRemaining = -1;
+        }
     }
 
     private void requestSurfaceEscapeIfUnderground(ServerLevel serverLevel) {
@@ -703,6 +744,15 @@ public class ExploreCaveOreGoal extends Goal {
             return null;
         }
 
+        this.oreSelectionNavigationPathsRemaining = MAX_ORE_SELECTION_NAVIGATION_PATHS;
+        try {
+            return this.findNextOreInClusterBounded(serverLevel, originPos);
+        } finally {
+            this.oreSelectionNavigationPathsRemaining = -1;
+        }
+    }
+
+    private OreTarget findNextOreInClusterBounded(ServerLevel serverLevel, BlockPos originPos) {
         this.refreshClusterOres(serverLevel, originPos);
         if (!this.clusterOres.isEmpty()) {
             List<BlockPos> rememberedCandidates = new ArrayList<>();

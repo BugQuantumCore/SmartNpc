@@ -10,6 +10,7 @@ import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
@@ -36,6 +37,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 public class PickupNearbyItemGoal extends Goal {
     private static final String AI_STATE = "ai.player_npc.collecting_item";
@@ -46,7 +48,7 @@ public class PickupNearbyItemGoal extends Goal {
     private static final double PICKUP_DISTANCE_SQR = 1.45D * 1.45D;
     private static final int MAX_PICKUP_TICKS = 20 * 12;
     private static final int FAILED_PICKUP_COOLDOWN_TICKS = 20 * 8;
-    private static final int REPATH_INTERVAL_TICKS = 10;
+    private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int MAX_FAILED_PATH_TICKS = 20 * 5;
     private static final int MAX_CLOSE_PICKUP_WAIT_TICKS = 24;
     private static final int MAX_OBSTRUCTION_CLEAR_TICKS = 20 * 4;
@@ -61,10 +63,17 @@ public class PickupNearbyItemGoal extends Goal {
     private static final int CLOSE_OBSTRUCTION_CHECK_TICKS = 8;
     private static final int RECOVERY_RETRY_COOLDOWN_TICKS = 12;
     private static final int MAX_STUCK_RECOVERY_ATTEMPTS = 3;
-    private static final int RECOVERY_DIRECTION_ATTEMPTS = 12;
+    private static final int RECOVERY_DIRECTION_ATTEMPTS = 4;
     private static final int RECOVERY_DIRECTION_RADIUS = 4;
     private static final int HIGH_ITEM_VERTICAL_BLOCK_GAP = 2;
     private static final int PICKUP_PILLAR_SEARCH_RADIUS = 2;
+    private static final int MAX_TARGET_CANDIDATES = 6;
+    // One failed navigation build can consume most of the 50 ms server-tick budget in dense
+    // terrain. Later throttled activations can inspect another candidate without batching paths.
+    private static final int MAX_TARGET_SELECTION_PATHS = 1;
+    private static final int MAX_RECOVERY_CANDIDATES = 2;
+    private static final int FAILED_ITEM_AVOID_TICKS = 20 * 60;
+    private static final int DETAIL_PROGRESS_REFRESH_INTERVAL_TICKS = 5;
 
     private final PlayerNpcEntity playerNpc;
     private final ToolAi helperToolAi;
@@ -75,6 +84,12 @@ public class PickupNearbyItemGoal extends Goal {
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private final Set<BlockPos> skippedObstructions = new HashSet<>();
     private ItemEntity targetItem;
+    private Path plannedPickupPath;
+    private BlockPos plannedPickupObstruction;
+    private boolean plannedPickupPillar;
+    private UUID failedItemId;
+    private int failedItemAvoidUntilTick;
+    private int lastAdmittedPathBatchTick = Integer.MIN_VALUE;
     private BlockPos prioritySearchCenter;
     private BlockPos pickupPillarBasePos;
     private PillarUpAi pickupPillarAi;
@@ -91,6 +106,11 @@ public class PickupNearbyItemGoal extends Goal {
     private int recoveryRetryCooldownTicks;
     private int stuckRecoveryAttempts;
     private int giveUpCooldownTicks;
+    private int targetSelectionCursor;
+    private int lastDetailMode = -1;
+    private int nextDetailProgressRefreshTick;
+    private UUID lastDetailTargetId;
+    private BlockPos lastDetailPriorityCenter;
 
     public PickupNearbyItemGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -113,6 +133,10 @@ public class PickupNearbyItemGoal extends Goal {
             return false;
         }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || !this.ensurePathBatchAdmission(serverLevel)) {
             return false;
         }
 
@@ -157,6 +181,7 @@ public class PickupNearbyItemGoal extends Goal {
         skippedObstructions.clear();
         prioritySearchCenter = playerNpc.getAnimalLootPriorityPos();
         playerNpc.setCurrentAiState(AI_STATE);
+        resetDetailRefresh();
         updateDetail();
         moveToTarget();
     }
@@ -164,15 +189,11 @@ public class PickupNearbyItemGoal extends Goal {
     @Override
     public void tick() {
         if (targetItem == null || !targetItem.isAlive() || targetItem.getItem().isEmpty()) {
-            targetItem = findTargetItem();
-            if (targetItem == null) {
-                playerNpc.clearAnimalLootPriority();
-                prioritySearchCenter = null;
-                failedPathTicks = MAX_FAILED_PATH_TICKS;
-                playerNpc.getNavigation().stop();
-                return;
-            }
-            resetForNewPickupTarget();
+            // GoalSelector will stop this goal and the next canUse() performs an admitted,
+            // bounded retarget. Never hide a second six-path selection batch inside running tick.
+            targetItem = null;
+            playerNpc.getNavigation().stop();
+            return;
         }
 
         pickupTicks++;
@@ -198,12 +219,8 @@ public class PickupNearbyItemGoal extends Goal {
                 closePickupWaitTicks = 0;
                 activeApproachTicks = 0;
                 if (targetItem == null || !targetItem.isAlive() || targetItem.getItem().isEmpty()) {
-                    targetItem = findTargetItem();
-                    if (targetItem == null) {
-                        playerNpc.clearAnimalLootPriority();
-                    } else {
-                        resetForNewPickupTarget();
-                    }
+                    targetItem = null;
+                    playerNpc.getNavigation().stop();
                 }
             } else {
                 closePickupWaitTicks++;
@@ -248,7 +265,9 @@ public class PickupNearbyItemGoal extends Goal {
         }
         if (repathTicks-- <= 0) {
             repathTicks = REPATH_INTERVAL_TICKS;
-            moveToTarget();
+            if (playerNpc.getNavigation().isDone() || playerNpc.getNavigation().isStuck()) {
+                moveToTarget();
+            }
         }
     }
 
@@ -257,10 +276,17 @@ public class PickupNearbyItemGoal extends Goal {
         boolean gaveUp = pickupTicks >= MAX_PICKUP_TICKS || failedPathTicks >= MAX_FAILED_PATH_TICKS;
         if (gaveUp) {
             giveUpCooldownTicks = FAILED_PICKUP_COOLDOWN_TICKS + playerNpc.getRandom().nextInt(20 * 4);
+            if (targetItem != null) {
+                failedItemId = targetItem.getUUID();
+                failedItemAvoidUntilTick = playerNpc.tickCount + FAILED_ITEM_AVOID_TICKS;
+            }
             playerNpc.clearAnimalLootPriority();
         }
 
         targetItem = null;
+        plannedPickupPath = null;
+        plannedPickupObstruction = null;
+        plannedPickupPillar = false;
         prioritySearchCenter = null;
         pickupTicks = 0;
         repathTicks = 0;
@@ -312,6 +338,9 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private ItemEntity findTargetItem() {
+        this.plannedPickupPath = null;
+        this.plannedPickupObstruction = null;
+        this.plannedPickupPillar = false;
         BlockPos searchCenter = playerNpc.getAnimalLootPriorityPos();
         if (searchCenter != null) {
             prioritySearchCenter = searchCenter;
@@ -325,20 +354,65 @@ public class PickupNearbyItemGoal extends Goal {
                 item -> isCollectable(item) && canAccept(item.getItem())
         );
 
-        return items.stream()
-                .filter(this::canReachItem)
-                .min(Comparator.comparingDouble(this::targetSortDistance))
-                .orElse(null);
+        items.sort(Comparator.comparingDouble(this::targetSortDistance));
+        NavigationPathBudget pathBudget = new NavigationPathBudget(MAX_TARGET_SELECTION_PATHS);
+        int candidateCount = Math.min(MAX_TARGET_CANDIDATES, items.size());
+        if (candidateCount <= 0) {
+            this.targetSelectionCursor = 0;
+            this.plannedPickupPath = null;
+            return null;
+        }
+
+        int startIndex = Math.floorMod(this.targetSelectionCursor, candidateCount);
+        for (int offset = 0; offset < candidateCount; offset++) {
+            if (pathBudget.exhausted()) {
+                break;
+            }
+            int candidateIndex = (startIndex + offset) % candidateCount;
+            ItemEntity item = items.get(candidateIndex);
+            boolean allowRecovery = candidateIndex < MAX_RECOVERY_CANDIDATES;
+            PickupRoute route = this.findPickupRoute(item, pathBudget, allowRecovery);
+            this.targetSelectionCursor = (candidateIndex + 1) % candidateCount;
+            if (route == null) {
+                continue;
+            }
+            this.plannedPickupPath = route.path();
+            this.plannedPickupObstruction = route.obstruction();
+            this.plannedPickupPillar = route.pillar();
+            return item;
+        }
+        this.plannedPickupPath = null;
+        return null;
     }
 
-    private boolean canReachItem(ItemEntity item) {
-        if (playerNpc.distanceToSqr(item) <= PICKUP_DISTANCE_SQR || canReach(item)) {
-            return true;
+    private PickupRoute findPickupRoute(
+            ItemEntity item,
+            NavigationPathBudget pathBudget,
+            boolean allowRecovery
+    ) {
+        if (playerNpc.distanceToSqr(item) <= PICKUP_DISTANCE_SQR) {
+            return new PickupRoute(null, null, false);
+        }
+        Path itemPath = pathBudget.createPath(item);
+        if (itemPath != null && itemPath.canReach()) {
+            return new PickupRoute(itemPath, null, false);
         }
 
         BlockPos stand = findStandNearItem(item);
-        return stand != null && (canReach(stand) || findPathObstructionToward(stand) != null)
-                || canPillarToItem(item);
+        Path standPath = stand == null ? null : pathBudget.createPath(stand);
+        if (standPath != null && standPath.canReach()) {
+            return new PickupRoute(standPath, null, false);
+        }
+        if (allowRecovery) {
+            BlockPos obstruction = stand == null ? null : findPathObstructionToward(stand);
+            if (obstruction != null) {
+                return new PickupRoute(null, obstruction.immutable(), false);
+            }
+            if (isHighPickupTarget(item) && canUsePickupPillarFromCurrentFeet(item)) {
+                return new PickupRoute(null, null, true);
+            }
+        }
+        return null;
     }
 
     private double targetSortDistance(ItemEntity item) {
@@ -358,6 +432,9 @@ public class PickupNearbyItemGoal extends Goal {
                 && !item.isRemoved()
                 && !item.hasPickUpDelay()
                 && !item.getItem().isEmpty()
+                && (failedItemId == null
+                || playerNpc.tickCount >= failedItemAvoidUntilTick
+                || !failedItemId.equals(item.getUUID()))
                 && InventoryUtils.isInventoryBackedSupplyDrop(item.getItem());
     }
 
@@ -380,11 +457,6 @@ public class PickupNearbyItemGoal extends Goal {
         return false;
     }
 
-    private boolean canReach(ItemEntity item) {
-        Path path = playerNpc.getNavigation().createPath(item, 0);
-        return path != null && path.canReach();
-    }
-
     private boolean canReach(BlockPos pos) {
         Path path = playerNpc.getNavigation().createPath(pos, 0);
         return path != null && path.canReach();
@@ -398,6 +470,35 @@ public class PickupNearbyItemGoal extends Goal {
         }
         if (playerNpc.distanceToSqr(targetItem) <= PICKUP_DISTANCE_SQR) {
             failedPathTicks = 0;
+            return;
+        }
+
+        Path selectedPath = this.plannedPickupPath;
+        BlockPos selectedObstruction = this.plannedPickupObstruction;
+        boolean selectedPillar = this.plannedPickupPillar;
+        this.plannedPickupPath = null;
+        this.plannedPickupObstruction = null;
+        this.plannedPickupPillar = false;
+        if (selectedPath != null
+                && selectedPath.canReach()
+                && playerNpc.getNavigation().moveTo(selectedPath, speed)) {
+            failedPathTicks = 0;
+            return;
+        }
+        if (selectedObstruction != null
+                && playerNpc.level() instanceof ServerLevel serverLevel
+                && startPickupPathClear(serverLevel, selectedObstruction)) {
+            failedPathTicks = 0;
+            return;
+        }
+        if (selectedPillar && tryMoveToPickupPillarBase()) {
+            failedPathTicks = 0;
+            return;
+        }
+
+        if (!(playerNpc.level() instanceof ServerLevel serverLevel)
+                || !this.ensurePathBatchAdmission(serverLevel)) {
+            repathTicks = 1 + playerNpc.getRandom().nextInt(4);
             return;
         }
 
@@ -416,8 +517,7 @@ public class PickupNearbyItemGoal extends Goal {
                 failedPathTicks = 0;
             } else if (tryStartPathObstructionMining(stand) || tryStartPathObstructionMining(targetItem.blockPosition())) {
                 failedPathTicks = 0;
-            } else if (playerNpc.level() instanceof ServerLevel serverLevel
-                    && tryStartStuckRecovery(
+            } else if (tryStartStuckRecovery(
                     serverLevel,
                     stand == null ? targetItem.blockPosition() : stand,
                     "no usable pickup path"
@@ -471,8 +571,12 @@ public class PickupNearbyItemGoal extends Goal {
         activeApproachTicks++;
         double approachSpeed = Math.min(1.0D, Math.max(speed, 0.95D));
         if (repathTicks-- <= 0) {
-            playerNpc.getNavigation().moveTo(targetItem, approachSpeed);
-            repathTicks = REPATH_INTERVAL_TICKS;
+            if (playerNpc.getNavigation().isDone() || playerNpc.getNavigation().isStuck()) {
+                moveToTarget();
+            }
+            if (repathTicks <= 0) {
+                repathTicks = REPATH_INTERVAL_TICKS;
+            }
         }
         playerNpc.getMoveControl().setWantedPosition(
                 targetItem.getX(),
@@ -579,6 +683,13 @@ public class PickupNearbyItemGoal extends Goal {
 
         updatePickupPillarDetail();
         return true;
+    }
+
+    private boolean canUsePickupPillarFromCurrentFeet(ItemEntity item) {
+        return playerNpc.level() instanceof ServerLevel serverLevel
+                && isHighPickupTarget(item)
+                && countPickupPillarBlocks() > 0
+                && canUsePickupPillarBase(serverLevel, playerNpc.blockPosition(), item);
     }
 
     private boolean tickRunningPickupPillar(ServerLevel serverLevel) {
@@ -992,6 +1103,10 @@ public class PickupNearbyItemGoal extends Goal {
         if (recoveryRetryCooldownTicks > 0) {
             return false;
         }
+        if (!this.ensurePathBatchAdmission(serverLevel)) {
+            recoveryRetryCooldownTicks = 1 + playerNpc.getRandom().nextInt(4);
+            return false;
+        }
         if (stuckRecoveryAttempts >= MAX_STUCK_RECOVERY_ATTEMPTS) {
             failedPathTicks = MAX_FAILED_PATH_TICKS;
             playerNpc.getNavigation().stop();
@@ -1384,7 +1499,11 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private boolean canStandAt(net.minecraft.server.level.ServerLevel serverLevel, BlockPos pos) {
-        if (!serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+        if (!serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.hasChunkAt(pos)
+                || !serverLevel.hasChunkAt(pos.above())
+                || !serverLevel.hasChunkAt(pos.below())) {
             return false;
         }
 
@@ -1413,6 +1532,22 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private void updateDetail() {
+        int mode = targetItem != null && !targetItem.getItem().isEmpty()
+                ? 3
+                : prioritySearchCenter != null ? 1 : 2;
+        UUID targetId = mode == 3 ? targetItem.getUUID() : null;
+        BlockPos priorityCenter = mode == 1 ? prioritySearchCenter : null;
+        boolean structureChanged = mode != lastDetailMode
+                || !java.util.Objects.equals(targetId, lastDetailTargetId)
+                || !java.util.Objects.equals(priorityCenter, lastDetailPriorityCenter);
+        if (!structureChanged && playerNpc.tickCount < nextDetailProgressRefreshTick) {
+            return;
+        }
+        lastDetailMode = mode;
+        lastDetailTargetId = targetId;
+        lastDetailPriorityCenter = priorityCenter == null ? null : priorityCenter.immutable();
+        nextDetailProgressRefreshTick = playerNpc.tickCount + DETAIL_PROGRESS_REFRESH_INTERVAL_TICKS;
+
         if (targetItem == null || targetItem.getItem().isEmpty()) {
             if (prioritySearchCenter != null) {
                 playerNpc.setCurrentAiDetail(String.format(
@@ -1444,9 +1579,58 @@ public class PickupNearbyItemGoal extends Goal {
         ));
     }
 
+    private void resetDetailRefresh() {
+        lastDetailMode = -1;
+        lastDetailTargetId = null;
+        lastDetailPriorityCenter = null;
+        nextDetailProgressRefreshTick = 0;
+    }
+
     private int getRemainingPickupSeconds() {
         int remainingTicks = Math.max(0, MAX_PICKUP_TICKS - pickupTicks);
         return Math.max(0, (remainingTicks + 19) / 20);
+    }
+
+    private boolean ensurePathBatchAdmission(ServerLevel serverLevel) {
+        if (this.lastAdmittedPathBatchTick == this.playerNpc.tickCount) {
+            return true;
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            return false;
+        }
+        this.lastAdmittedPathBatchTick = this.playerNpc.tickCount;
+        return true;
+    }
+
+    private record PickupRoute(Path path, BlockPos obstruction, boolean pillar) {
+    }
+
+    private final class NavigationPathBudget {
+        private int remaining;
+
+        private NavigationPathBudget(int maximum) {
+            this.remaining = Math.max(0, maximum);
+        }
+
+        private boolean exhausted() {
+            return this.remaining <= 0;
+        }
+
+        private Path createPath(ItemEntity item) {
+            if (item == null || this.exhausted()) {
+                return null;
+            }
+            this.remaining--;
+            return playerNpc.getNavigation().createPath(item, 0);
+        }
+
+        private Path createPath(BlockPos pos) {
+            if (pos == null || this.exhausted()) {
+                return null;
+            }
+            this.remaining--;
+            return playerNpc.getNavigation().createPath(pos, 0);
+        }
     }
 
 }

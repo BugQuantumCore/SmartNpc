@@ -1,12 +1,15 @@
 package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.pathfinder.Node;
+import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -95,6 +98,25 @@ public final class ReturnPositionAi {
         this.clearBlockAi.stop();
         this.pillarUpAi.clear();
         this.pathStuckFallbackAi.stop();
+    }
+
+    /** Starts return state while reusing an exact path already paid for by target selection. */
+    public void start(BlockPos target, Path selectedPath) {
+        this.start(target);
+        if (!isExactPathTo(selectedPath, target)) {
+            return;
+        }
+        if (this.playerNpc.getNavigation().moveTo(selectedPath, this.speed)) {
+            this.repathTicks = REPATH_DELAY_TICKS;
+        }
+    }
+
+    private static boolean isExactPathTo(Path path, BlockPos target) {
+        if (path == null || target == null || !path.canReach()) {
+            return false;
+        }
+        Node endNode = path.getEndNode();
+        return endNode != null && endNode.asBlockPos().equals(target);
     }
 
     public void tick(ServerLevel serverLevel, BlockPos target, Predicate<BlockPos> protectedBlock, String moveDetail, String clearDetail) {
@@ -229,6 +251,25 @@ public final class ReturnPositionAi {
             this.detail = !navigationDone && !stuck
                     ? moveDetail
                     : moveDetail + " (waiting to retry route)";
+            return;
+        }
+
+        // The destination is static for one return episode. Rebuilding an already-live path on
+        // every cadence adds server cost without changing the route. Builder home return keeps
+        // its historical no-progress recovery, while ordinary returns wait for navigation to
+        // finish or report a stuck path before opening another discovery batch.
+        if (!navigationDone && !stuck && !(useHistoricalBuilderFallback && builderClearReady)) {
+            this.repathTicks = REPATH_DELAY_TICKS + this.playerNpc.getRandom().nextInt(REPATH_JITTER_TICKS + 1);
+            this.detail = moveDetail;
+            return;
+        }
+
+        // A return retry may combine obstruction discovery, local-fallback candidate scans and
+        // many navigation paths. It is a shared expensive batch even though ordinary movement
+        // along an existing path remains cheap and runs every tick.
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.repathTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+            this.detail = moveDetail + " (waiting for shared route budget)";
             return;
         }
 

@@ -12,6 +12,7 @@ import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
+import com.pla.smart_npc.entity.goal.AiBudgetWaitingStrollGoal;
 import com.pla.smart_npc.entity.goal.BeingAtHomeGoal;
 import com.pla.smart_npc.entity.goal.BuildHouseGoal;
 import com.pla.smart_npc.entity.goal.BreakTargetObstructionGoal;
@@ -229,6 +230,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     );
 
     private final SimpleContainer inventory = new SimpleContainer(27);
+    private BlockPos lastSentBlockBreakProgressPos;
+    private int lastSentBlockBreakProgressStage = -1;
     private int gapCooldown = 0;
     private int bucketCooldown = 0;
     private int flintAndSteelCooldown = 0;
@@ -309,6 +312,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private BlockPos idleResourceStuckWatchTarget;
     private int idleResourceStuckTicks = 0;
     private int idleResourceStuckRecheckTicks = 0;
+    @Nullable
+    private BlockPos idleResourceSurfaceSearchOrigin;
+    @Nullable
+    private BlockPos cachedIdleResourceSurfaceEscapeTarget;
+    private int nextIdleResourceSurfaceSearchTick = 0;
     private double placeBlockToParryChance;
     private int placeBlockParryCooldown = 0;
     private int stunEscapeCooldown = 0;
@@ -653,10 +661,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (this.isBuildingBaseSelectionLocked()) {
             return interest == PlayerNpcInterest.BUILDING;
         }
+        if (this.isFarmingBaseSelectionLocked()) {
+            return interest == PlayerNpcInterest.FARMING;
+        }
         if (this.level() instanceof ServerLevel serverLevel) {
-            if (this.shouldForceUnfinishedBuilding(serverLevel)) {
-                return interest == PlayerNpcInterest.BUILDING;
-            }
             if (interest == PlayerNpcInterest.BUILDING && this.shouldRunBuildingHomeDuty(serverLevel)) {
                 return true;
             }
@@ -682,9 +690,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 && PlayerNpcHomeUtil.getHomeLayoutId(this).isEmpty();
     }
 
-    private boolean shouldForceUnfinishedBuilding(ServerLevel serverLevel) {
-        return this.hasInterest(PlayerNpcInterest.BUILDING)
-                && !BuildHouseGoal.isHomeLayoutFinished(this, serverLevel);
+    public boolean isFarmingBaseSelectionLocked() {
+        return !this.hasInterest(PlayerNpcInterest.BUILDING)
+                && this.hasInterest(PlayerNpcInterest.FARMING)
+                && PlayerNpcFarmPlan.get(this).isEmpty();
     }
 
     private boolean shouldRunBuildingHomeDuty(ServerLevel serverLevel) {
@@ -1258,6 +1267,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public PlayerNpcEntity(EntityType<? extends PlayerNpcEntity> entitytype, Level level) {
         super(entitytype, level);
+        // Resource predicates are queried by several goals in the same selector pass. Keep their
+        // per-tick snapshot exact when the backing container changes instead of rescanning all
+        // slots independently for logs, stone, and dirt.
+        this.inventory.addListener(container -> ResourceAi.invalidate(this));
         this.setMaxUpStep(1.0F);
         this.xpReward = 50;
         this.setNoAi(false);
@@ -1614,8 +1627,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.addWorkGoal(5, this.gated(new JukeboxDanceGoal(this, 1.0D), PlayerNpcInterest.TROLL_HIT));
         this.addWorkGoal(5, this.gated(new TrollHitGoal(this), PlayerNpcInterest.TROLL_HIT));
         this.addWorkGoal(5, this.gated(new IronGolemTrollGoal(this), PlayerNpcInterest.TROLL_HIT));
-        this.addWorkGoal(5, this.gated(new ManageHomeBaseGoal(this), PlayerNpcInterest.BUILDING));
-        this.addWorkGoal(5, this.gated(new CheckHomeSuppliesGoal(this), PlayerNpcInterest.BUILDING));
+        this.addWorkGoal(5, new ManageHomeBaseGoal(this));
+        this.addWorkGoal(5, new CheckHomeSuppliesGoal(this));
         this.addWorkGoal(5, new CraftBasicGearGoal(this));
         this.goalSelector.addGoal(5, new BreakTargetObstructionGoal(this));
         this.addWorkGoal(5, this.gated(new CraftIronGearGoal(this), PlayerNpcInterest.MINING, PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
@@ -1744,6 +1757,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 true,
                 false
         ), PlayerNpcInterest.HUNT_MONSTERS));
+        this.goalSelector.addGoal(9, new AiBudgetWaitingStrollGoal(this, 0.55D));
         this.addWorkGoal(4, this.gated(new BeingAtHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
         ((GroundPathNavigation) this.getNavigation()).setCanOpenDoors(true);
@@ -1976,12 +1990,22 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 ? 9
                 : (int) ((breakTicks * 10.0F) / requiredBreakTicks);
         progress = Math.max(0, Math.min(9, progress));
+        if (progress == this.lastSentBlockBreakProgressStage
+                && pos.equals(this.lastSentBlockBreakProgressPos)) {
+            return;
+        }
         serverLevel.destroyBlockProgress(this.getId(), pos, progress);
+        this.lastSentBlockBreakProgressPos = pos.immutable();
+        this.lastSentBlockBreakProgressStage = progress;
     }
 
     public void clearBlockBreakProgress(BlockPos pos) {
         if (this.level() instanceof ServerLevel serverLevel && pos != null) {
             serverLevel.destroyBlockProgress(this.getId(), pos, -1);
+            // Minecraft indexes crack progress by breaker entity id, so any -1 removes the
+            // current entry even if a recovery branch supplied an older position.
+            this.lastSentBlockBreakProgressPos = null;
+            this.lastSentBlockBreakProgressStage = -1;
         }
     }
 
@@ -2453,6 +2477,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public void tick() {
+        boolean measurePerformance = this.level() instanceof ServerLevel
+                && PlayerNpcPerformanceMonitor.shouldMeasureNpcEntityTick();
+        long performanceStartNanos = measurePerformance ? System.nanoTime() : 0L;
         super.tick();
 
         int mainHandAttackAnimationTicks = this.getMainHandAttackAnimationTicks();
@@ -2476,8 +2503,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.pickupNearbyExperienceOrbs();
         }
 
-        if (!isInventoryFull()) {
+        // Vanilla-style contact pickup does not need an entity query from every force-ticked NPC
+        // on every server tick. Stagger a four-tick cadence by entity id; direct pickup attempts
+        // from PickupNearbyItemGoal still run immediately when that goal reaches its item.
+        if (Math.floorMod(this.tickCount + this.getId(), 4) == 0 && !isInventoryFull()) {
             this.pickupNearbyItems();
+        }
+        if (measurePerformance) {
+            PlayerNpcPerformanceMonitor.recordNpcEntityTick(
+                    this,
+                    Math.max(0L, System.nanoTime() - performanceStartNanos)
+            );
         }
     }
 
@@ -2862,9 +2898,25 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         BlockPos feet = this.blockPosition();
         BlockPos navigationTarget = this.getNavigation().getTargetPos();
-        BlockPos surfaceEscapeTarget = serverLevel.canSeeSky(feet.above())
-                ? null
-                : this.findIdleResourceSurfaceEscapeTarget(serverLevel, feet);
+        BlockPos surfaceEscapeTarget = null;
+        if (!serverLevel.canSeeSky(feet.above())) {
+            boolean movedBeyondCachedSearch = this.idleResourceSurfaceSearchOrigin == null
+                    || this.idleResourceSurfaceSearchOrigin.distSqr(feet) > 4.0D * 4.0D;
+            if (movedBeyondCachedSearch || this.tickCount >= this.nextIdleResourceSurfaceSearchTick) {
+                if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this)) {
+                    this.nextIdleResourceSurfaceSearchTick = this.tickCount
+                            + 1
+                            + this.getRandom().nextInt(4);
+                    return;
+                }
+                this.idleResourceSurfaceSearchOrigin = feet.immutable();
+                this.cachedIdleResourceSurfaceEscapeTarget = this.findIdleResourceSurfaceEscapeTarget(serverLevel, feet);
+                this.nextIdleResourceSurfaceSearchTick = this.tickCount
+                        + IDLE_RESOURCE_STUCK_TICKS
+                        + this.getRandom().nextInt(21);
+            }
+            surfaceEscapeTarget = this.cachedIdleResourceSurfaceEscapeTarget;
+        }
         BlockPos routeTarget = navigationTarget == null
                 ? surfaceEscapeTarget == null ? feet : surfaceEscapeTarget
                 : navigationTarget;
@@ -3144,6 +3196,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
                 int x = feet.getX() + dx;
                 int z = feet.getZ() + dz;
+                if (!serverLevel.hasChunk(x >> 4, z >> 4)) {
+                    continue;
+                }
                 int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
                 int climb = y - feet.getY();
                 if (climb <= 0 || climb > IDLE_RESOURCE_SURFACE_ESCAPE_MAX_BLOCKS) {
@@ -3254,8 +3309,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         long day = dayTime / DAY_LENGTH_TICKS;
         long timeOfDay = dayTime % DAY_LENGTH_TICKS;
 
-        if (this.shouldForceUnfinishedBuilding(serverLevel)) {
-            this.selectDailyJob(day, PlayerNpcInterest.BUILDING, "unfinished building locked");
+        if (this.isBuildingBaseSelectionLocked()) {
+            this.selectDailyJob(day, PlayerNpcInterest.BUILDING, "building base selection locked");
+            return;
+        }
+        if (this.isFarmingBaseSelectionLocked()) {
+            this.selectDailyJob(day, PlayerNpcInterest.FARMING, "farming base selection locked");
             return;
         }
 
@@ -3740,7 +3799,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         super.onEquipItem(pSlot, pOldItem, pNewItem);
     }
 
-    public static boolean canSpawn(EntityType<PlayerNpcEntity> entityType, ServerLevelAccessor level, MobSpawnType spawnType, BlockPos position, RandomSource random) {
+    public static boolean canSpawn(EntityType<PlayerNpcEntity> entityType, ServerLevelAccessor level,
+                                   MobSpawnType spawnType, BlockPos position, RandomSource random) {
         ServerLevel serverLevel = level.getLevel();
         if (spawnType != MobSpawnType.SPAWN_EGG
                 && spawnType != MobSpawnType.COMMAND && spawnType != MobSpawnType.STRUCTURE

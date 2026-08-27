@@ -24,9 +24,13 @@ machines with `requiresUpdateEveryTick()`. `FloatGoal` continues to own only JUM
 ## Destination-Preserving Behavior
 
 When a preferred destination exists, `WaterEscapeAi` swims toward that same destination and uses
-`FloatGoal` for buoyancy. It may select a dry exit only when the exit reduces horizontal distance to
-the owning destination; an exit on the bank the NPC just left is rejected. Destination swimming and
-no-progress episodes are bounded so an unreachable occupied target cannot consume AI time forever.
+`FloatGoal` for buoyancy. It normally selects a dry exit only when the exit reduces horizontal
+distance to the owning destination; an exit on the bank the NPC just left is rejected. A destination
+directly above or below the current water column is the exception: horizontal swimming cannot reach
+it, so the best dry side exit may briefly increase distance and let the owner repath from land.
+Destination swimming and no-progress episodes are bounded so an unreachable occupied target cannot
+consume AI time forever. The absolute episode start, swim count, best distance, and failure history
+survive transitions through dry-exit and footing fallback; resuming swimming must not reset them.
 Because destination swimming stops land navigation, `MoveControl.setWantedPosition(...)` alone is
 not horizontal propulsion for this NPC. Water travel also applies a small capped X/Z acceleration
 toward the owner destination (and destination-side dry exit); omitting it leaves the NPC bobbing in
@@ -34,7 +38,10 @@ place until the stall timeout despite a correct retained target.
 The acceleration, look update, fluid-state check, and progress arithmetic are cheap enough for each
 owning goal tick. Dry-exit discovery and shallow/wall footing discovery are not: all destination recovery
 world scans share one absolute `tickCount` gate and run at most once per 20 server ticks, independent
-of how often an owning goal invokes the helper.
+of how often an owning goal invokes the helper. Those scans also acquire `PlayerNpcAiWorkBudget`;
+denial schedules a short jittered retry while cheap steering continues and does not count as a failed
+stall episode. Once a GatherLogs destination episode fails, abandon that exact log route before
+admitted reselection instead of feeding the same target back into a permanently failed helper.
 
 Do not slow the whole `GoalSelector` to 20 ticks to protect these scans. That phase-locks all NPC
 activation, target, farm, tree, fishing-water, and path work into a once-per-second server-thread

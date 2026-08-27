@@ -16,6 +16,7 @@ import com.pla.smart_npc.util.PlayerNpcBedUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
@@ -80,6 +81,9 @@ public class BuildHouseGoal extends Goal {
     private static final int BUILD_WORK_AREA_MARGIN = 4;
     private static final int BUILD_WORK_AREA_HEIGHT = 8;
     private static final int READY_BUILD_WORK_CACHE_TICKS = 20 * 3;
+    // Blueprint state/material checks are synchronous server-thread reads. Small cursor slices
+    // keep a cache refresh from consuming the complete 50 ms tick budget on a large layout.
+    private static final int MAX_READY_BUILD_BLOCKS_PER_SLICE = 8;
     private static final int HOME_FINISHED_CACHE_TICKS = 20;
     private static final double BUILD_DISTANCE_SQR = 4.0D * 4.0D;
     private static final double BUILD_HORIZONTAL_DISTANCE_SQR = 4.0D * 4.0D;
@@ -87,6 +91,7 @@ public class BuildHouseGoal extends Goal {
     private static final double CRAFT_ROUTE_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
     private static final String ACTIVE_BUILD_BATCH_KEY = "SmartNpcActiveBuildBatch";
     private static final Map<PlayerNpcEntity, HomeBuildWorkCache> HOME_BUILD_WORK_CACHE = new WeakHashMap<>();
+    private static final Map<PlayerNpcEntity, HomeBuildWorkSearch> HOME_BUILD_WORK_SEARCHES = new WeakHashMap<>();
     private static final Map<PlayerNpcEntity, HomeFinishedCache> HOME_FINISHED_CACHE = new WeakHashMap<>();
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
             Direction.NORTH,
@@ -175,6 +180,7 @@ public class BuildHouseGoal extends Goal {
 
     public static void invalidateHomeBuildWorkCache(PlayerNpcEntity playerNpc) {
         HOME_BUILD_WORK_CACHE.remove(playerNpc);
+        HOME_BUILD_WORK_SEARCHES.remove(playerNpc);
         HOME_FINISHED_CACHE.remove(playerNpc);
     }
 
@@ -245,11 +251,24 @@ public class BuildHouseGoal extends Goal {
         )) {
             return cache.continuable();
         }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, playerNpc)) {
+            // Keep a same-context answer until one shared work slice can refresh it. This avoids
+            // turning every priority probe into an independent blueprint/world scan.
+            return cache != null
+                    && cache.sameContext(
+                    serverLevel.dimension().location(),
+                    homeArea,
+                    layoutId,
+                    inventoryHash
+            )
+                    && cache.continuable();
+        }
 
         Optional<PlayerNpcBuildLayout> layout = layoutId.isEmpty()
                 ? Optional.empty()
                 : PlayerNpcBuildLayoutLoader.getLayout(layoutId);
         if (layout.isEmpty()) {
+            HOME_BUILD_WORK_SEARCHES.remove(playerNpc);
             HOME_BUILD_WORK_CACHE.put(playerNpc, HomeBuildWorkCache.create(
                     playerNpc,
                     serverLevel.dimension().location(),
@@ -261,11 +280,71 @@ public class BuildHouseGoal extends Goal {
             return false;
         }
 
-        BuildHouseGoal checker = new BuildHouseGoal(playerNpc);
-        boolean continuable = layout.get().width() == homeArea.width()
-                && layout.get().depth() == homeArea.depth()
-                && checker.hasUnfinishedPlacement(serverLevel, layout.get(), homeArea.origin())
-                && checker.hasMaterialForAnyPlacement(serverLevel, layout.get(), homeArea.origin());
+        if (layout.get().width() != homeArea.width() || layout.get().depth() != homeArea.depth()) {
+            HOME_BUILD_WORK_SEARCHES.remove(playerNpc);
+            HOME_BUILD_WORK_CACHE.put(playerNpc, HomeBuildWorkCache.create(
+                    playerNpc,
+                    serverLevel.dimension().location(),
+                    homeArea,
+                    layoutId,
+                    inventoryHash,
+                    false
+            ));
+            return false;
+        }
+
+        HomeBuildWorkSearch search = HOME_BUILD_WORK_SEARCHES.get(playerNpc);
+        if (search == null || !search.matches(
+                serverLevel.dimension().location(),
+                homeArea,
+                layoutId,
+                inventoryHash
+        )) {
+            search = HomeBuildWorkSearch.create(
+                    serverLevel.dimension().location(),
+                    homeArea,
+                    layoutId,
+                    inventoryHash
+            );
+        }
+        List<PlayerNpcBuildLayout.RelativeBlock> blocks = layout.get().blocks();
+        int endIndex = Math.min(blocks.size(), search.nextBlockIndex() + MAX_READY_BUILD_BLOCKS_PER_SLICE);
+        boolean hasUnfinishedRequired = search.hasUnfinishedRequired();
+        boolean hasMaterialForPlacement = search.hasMaterialForPlacement();
+        for (int index = search.nextBlockIndex(); index < endIndex; index++) {
+            PlayerNpcBuildLayout.RelativeBlock block = blocks.get(index);
+            if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
+                continue;
+            }
+            boolean built = isBuiltMatch(serverLevel, block.toWorld(homeArea.origin()), block.state());
+            if (!built && !block.optional()) {
+                hasUnfinishedRequired = true;
+            }
+            if (!built && PlayerNpcBuildMaterialUtil.hasMaterialFor(serverLevel, playerNpc, block, homeArea.origin())) {
+                hasMaterialForPlacement = true;
+            }
+            if (hasUnfinishedRequired && hasMaterialForPlacement) {
+                break;
+            }
+        }
+        boolean continuable = hasUnfinishedRequired && hasMaterialForPlacement;
+        if (!continuable && endIndex < blocks.size()) {
+            HOME_BUILD_WORK_SEARCHES.put(playerNpc, search.advance(
+                    endIndex,
+                    hasUnfinishedRequired,
+                    hasMaterialForPlacement
+            ));
+            return cache != null
+                    && cache.sameContext(
+                    serverLevel.dimension().location(),
+                    homeArea,
+                    layoutId,
+                    inventoryHash
+            )
+                    && cache.continuable();
+        }
+
+        HOME_BUILD_WORK_SEARCHES.remove(playerNpc);
         HOME_BUILD_WORK_CACHE.put(playerNpc, HomeBuildWorkCache.create(
                 playerNpc,
                 serverLevel.dimension().location(),
@@ -340,8 +419,18 @@ public class BuildHouseGoal extends Goal {
         if (!shelterBuild && this.playerNpc.getBuildHouseCooldown() > 0) {
             return false;
         }
-        if (this.loadReadyExistingHomeBuild(serverLevel, shelterBuild)) {
-            return true;
+        if (existingHome) {
+            // Terraform owns the full footprint scan. Its admitted result is intentionally checked
+            // before any blueprint/material pass so failed BuildHouse eligibility cannot duplicate
+            // the same builder-site work in this selector cycle.
+            if (TerraformBuildSiteGoal.hasPrepWork(this.playerNpc, serverLevel)) {
+                return false;
+            }
+            return this.loadReadyExistingHomeBuild(serverLevel, shelterBuild);
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.canUseThrottle.retryIn(this.playerNpc, 1 + this.playerNpc.getRandom().nextInt(4));
+            return false;
         }
 
         BuildSelection selection = this.findBuildSelection(serverLevel);
@@ -353,26 +442,11 @@ public class BuildHouseGoal extends Goal {
         this.selectedLayout = selection.layout();
         this.origin = selection.origin();
         this.homeArea = new PlayerNpcHomeUtil.HomeArea(this.origin, this.selectedLayout.width(), this.selectedLayout.depth());
-        if (existingHome && !this.isInsideBuildWorkArea(this.homeArea)) {
-            return false;
-        }
         PlayerNpcHomeUtil.setHome(this.playerNpc, this.homeArea, this.selectedLayout.id());
         if (TerraformBuildSiteGoal.hasPrepWork(this.playerNpc, serverLevel)) {
             return false;
         }
-        if (!existingHome) {
-            return this.playerNpc.hasMetBuildSupplyGoals();
-        }
-
-        boolean hasBuildMaterial = this.hasMaterialForAnyPlacement(serverLevel, this.selectedLayout, this.origin);
-        if (!hasBuildMaterial) {
-            setBuildBatchActive(this.playerNpc, false);
-            return false;
-        }
-
-        return shelterBuild
-                || isBuildBatchActive(this.playerNpc)
-                || this.playerNpc.hasMetBuildSupplyGoals();
+        return this.playerNpc.hasMetBuildSupplyGoals();
     }
 
     private boolean loadReadyExistingHomeBuild(ServerLevel serverLevel, boolean shelterBuild) {
@@ -392,9 +466,7 @@ public class BuildHouseGoal extends Goal {
         if (buildLayout.width() != home.width()
                 || buildLayout.depth() != home.depth()
                 || !this.isInsideBuildWorkArea(home)
-                || !this.hasUnfinishedPlacement(serverLevel, buildLayout, home.origin())
-                || !this.hasMaterialForAnyPlacement(serverLevel, buildLayout, home.origin())
-                || TerraformBuildSiteGoal.hasPrepWork(this.playerNpc, serverLevel)) {
+                || !cachedContinuableHomeBuildWork(this.playerNpc, serverLevel)) {
             return false;
         }
         if (!shelterBuild
@@ -655,17 +727,9 @@ public class BuildHouseGoal extends Goal {
     }
 
     private BuildSelection findBuildSelection(ServerLevel serverLevel) {
-        Optional<PlayerNpcHomeUtil.HomeArea> existingHome = PlayerNpcHomeUtil.getHome(this.playerNpc);
-        if (existingHome.isPresent()) {
-            PlayerNpcHomeUtil.HomeArea homeArea = existingHome.get();
-            Optional<PlayerNpcBuildLayout> homeLayout = PlayerNpcHomeUtil.getHomeLayoutId(this.playerNpc)
-                    .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
-            if (homeLayout.isPresent()
-                    && homeLayout.get().width() == homeArea.width()
-                    && homeLayout.get().depth() == homeArea.depth()
-                    && this.hasUnfinishedPlacement(serverLevel, homeLayout.get(), homeArea.origin())) {
-                return new BuildSelection(homeLayout.get(), homeArea.origin());
-            }
+        if (PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent()) {
+            // Existing homes use loadReadyExistingHomeBuild and its cursor-sliced shared cache.
+            // Never fall back to a complete blueprint scan from first-base selection.
             return null;
         }
 
@@ -744,7 +808,7 @@ public class BuildHouseGoal extends Goal {
             if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
                 continue;
             }
-            if (allowExistingHouseBlocks && this.isBuiltMatch(serverLevel, checkPos, block.state())) {
+            if (allowExistingHouseBlocks && isBuiltMatch(serverLevel, checkPos, block.state())) {
                 continue;
             }
             BlockState state = serverLevel.getBlockState(checkPos);
@@ -757,32 +821,6 @@ public class BuildHouseGoal extends Goal {
             }
         }
         return true;
-    }
-
-    private boolean hasUnfinishedPlacement(ServerLevel serverLevel, PlayerNpcBuildLayout layout, BlockPos origin) {
-        for (PlayerNpcBuildLayout.RelativeBlock block : layout.blocks()) {
-            if (!block.optional()
-                    && !PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
-                    && !this.isBuiltMatch(serverLevel, block.toWorld(origin), block.state())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean hasMaterialForAnyPlacement(ServerLevel serverLevel, PlayerNpcBuildLayout layout, BlockPos origin) {
-        for (PlayerNpcBuildLayout.RelativeBlock block : layout.blocks()) {
-            if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
-                continue;
-            }
-            if (this.isBuiltMatch(serverLevel, block.toWorld(origin), block.state())) {
-                continue;
-            }
-            if (PlayerNpcBuildMaterialUtil.hasMaterialFor(serverLevel, this.playerNpc, block, origin)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private boolean hasReadyFirstBaseReserves() {
@@ -997,7 +1035,7 @@ public class BuildHouseGoal extends Goal {
                 this.blueprint.remove(i);
                 continue;
             }
-            if (this.isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
+            if (isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
                 this.blueprint.remove(i);
                 if (countsTowardBuildProgress(block)) {
                     this.completedPlacements++;
@@ -1039,7 +1077,7 @@ public class BuildHouseGoal extends Goal {
                 this.blueprint.remove(0);
                 continue;
             }
-            if (this.isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
+            if (isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
                 this.blueprint.remove(0);
                 if (countsTowardBuildProgress(block)) {
                     this.completedPlacements++;
@@ -1053,7 +1091,7 @@ public class BuildHouseGoal extends Goal {
 
     private PlayerNpcBuildLayout.RelativeBlock currentBuildBlock(ServerLevel serverLevel) {
         if (this.activeBuildBlock != null && this.blueprint.contains(this.activeBuildBlock)) {
-            if (this.isBuiltMatch(serverLevel, this.activeBuildBlock.toWorld(this.origin), this.activeBuildBlock.state())) {
+            if (isBuiltMatch(serverLevel, this.activeBuildBlock.toWorld(this.origin), this.activeBuildBlock.state())) {
                 this.blueprint.remove(this.activeBuildBlock);
                 if (countsTowardBuildProgress(this.activeBuildBlock)) {
                     this.completedPlacements++;
@@ -1239,7 +1277,7 @@ public class BuildHouseGoal extends Goal {
         for (PlayerNpcBuildLayout.RelativeBlock block : this.selectedLayout.blocks()) {
             if (block.toWorld(this.origin).equals(pos)
                     && !PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
-                    && this.isBuiltMatch(serverLevel, pos, block.state())) {
+                    && isBuiltMatch(serverLevel, pos, block.state())) {
                 return true;
             }
         }
@@ -1264,7 +1302,7 @@ public class BuildHouseGoal extends Goal {
         if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(targetState)) {
             return true;
         }
-        if (this.isBuiltMatch(serverLevel, pos, targetState)) {
+        if (isBuiltMatch(serverLevel, pos, targetState)) {
             return true;
         }
 
@@ -1412,7 +1450,7 @@ public class BuildHouseGoal extends Goal {
         serverLevel.sendBlockUpdated(pos, serverLevel.getBlockState(pos), serverLevel.getBlockState(pos), 3);
     }
 
-    private boolean isBuiltMatch(ServerLevel serverLevel, BlockPos pos, BlockState targetState) {
+    private static boolean isBuiltMatch(ServerLevel serverLevel, BlockPos pos, BlockState targetState) {
         return PlayerNpcBuildMaterialUtil.matches(serverLevel.getBlockState(pos), targetState);
     }
 
@@ -2095,7 +2133,7 @@ public class BuildHouseGoal extends Goal {
                     || PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())
                     || block.isSecondHalfOfSingleItemBlock()
                     || !isTorchPrerequisitePlacement(block.state())
-                    || this.isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
+                    || isBuiltMatch(serverLevel, block.toWorld(this.origin), block.state())) {
                 continue;
             }
             return true;
@@ -2175,13 +2213,87 @@ public class BuildHouseGoal extends Goal {
                 String currentLayoutId,
                 int currentInventoryHash
         ) {
-            return currentTick - this.tick <= READY_BUILD_WORK_CACHE_TICKS
-                    && this.dimension.equals(currentDimension)
+            int age = currentTick - this.tick;
+            return age >= 0
+                    && age <= READY_BUILD_WORK_CACHE_TICKS
+                    && this.sameContext(currentDimension, homeArea, currentLayoutId, currentInventoryHash);
+        }
+
+        boolean sameContext(
+                ResourceLocation currentDimension,
+                PlayerNpcHomeUtil.HomeArea homeArea,
+                String currentLayoutId,
+                int currentInventoryHash
+        ) {
+            return this.dimension.equals(currentDimension)
                     && this.origin.equals(homeArea.origin())
                     && this.width == homeArea.width()
                     && this.depth == homeArea.depth()
                     && this.layoutId.equals(currentLayoutId)
                     && this.inventoryHash == currentInventoryHash;
+        }
+    }
+
+    private record HomeBuildWorkSearch(
+            ResourceLocation dimension,
+            BlockPos origin,
+            int width,
+            int depth,
+            String layoutId,
+            int inventoryHash,
+            int nextBlockIndex,
+            boolean hasUnfinishedRequired,
+            boolean hasMaterialForPlacement
+    ) {
+        private static HomeBuildWorkSearch create(
+                ResourceLocation dimension,
+                PlayerNpcHomeUtil.HomeArea homeArea,
+                String layoutId,
+                int inventoryHash
+        ) {
+            return new HomeBuildWorkSearch(
+                    dimension,
+                    homeArea.origin(),
+                    homeArea.width(),
+                    homeArea.depth(),
+                    layoutId,
+                    inventoryHash,
+                    0,
+                    false,
+                    false
+            );
+        }
+
+        private boolean matches(
+                ResourceLocation currentDimension,
+                PlayerNpcHomeUtil.HomeArea homeArea,
+                String currentLayoutId,
+                int currentInventoryHash
+        ) {
+            return this.dimension.equals(currentDimension)
+                    && this.origin.equals(homeArea.origin())
+                    && this.width == homeArea.width()
+                    && this.depth == homeArea.depth()
+                    && this.layoutId.equals(currentLayoutId)
+                    && this.inventoryHash == currentInventoryHash;
+        }
+
+        private HomeBuildWorkSearch advance(
+                int nextBlockIndex,
+                boolean hasUnfinishedRequired,
+                boolean hasMaterialForPlacement
+        ) {
+            return new HomeBuildWorkSearch(
+                    this.dimension,
+                    this.origin,
+                    this.width,
+                    this.depth,
+                    this.layoutId,
+                    this.inventoryHash,
+                    nextBlockIndex,
+                    hasUnfinishedRequired,
+                    hasMaterialForPlacement
+            );
         }
     }
 

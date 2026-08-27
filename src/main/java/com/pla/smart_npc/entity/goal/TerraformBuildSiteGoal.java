@@ -19,8 +19,10 @@ import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.ItemTags;
@@ -43,11 +45,11 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 public class TerraformBuildSiteGoal extends Goal {
     private static final double WORK_DISTANCE_SQR = 5.5D * 5.5D;
@@ -66,6 +68,10 @@ public class TerraformBuildSiteGoal extends Goal {
     private static final int SUPPORT_FILL_ESCAPE_EXTRA_BLOCKS = 4;
     private static final int SUPPORT_FILL_ESCAPE_HANDOFF_TICKS = 20 * 30;
     private static final int TARGET_SEARCH_RETRY_COOLDOWN_TICKS = 10;
+    private static final int ACTIONABLE_PREP_CACHE_TICKS = 20;
+    private static final int MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE = 64;
+    private static final int MAX_TERRAFORM_SUPPORT_COLUMNS_PER_SLICE = 16;
+    private static final int MAX_TERRAFORM_LOCAL_PATH_CHECKS = 1;
     private static final int DIRECT_CLEAR_FAILURE_RETRY_TICKS = 20 * 10;
     private static final double SCAFFOLD_PLACE_CLEARANCE_Y = 0.65D;
     private static final double SCAFFOLD_FALLBACK_PLACE_CLEARANCE_Y = 0.55D;
@@ -96,7 +102,8 @@ public class TerraformBuildSiteGoal extends Goal {
             Items.COBBLESTONE,
             Items.COBBLED_DEEPSLATE
     );
-    private static final Map<PlayerNpcBuildLayout, List<PlayerNpcBuildLayout.RelativeBlock>> SORTED_CLEAR_BLOCKS = new IdentityHashMap<>();
+    private static final Map<PlayerNpcEntity, ActionablePrepCache> ACTIONABLE_PREP_CACHE = new WeakHashMap<>();
+    private static final Map<PlayerNpcBuildLayout, List<PlayerNpcBuildLayout.RelativeBlock>> SORTED_CLEAR_BLOCKS = new WeakHashMap<>();
 
     private final PlayerNpcEntity playerNpc;
     private final PathNavigationAi pathNavigationAi;
@@ -131,6 +138,11 @@ public class TerraformBuildSiteGoal extends Goal {
     private int scaffoldPlaceDelayTicks;
     private int scaffoldPlaceWaitTicks;
     private int targetSearchRetryCooldownTicks;
+    private String targetSearchLayoutId = "";
+    private BlockPos targetSearchOrigin;
+    private int targetSearchClearBlockIndex;
+    private int targetSearchSupportColumnIndex;
+    private boolean targetSearchClearComplete;
     private boolean usingTemporaryMainHand;
 
     public TerraformBuildSiteGoal(PlayerNpcEntity playerNpc, double speed) {
@@ -153,24 +165,44 @@ public class TerraformBuildSiteGoal extends Goal {
                 || GatherStoneGoal.isStoneGatheringEpisodeActive(playerNpc)) {
             return false;
         }
-        return findNextTarget(serverLevel, playerNpc, true)
-                .filter(target -> canRunTargetNow(serverLevel, playerNpc, target))
-                .isPresent();
+        if (findBuildContext(playerNpc).isEmpty()) {
+            return false;
+        }
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        String layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc).orElse("");
+        ActionablePrepCache cached = ACTIONABLE_PREP_CACHE.get(playerNpc);
+        if (cached != null && cached.matches(playerNpc, serverLevel, home.orElse(null), layoutId)) {
+            return cached.actionable();
+        }
+        // Arbitration predicates must not refresh the complete footprint. Conservatively retain
+        // preparation priority until the admitted Terraform activation publishes a real result.
+        return true;
     }
 
     public static boolean hasPrepWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         if (!hasActiveBuildingJob(playerNpc, serverLevel)) {
             return false;
         }
-        return findNextTarget(serverLevel, playerNpc, true).isPresent();
+        if (findBuildContext(playerNpc).isEmpty()) {
+            return false;
+        }
+        ActionablePrepCache cached = matchingPrepCache(playerNpc, serverLevel);
+        return cached == null || cached.hasPrep();
     }
 
-    /** Strict completion check that is safe to call from daily-job selection. */
+    /** Completion arbitration consumes the last admitted footprint result. */
     public static boolean hasPrepWorkIgnoringActiveJob(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        return playerNpc != null
-                && serverLevel != null
-                && playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
-                && findNextTarget(serverLevel, playerNpc, false).isPresent();
+        if (playerNpc == null
+                || serverLevel == null
+                || !playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || findBuildContext(playerNpc).isEmpty()) {
+            return false;
+        }
+        ActionablePrepCache cached = matchingPrepCache(playerNpc, serverLevel);
+        // BeingAtHome and finished-home exploration are selector predicates. They may delay
+        // completion until Terraform refreshes an expired result, but may never rescan the full
+        // footprint synchronously from an otherwise idle entity tick.
+        return cached == null || cached.hasPrep();
     }
 
     private static boolean hasActiveBuildingJob(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -190,11 +222,8 @@ public class TerraformBuildSiteGoal extends Goal {
         if (!hasActiveBuildingJob(playerNpc, serverLevel)) {
             return false;
         }
-        Optional<TerraformTarget> target = findNextTarget(serverLevel, playerNpc, true);
-        return target.isPresent()
-                && target.get().phase() == TerraformPhase.CLEAR
-                && serverLevel.getBlockState(target.get().pos()).is(BlockTags.MINEABLE_WITH_SHOVEL)
-                && !hasTool(playerNpc, ShovelItem.class);
+        ActionablePrepCache cached = matchingPrepCache(playerNpc, serverLevel);
+        return cached != null && cached.needsShovel();
     }
 
     @Override
@@ -219,6 +248,9 @@ public class TerraformBuildSiteGoal extends Goal {
                 || GatherLogsGoal.isLogGatheringEpisodeActive(this.playerNpc)
                 || GatherStoneGoal.isStoneGatheringEpisodeActive(this.playerNpc)
                 || this.playerNpc.getTarget() != null) {
+            return false;
+        }
+        if (findBuildContext(this.playerNpc).isEmpty()) {
             return false;
         }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
@@ -248,24 +280,36 @@ public class TerraformBuildSiteGoal extends Goal {
             return true;
         }
 
-        Optional<TerraformTarget> nextTarget = this.findNextTarget(serverLevel, true);
-        if (nextTarget.isEmpty()) {
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.targetSearchRetryCooldownTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+            return false;
+        }
+        TargetSearchResult nextTarget = this.findNextTarget(serverLevel, true);
+        if (!nextTarget.complete()) {
+            publishPendingPrepCache(this.playerNpc, serverLevel);
+            int retryTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+            this.targetSearchRetryCooldownTicks = retryTicks;
+            this.canUseThrottle.retryIn(this.playerNpc, retryTicks);
+            return false;
+        }
+        publishPrepCache(this.playerNpc, serverLevel, nextTarget.target());
+        if (nextTarget.target() == null) {
             this.targetSearchRetryCooldownTicks = TARGET_SEARCH_RETRY_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(10);
             return false;
         }
 
-        if (nextTarget.get().phase() == TerraformPhase.CLEAR
-                && serverLevel.getBlockState(nextTarget.get().pos()).is(BlockTags.MINEABLE_WITH_SHOVEL)
+        if (nextTarget.target().phase() == TerraformPhase.CLEAR
+                && serverLevel.getBlockState(nextTarget.target().pos()).is(BlockTags.MINEABLE_WITH_SHOVEL)
                 && !hasTool(this.playerNpc, ShovelItem.class)) {
             return false;
         }
-        if (nextTarget.get().phase() == TerraformPhase.FILL_SUPPORT
-                && this.deferSupportFillForVerticalEscape(serverLevel, nextTarget.get().pos())) {
+        if (nextTarget.target().phase() == TerraformPhase.FILL_SUPPORT
+                && this.deferSupportFillForVerticalEscape(serverLevel, nextTarget.target().pos())) {
             this.targetSearchRetryCooldownTicks = TARGET_SEARCH_RETRY_COOLDOWN_TICKS;
             return false;
         }
 
-        this.target = nextTarget.get();
+        this.target = nextTarget.target();
         this.targetSearchRetryCooldownTicks = 0;
         return true;
     }
@@ -358,7 +402,22 @@ public class TerraformBuildSiteGoal extends Goal {
                 this.updateTaskDetail();
                 return;
             }
-            this.target = this.findNextTarget(serverLevel, true).orElse(null);
+            if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+                this.target = null;
+                this.targetSearchRetryCooldownTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+                return;
+            }
+            TargetSearchResult nextTarget = this.findNextTarget(serverLevel, true);
+            if (!nextTarget.complete()) {
+                publishPendingPrepCache(this.playerNpc, serverLevel);
+                this.target = null;
+                int retryTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+                this.targetSearchRetryCooldownTicks = retryTicks;
+                this.canUseThrottle.retryIn(this.playerNpc, retryTicks);
+                return;
+            }
+            this.target = nextTarget.target();
+            publishPrepCache(this.playerNpc, serverLevel, this.target);
             this.resetRouteClearProgress();
             this.skippedRouteClearTargets.clear();
             this.updateTaskDetail();
@@ -642,7 +701,24 @@ public class TerraformBuildSiteGoal extends Goal {
         if (this.isSupportFillEscapeHandoffTarget(this.target)) {
             this.clearSupportFillEscapeHandoff(true);
         }
-        this.target = this.findNextTarget(serverLevel, true).orElse(null);
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.target = null;
+            this.targetSearchRetryCooldownTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+            this.updateTaskDetail();
+            return;
+        }
+        TargetSearchResult nextTarget = this.findNextTarget(serverLevel, true);
+        if (!nextTarget.complete()) {
+            publishPendingPrepCache(this.playerNpc, serverLevel);
+            this.target = null;
+            int retryTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+            this.targetSearchRetryCooldownTicks = retryTicks;
+            this.canUseThrottle.retryIn(this.playerNpc, retryTicks);
+            this.updateTaskDetail();
+            return;
+        }
+        this.target = nextTarget.target();
+        publishPrepCache(this.playerNpc, serverLevel, this.target);
         if (this.target == null) {
             this.supportFillRetryCooldownTicks = SUPPORT_FILL_RETRY_COOLDOWN_TICKS;
         }
@@ -890,7 +966,8 @@ public class TerraformBuildSiteGoal extends Goal {
                 MAX_TERRAFORM_SAFE_DROP_BLOCKS,
                 TERRAFORM_LOCAL_ROUTE_RADIUS,
                 TERRAFORM_LOCAL_ROUTE_DOWN,
-                TERRAFORM_LOCAL_ROUTE_UP
+                TERRAFORM_LOCAL_ROUTE_UP,
+                MAX_TERRAFORM_LOCAL_PATH_CHECKS
         );
         if (moved) {
             this.updateTaskDetail();
@@ -1300,53 +1377,126 @@ public class TerraformBuildSiteGoal extends Goal {
         };
     }
 
-    private static Optional<TerraformTarget> findNextTarget(ServerLevel serverLevel, PlayerNpcEntity playerNpc, boolean requireFillItem) {
-        return findNextTarget(serverLevel, playerNpc, requireFillItem, List.of());
-    }
-
-    private Optional<TerraformTarget> findNextTarget(ServerLevel serverLevel, boolean requireFillItem) {
+    private TargetSearchResult findNextTarget(ServerLevel serverLevel, boolean requireFillItem) {
         this.failedDirectClearTargets.entrySet().removeIf(entry -> entry.getValue() <= serverLevel.getGameTime());
-        return findNextTarget(
-                serverLevel,
-                this.playerNpc,
-                requireFillItem,
-                this.skippedSupportTargets,
-                this.failedDirectClearTargets.keySet()
-        );
-    }
-
-    private static Optional<TerraformTarget> findNextTarget(
-            ServerLevel serverLevel,
-            PlayerNpcEntity playerNpc,
-            boolean requireFillItem,
-            List<BlockPos> skippedSupportTargets
-    ) {
-        return findNextTarget(serverLevel, playerNpc, requireFillItem, skippedSupportTargets, Set.of());
-    }
-
-    private static Optional<TerraformTarget> findNextTarget(
-            ServerLevel serverLevel,
-            PlayerNpcEntity playerNpc,
-            boolean requireFillItem,
-            List<BlockPos> skippedSupportTargets,
-            Set<BlockPos> skippedClearTargets
-    ) {
-        Optional<BuildContext> context = findBuildContext(playerNpc);
+        Optional<BuildContext> context = findBuildContext(this.playerNpc);
         if (context.isEmpty()) {
-            return Optional.empty();
+            this.resetTargetSearch();
+            return TargetSearchResult.complete(null);
         }
 
-        Optional<TerraformTarget> clearTarget = findClearTarget(
-                serverLevel,
-                playerNpc,
-                context.get(),
-                skippedClearTargets
+        BuildContext buildContext = context.get();
+        this.ensureTargetSearchContext(buildContext);
+        if (!this.targetSearchClearComplete) {
+            List<PlayerNpcBuildLayout.RelativeBlock> blocks = sortedClearBlocks(buildContext.layout());
+            int endIndex = Math.min(
+                    blocks.size(),
+                    this.targetSearchClearBlockIndex + MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE
+            );
+            for (int index = this.targetSearchClearBlockIndex; index < endIndex; index++) {
+                PlayerNpcBuildLayout.RelativeBlock block = blocks.get(index);
+                BlockPos worldPos = block.toWorld(buildContext.origin());
+                if (this.failedDirectClearTargets.containsKey(worldPos)) {
+                    continue;
+                }
+                Optional<TerraformTarget> clearTarget = clearTargetForBlock(
+                        serverLevel,
+                        this.playerNpc,
+                        buildContext.origin(),
+                        block
+                );
+                if (clearTarget.isPresent()) {
+                    TerraformTarget selected = clearTarget.get();
+                    this.resetTargetSearch();
+                    return TargetSearchResult.complete(selected);
+                }
+            }
+            this.targetSearchClearBlockIndex = endIndex;
+            if (endIndex < blocks.size()) {
+                return TargetSearchResult.pending();
+            }
+            this.targetSearchClearComplete = true;
+            // Start the support phase in a later admitted slice. Even a small blueprint must not
+            // combine its complete clear pass with another footprint/depth pass in one tick.
+            return TargetSearchResult.pending();
+        }
+
+        if (requireFillItem && !hasFillBlock(this.playerNpc)) {
+            this.resetTargetSearch();
+            return TargetSearchResult.complete(null);
+        }
+
+        PlayerNpcBuildLayout layout = buildContext.layout();
+        int totalColumns = layout.width() * layout.depth();
+        int endColumn = Math.min(
+                totalColumns,
+                this.targetSearchSupportColumnIndex + MAX_TERRAFORM_SUPPORT_COLUMNS_PER_SLICE
         );
-        if (clearTarget.isPresent()) {
-            return clearTarget;
-        }
+        for (int columnIndex = this.targetSearchSupportColumnIndex; columnIndex < endColumn; columnIndex++) {
+            int x = columnIndex % layout.width();
+            int z = columnIndex / layout.width();
+            if (!layout.isInFootprint(x, z)) {
+                continue;
+            }
 
-        return findSupportFillTarget(serverLevel, playerNpc, context.get(), requireFillItem, skippedSupportTargets);
+            BlockPos topSupport = buildContext.origin().offset(x, -1, z);
+            if (isGoodFloorBlock(serverLevel, topSupport, serverLevel.getBlockState(topSupport))) {
+                continue;
+            }
+
+            for (int dy = -SUPPORT_SCAN_DEPTH; dy <= -1; dy++) {
+                BlockPos pos = buildContext.origin().offset(x, dy, z);
+                BlockState state = serverLevel.getBlockState(pos);
+                if (this.skippedSupportTargets.contains(pos)) {
+                    continue;
+                }
+                if (!isGoodFloorBlock(serverLevel, pos, state)
+                        && PlayerNpcHomeUtil.isReplaceableForNpcBuild(serverLevel, pos)) {
+                    TerraformTarget selected = new TerraformTarget(
+                            pos.immutable(),
+                            TerraformPhase.FILL_SUPPORT,
+                            Blocks.DIRT.defaultBlockState()
+                    );
+                    this.resetTargetSearch();
+                    return TargetSearchResult.complete(selected);
+                }
+            }
+        }
+        this.targetSearchSupportColumnIndex = endColumn;
+        if (endColumn < totalColumns) {
+            return TargetSearchResult.pending();
+        }
+        this.resetTargetSearch();
+        return TargetSearchResult.complete(null);
+    }
+
+    private void ensureTargetSearchContext(BuildContext context) {
+        if (context.layout().id().equals(this.targetSearchLayoutId)
+                && context.origin().equals(this.targetSearchOrigin)) {
+            return;
+        }
+        this.resetTargetSearch();
+        this.targetSearchLayoutId = context.layout().id();
+        this.targetSearchOrigin = context.origin().immutable();
+    }
+
+    private void resetTargetSearch() {
+        this.targetSearchLayoutId = "";
+        this.targetSearchOrigin = null;
+        this.targetSearchClearBlockIndex = 0;
+        this.targetSearchSupportColumnIndex = 0;
+        this.targetSearchClearComplete = false;
+    }
+
+    private static List<PlayerNpcBuildLayout.RelativeBlock> sortedClearBlocks(PlayerNpcBuildLayout layout) {
+        synchronized (SORTED_CLEAR_BLOCKS) {
+            return SORTED_CLEAR_BLOCKS.computeIfAbsent(layout, key -> key.blocks().stream()
+                    .sorted(Comparator
+                            .comparingInt(PlayerNpcBuildLayout.RelativeBlock::y)
+                            .thenComparingInt(PlayerNpcBuildLayout.RelativeBlock::x)
+                            .thenComparingInt(PlayerNpcBuildLayout.RelativeBlock::z))
+                    .toList());
+        }
     }
 
     private static boolean canRunTargetNow(ServerLevel serverLevel, PlayerNpcEntity playerNpc, TerraformTarget target) {
@@ -1359,6 +1509,52 @@ public class TerraformBuildSiteGoal extends Goal {
 
         BlockState state = serverLevel.getBlockState(target.pos());
         return !state.is(BlockTags.MINEABLE_WITH_SHOVEL) || hasTool(playerNpc, ShovelItem.class);
+    }
+
+    private static ActionablePrepCache matchingPrepCache(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        String layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc).orElse("");
+        ActionablePrepCache cached = ACTIONABLE_PREP_CACHE.get(playerNpc);
+        return cached != null && cached.matches(playerNpc, serverLevel, home.orElse(null), layoutId)
+                ? cached
+                : null;
+    }
+
+    private static void publishPrepCache(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            TerraformTarget target
+    ) {
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        String layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc).orElse("");
+        boolean hasPrep = target != null;
+        boolean needsShovel = hasPrep
+                && target.phase() == TerraformPhase.CLEAR
+                && serverLevel.getBlockState(target.pos()).is(BlockTags.MINEABLE_WITH_SHOVEL)
+                && !hasTool(playerNpc, ShovelItem.class);
+        ACTIONABLE_PREP_CACHE.put(playerNpc, new ActionablePrepCache(
+                playerNpc.tickCount,
+                serverLevel.dimension().location(),
+                home.map(PlayerNpcHomeUtil.HomeArea::origin).orElse(null),
+                layoutId,
+                hasPrep,
+                hasPrep && canRunTargetNow(serverLevel, playerNpc, target),
+                needsShovel
+        ));
+    }
+
+    private static void publishPendingPrepCache(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        String layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc).orElse("");
+        ACTIONABLE_PREP_CACHE.put(playerNpc, new ActionablePrepCache(
+                playerNpc.tickCount,
+                serverLevel.dimension().location(),
+                home.map(PlayerNpcHomeUtil.HomeArea::origin).orElse(null),
+                layoutId,
+                true,
+                false,
+                false
+        ));
     }
 
     private boolean deferSupportFillForVerticalEscape(ServerLevel serverLevel, BlockPos supportPos) {
@@ -1466,35 +1662,6 @@ public class TerraformBuildSiteGoal extends Goal {
         return Optional.of(new BuildContext(layout.get(), home.get().origin()));
     }
 
-    private static Optional<TerraformTarget> findClearTarget(
-            ServerLevel serverLevel,
-            PlayerNpcEntity playerNpc,
-            BuildContext context,
-            Set<BlockPos> skippedClearTargets
-    ) {
-        for (PlayerNpcBuildLayout.RelativeBlock block : sortedClearBlocks(context.layout())) {
-            if (skippedClearTargets.contains(block.toWorld(context.origin()))) {
-                continue;
-            }
-            Optional<TerraformTarget> target = clearTargetForBlock(serverLevel, playerNpc, context.origin(), block);
-            if (target.isPresent()) {
-                return target;
-            }
-        }
-        return Optional.empty();
-    }
-
-    private static List<PlayerNpcBuildLayout.RelativeBlock> sortedClearBlocks(PlayerNpcBuildLayout layout) {
-        synchronized (SORTED_CLEAR_BLOCKS) {
-            return SORTED_CLEAR_BLOCKS.computeIfAbsent(layout, key -> key.blocks().stream()
-                    .sorted(Comparator
-                            .comparingInt(PlayerNpcBuildLayout.RelativeBlock::y)
-                            .thenComparingInt(PlayerNpcBuildLayout.RelativeBlock::x)
-                            .thenComparingInt(PlayerNpcBuildLayout.RelativeBlock::z))
-                    .toList());
-        }
-    }
-
     private static Optional<TerraformTarget> clearTargetForBlock(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockPos origin, PlayerNpcBuildLayout.RelativeBlock block) {
         BlockPos pos = block.toWorld(origin);
         BlockState targetState = block.state();
@@ -1513,46 +1680,6 @@ public class TerraformBuildSiteGoal extends Goal {
             return Optional.empty();
         }
         return Optional.of(new TerraformTarget(pos.immutable(), TerraformPhase.CLEAR, targetState));
-    }
-
-    private static Optional<TerraformTarget> findSupportFillTarget(
-            ServerLevel serverLevel,
-            PlayerNpcEntity playerNpc,
-            BuildContext context,
-            boolean requireFillItem,
-            List<BlockPos> skippedSupportTargets
-    ) {
-        if (requireFillItem && !hasFillBlock(playerNpc)) {
-            return Optional.empty();
-        }
-
-        PlayerNpcBuildLayout layout = context.layout();
-        BlockPos origin = context.origin();
-        for (int x = 0; x < layout.width(); x++) {
-            for (int z = 0; z < layout.depth(); z++) {
-                if (!layout.isInFootprint(x, z)) {
-                    continue;
-                }
-
-                BlockPos topSupport = origin.offset(x, -1, z);
-                if (isGoodFloorBlock(serverLevel, topSupport, serverLevel.getBlockState(topSupport))) {
-                    continue;
-                }
-
-                for (int dy = -SUPPORT_SCAN_DEPTH; dy <= -1; dy++) {
-                    BlockPos pos = origin.offset(x, dy, z);
-                    BlockState state = serverLevel.getBlockState(pos);
-                    if (skippedSupportTargets.contains(pos)) {
-                        continue;
-                    }
-                    if (!isGoodFloorBlock(serverLevel, pos, state)
-                            && PlayerNpcHomeUtil.isReplaceableForNpcBuild(serverLevel, pos)) {
-                        return Optional.of(new TerraformTarget(pos.immutable(), TerraformPhase.FILL_SUPPORT, Blocks.DIRT.defaultBlockState()));
-                    }
-                }
-            }
-        }
-        return Optional.empty();
     }
 
     private boolean canClearForBuild(ServerLevel serverLevel, BlockPos pos, BlockState state) {
@@ -2038,6 +2165,41 @@ public class TerraformBuildSiteGoal extends Goal {
     }
 
     private record TerraformTarget(BlockPos pos, TerraformPhase phase, BlockState targetState) {
+    }
+
+    private record TargetSearchResult(TerraformTarget target, boolean complete) {
+        private static TargetSearchResult pending() {
+            return new TargetSearchResult(null, false);
+        }
+
+        private static TargetSearchResult complete(TerraformTarget target) {
+            return new TargetSearchResult(target, true);
+        }
+    }
+
+    private record ActionablePrepCache(
+            int tick,
+            ResourceLocation dimension,
+            BlockPos homeOrigin,
+            String layoutId,
+            boolean hasPrep,
+            boolean actionable,
+            boolean needsShovel
+    ) {
+        private boolean matches(
+                PlayerNpcEntity playerNpc,
+                ServerLevel serverLevel,
+                PlayerNpcHomeUtil.HomeArea home,
+                String currentLayoutId
+        ) {
+            int age = playerNpc.tickCount - this.tick;
+            return age >= 0
+                    && age <= ACTIONABLE_PREP_CACHE_TICKS
+                    + Math.floorMod(playerNpc.getUUID().hashCode(), 10)
+                    && this.dimension.equals(serverLevel.dimension().location())
+                    && java.util.Objects.equals(this.homeOrigin, home == null ? null : home.origin())
+                    && this.layoutId.equals(currentLayoutId);
+        }
     }
 
     private enum TerraformPhase {

@@ -26,12 +26,15 @@ import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.server.ServerStartedEvent;
+import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
@@ -48,15 +51,19 @@ public final class PlayerNpcGoalTraceLogger {
     private static final String LAST_STATE_KEY = "PlayerNpcGoalTraceLastState";
     private static final String LAST_DETAIL_KEY = "PlayerNpcGoalTraceLastDetail";
     private static final int TRACE_INTERVAL_TICKS = 20;
+    private static final int ALL_TRACE_DETAIL_INTERVAL_TICKS = 20 * 10;
     private static final int UNCHANGED_ACTIVE_TRACE_INTERVAL_TICKS = 20 * 5;
     private static final int UNCHANGED_PASSIVE_TRACE_INTERVAL_TICKS = 20 * 10;
     private static final int BUILDING_TEXT_CACHE_TICKS = 20 * 5;
+    private static final int MAX_ALL_TRACE_LINES_PER_TICK = 1;
+    private static final int ALL_TRACE_SCAN_INTERVAL_TICKS = 4;
     private static final double MAX_NON_INSPECTATOR_TRACE_DISTANCE_SQR = 64.0D * 64.0D;
     private static final String PASSIVE_HOME_STATE = "ai.player_npc.being_at_home";
     private static final Map<PlayerNpcEntity, BuildingTextCache> BUILDING_TEXT_CACHE = new WeakHashMap<>();
     private static final Map<UUID, AllTraceSnapshot> ALL_TRACE_SNAPSHOTS = new HashMap<>();
     private static boolean allTraceEnabled;
     private static String allTraceViewer = "server";
+    private static int allTraceScanCursor;
 
     private PlayerNpcGoalTraceLogger() {
     }
@@ -66,6 +73,7 @@ public final class PlayerNpcGoalTraceLogger {
         if (event.phase != TickEvent.Phase.END) {
             return;
         }
+        long performanceStartNanos = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
 
         long serverTick = event.getServer().getTickCount();
         tickAllNpcTrace(event.getServer(), serverTick);
@@ -102,6 +110,7 @@ public final class PlayerNpcGoalTraceLogger {
             data.putString(LAST_STATE_KEY, state);
             data.putString(LAST_DETAIL_KEY, detail);
         }
+        PlayerNpcPerformanceMonitor.recordTraceLoggerTick(performanceStartNanos);
     }
 
     @SubscribeEvent
@@ -115,7 +124,21 @@ public final class PlayerNpcGoalTraceLogger {
     public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             stopTrace(player, "viewer disconnected");
+            if (allTraceEnabled
+                    && allTraceViewer.equals(sanitize(player.getGameProfile().getName()))) {
+                setAllTraceEnabled(false, player.getGameProfile().getName());
+            }
         }
+    }
+
+    @SubscribeEvent
+    public static void onServerStarted(ServerStartedEvent event) {
+        resetAllTraceState();
+    }
+
+    @SubscribeEvent
+    public static void onServerStopping(ServerStoppingEvent event) {
+        resetAllTraceState();
     }
 
     public static boolean isTracing(ServerPlayer player, PlayerNpcEntity playerNpc) {
@@ -135,7 +158,8 @@ public final class PlayerNpcGoalTraceLogger {
     }
 
     public static boolean isEffectivelyTracing(ServerPlayer player, PlayerNpcEntity playerNpc) {
-        return allTraceEnabled || isTracing(player, playerNpc);
+        return (allTraceEnabled && PlayerNpcAiWorkBudget.hasResource(playerNpc))
+                || isTracing(player, playerNpc);
     }
 
     public static void setTraceEnabled(ServerPlayer player, PlayerNpcEntity playerNpc, boolean enabled) {
@@ -218,19 +242,32 @@ public final class PlayerNpcGoalTraceLogger {
         allTraceEnabled = enabled;
         allTraceViewer = sanitize(viewerName).isBlank() ? "server" : sanitize(viewerName);
         ALL_TRACE_SNAPSHOTS.clear();
+        allTraceScanCursor = 0;
 
         SmartNpc.LOGGER.info(
-                "Smart NPC goal trace all {}: viewer={}",
+                "Smart NPC scheduler-resource trace {}: viewer={}",
                 enabled ? "enabled" : "disabled",
                 allTraceViewer
         );
     }
 
+    private static void resetAllTraceState() {
+        allTraceEnabled = false;
+        allTraceViewer = "server";
+        ALL_TRACE_SNAPSHOTS.clear();
+        BUILDING_TEXT_CACHE.clear();
+        allTraceScanCursor = 0;
+    }
+
     public static int countLoadedPlayerNpcs(MinecraftServer server) {
-        int count = 0;
         if (server == null) {
             return 0;
         }
+        if (PlayerNpcForceTickManager.isEnabled()) {
+            return PlayerNpcForceTickManager.aliveTrackedNpcs(server).size();
+        }
+
+        int count = 0;
         for (ServerLevel level : server.getAllLevels()) {
             for (var entity : level.getAllEntities()) {
                 if (entity instanceof PlayerNpcEntity playerNpc && playerNpc.isAlive() && !playerNpc.isRemoved()) {
@@ -245,34 +282,85 @@ public final class PlayerNpcGoalTraceLogger {
         if (!allTraceEnabled || server == null) {
             return;
         }
+        // Full trace formatting includes inventory/building/navigation snapshots and may write a
+        // very large line. It is diagnostic work, so sample one rotating NPC at 5 Hz rather than
+        // allocating the tracked list and formatting a candidate on every server tick.
+        if (Math.floorMod(serverTick, ALL_TRACE_SCAN_INTERVAL_TICKS) != 0) {
+            return;
+        }
 
+        String viewerName = allTraceViewer + "[resources]";
+        int loggedLines = 0;
+        PlayerNpcAiWorkBudget.ResourceSnapshot resources = PlayerNpcAiWorkBudget.resourceSnapshot(server);
+        Set<UUID> resourceHolderIds = resources.holders().stream()
+                .map(PlayerNpcAiWorkBudget.ResourceHolder::npcId)
+                .collect(Collectors.toSet());
+        Iterable<PlayerNpcEntity> playerNpcs = PlayerNpcForceTickManager.isEnabled()
+                ? PlayerNpcForceTickManager.aliveTrackedNpcs(server)
+                : loadedPlayerNpcsByLevel(server);
+        List<PlayerNpcEntity> aliveNpcs = new java.util.ArrayList<>();
         Set<UUID> seen = new HashSet<>();
-        String viewerName = allTraceViewer + "[all]";
-        for (ServerLevel level : server.getAllLevels()) {
-            for (var entity : level.getAllEntities()) {
-                if (!(entity instanceof PlayerNpcEntity playerNpc) || !playerNpc.isAlive() || playerNpc.isRemoved()) {
-                    continue;
-                }
-
-                UUID npcId = playerNpc.getUUID();
-                seen.add(npcId);
-                String state = sanitize(playerNpc.getCurrentAiState());
-                String detail = effectiveTraceDetail(playerNpc, state, sanitize(playerNpc.getCurrentAiDetail()));
-                AllTraceSnapshot previous = ALL_TRACE_SNAPSHOTS.get(npcId);
-                String previousState = previous == null ? "" : previous.state();
-                String previousDetail = previous == null ? "" : previous.detail();
-                boolean changed = previous == null || !previousState.equals(state) || !previousDetail.equals(detail);
-                long lastLogTick = previous == null ? 0L : previous.lastLogTick();
-                int interval = changed ? TRACE_INTERVAL_TICKS : unchangedTraceInterval(state);
-                if (lastLogTick > 0L && serverTick - lastLogTick < interval) {
-                    continue;
-                }
-
-                logTraceLine(viewerName, playerNpc, serverTick, state, detail, previousState);
-                ALL_TRACE_SNAPSHOTS.put(npcId, new AllTraceSnapshot(serverTick, state, detail));
+        for (PlayerNpcEntity playerNpc : playerNpcs) {
+            if (playerNpc.isAlive()
+                    && !playerNpc.isRemoved()
+                    && resourceHolderIds.contains(playerNpc.getUUID())) {
+                aliveNpcs.add(playerNpc);
+                seen.add(playerNpc.getUUID());
             }
         }
+        if (aliveNpcs.isEmpty()) {
+            ALL_TRACE_SNAPSHOTS.clear();
+            allTraceScanCursor = 0;
+            return;
+        }
+
+        // Trace-all follows scheduler-resource ownership. Waiting NPCs use the cheap stroll but do
+        // not allocate full trace formatting; only the bounded worker/probe holder set is rotated.
+        int inspected = Math.min(MAX_ALL_TRACE_LINES_PER_TICK, aliveNpcs.size());
+        int start = Math.floorMod(allTraceScanCursor, aliveNpcs.size());
+        for (int offset = 0; offset < inspected; offset++) {
+            PlayerNpcEntity playerNpc = aliveNpcs.get((start + offset) % aliveNpcs.size());
+            UUID npcId = playerNpc.getUUID();
+            String state = sanitize(playerNpc.getCurrentAiState());
+            String detail = effectiveTraceDetail(playerNpc, state, sanitize(playerNpc.getCurrentAiDetail()));
+            AllTraceSnapshot previous = ALL_TRACE_SNAPSHOTS.get(npcId);
+            String previousState = previous == null ? "" : previous.state();
+            String previousDetail = previous == null ? "" : previous.detail();
+            boolean stateChanged = previous == null || !previousState.equals(state);
+            boolean detailChanged = previous == null || !previousDetail.equals(detail);
+            long lastLogTick = previous == null ? 0L : previous.lastLogTick();
+            // Preserve prompt state-transition diagnostics, but do not let progress counters and
+            // moving detail text serialize a giant trace line for every NPC every four seconds.
+            int interval = stateChanged
+                    ? TRACE_INTERVAL_TICKS
+                    : detailChanged
+                    ? ALL_TRACE_DETAIL_INTERVAL_TICKS
+                    : unchangedTraceInterval(state);
+            if (lastLogTick > 0L && serverTick - lastLogTick < interval) {
+                continue;
+            }
+            if (loggedLines >= MAX_ALL_TRACE_LINES_PER_TICK) {
+                continue;
+            }
+
+            logTraceLine(viewerName, playerNpc, serverTick, state, detail, previousState);
+            ALL_TRACE_SNAPSHOTS.put(npcId, new AllTraceSnapshot(serverTick, state, detail));
+            loggedLines++;
+        }
+        allTraceScanCursor = (start + inspected) % aliveNpcs.size();
         ALL_TRACE_SNAPSHOTS.keySet().removeIf(uuid -> !seen.contains(uuid));
+    }
+
+    private static List<PlayerNpcEntity> loadedPlayerNpcsByLevel(MinecraftServer server) {
+        List<PlayerNpcEntity> result = new java.util.ArrayList<>();
+        for (ServerLevel level : server.getAllLevels()) {
+            for (var entity : level.getAllEntities()) {
+                if (entity instanceof PlayerNpcEntity playerNpc && playerNpc.isAlive() && !playerNpc.isRemoved()) {
+                    result.add(playerNpc);
+                }
+            }
+        }
+        return result;
     }
 
     private static void logTraceLine(String viewerName, PlayerNpcEntity playerNpc, long serverTick, String state, String detail, String previousState) {
@@ -326,6 +414,9 @@ public final class PlayerNpcGoalTraceLogger {
                 || !serverLevel.isInWorldBounds(pos)
                 || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
             return "pos=" + posText(pos) + ",outOfBounds=true";
+        }
+        if (!serverLevel.hasChunkAt(pos)) {
+            return "pos=" + posText(pos) + ",loaded=false";
         }
 
         BlockState state = serverLevel.getBlockState(pos);

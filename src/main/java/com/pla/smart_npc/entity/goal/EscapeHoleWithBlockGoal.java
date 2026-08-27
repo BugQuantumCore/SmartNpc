@@ -76,6 +76,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int GATHER_PATH_RECOVERY_MAX_TICKS = 20 * 30;
     private static final int GATHER_PATH_FALLBACK_FAILED_COOLDOWN_TICKS = 20 * 30;
     private static final int PILLAR_SEARCH_RADIUS = 5;
+    private static final int MAX_PILLAR_PLAN_CANDIDATES = 16;
     private static final int PILLAR_PLAN_RETRY_TICKS = 20;
     private static final int PILLAR_SURFACE_SCAN_UP = 96;
     private static final double PILLAR_BASE_REACHED_SQR = 1.2D * 1.2D;
@@ -2746,7 +2747,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         candidates.sort(Comparator
                 .comparingDouble(feet::distSqr)
                 .thenComparingDouble(pos -> routeTarget == null ? 0.0D : routeTarget.distSqr(pos)));
+        int inspected = 0;
         for (BlockPos base : candidates) {
+            if (inspected++ >= MAX_PILLAR_PLAN_CANDIDATES) {
+                break;
+            }
             PillarPlan plan = this.createPillarPlan(serverLevel, base, routeTarget);
             if (plan != null) {
                 return plan;
@@ -2772,6 +2777,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private PillarPlan createPillarPlan(ServerLevel serverLevel, BlockPos base, BlockPos routeTarget) {
+        if (!serverLevel.hasChunkAt(base)) {
+            return null;
+        }
         BlockState baseState = serverLevel.getBlockState(base);
         if (!this.canStandAt(serverLevel, base) || !this.canUsePillarBaseState(serverLevel, base, baseState)) {
             return null;
@@ -2789,6 +2797,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         int scanTop = Math.min(serverLevel.getMaxBuildHeight() - 3, base.getY() + PILLAR_SURFACE_SCAN_UP);
         for (int y = base.getY(); y <= scanTop; y++) {
             BlockPos feetAtY = new BlockPos(base.getX(), y, base.getZ());
+            if (!serverLevel.hasChunkAt(feetAtY)) {
+                return null;
+            }
             if (!this.hasOpenOrClearableBodySpace(serverLevel, feetAtY)) {
                 return null;
             }

@@ -9,6 +9,7 @@ import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -29,6 +30,7 @@ import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.function.Predicate;
@@ -43,10 +45,12 @@ public class ExploreAroundGoal extends Goal {
             {6, 12},
             {0, 6}
     };
-    private static final int ATTEMPTS_PER_RADIUS = 4;
+    private static final int ATTEMPTS_PER_RADIUS = 1;
     private static final int MAX_EXPLORE_TICKS = 20 * 45;
     private static final int REPATH_INTERVAL_TICKS = 20 * 2;
     private static final int RADIUS_RETRY_COOLDOWN_TICKS = 20;
+    private static final int WATER_ESCAPE_RETRY_MIN_TICKS = 20 * 8;
+    private static final int WATER_ESCAPE_RETRY_RANDOM_TICKS = 20 * 8;
     private static final int UPWARD_ESCAPE_REQUEST_TICKS = 20 * 8;
     private static final int MAX_EXPLORE_PILLAR_BLOCKS = 10;
     private static final int MAX_EXPLORE_SAFE_DROP_BLOCKS = 5;
@@ -59,14 +63,17 @@ public class ExploreAroundGoal extends Goal {
     private static final int FAILED_CLIMB_FALLBACK_RADIUS = 8;
     private static final int FAILED_CLIMB_FALLBACK_MIN_DISTANCE = 4;
     private static final int FAILED_CLIMB_FALLBACK_VERTICAL_RANGE = 2;
-    private static final int FAILED_CLIMB_FALLBACK_PATH_CHECKS = 32;
+    private static final int FAILED_CLIMB_FALLBACK_PATH_CHECKS = 1;
     private static final int BUILDING_LOG_LOCAL_SURFACE_RADIUS = 18;
     private static final int BUILDING_LOG_LOCAL_SURFACE_MIN_RADIUS = 4;
+    private static final int BUILDING_LOG_LOCAL_SURFACE_COLUMN_CHECKS = 64;
+    private static final int BUILDING_LOG_LOCAL_SURFACE_SCAN_STRIDE = 67;
     private static final int BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL = 10;
-    private static final int BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS = 8;
+    private static final int BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS = 1;
+    private static final double BUILDING_LOG_SCAN_RESET_DISTANCE_SQR = 4.0D * 4.0D;
     private static final int RETURN_HOME_REQUEST_TICKS = 20 * 120;
     private static final int RETURN_HOME_RETRY_COOLDOWN_TICKS = 20 * 15;
-    private static final int MAX_LOCAL_ESCAPE_PATH_CHECKS = 6;
+    private static final int MAX_LOCAL_ESCAPE_PATH_CHECKS = 1;
     private static final int LOCAL_SURFACE_ESCAPE_RADIUS = 6;
     private static final int MIN_LOCAL_SURFACE_NEIGHBORS = 2;
     private static final int RECENT_ROUTE_MEMORY_TICKS = 20;
@@ -104,6 +111,7 @@ public class ExploreAroundGoal extends Goal {
     private final boolean continueAcrossReachedTargets;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle(EXPLORE_CAN_USE_INTERVAL_TICKS);
     private BlockPos targetPos;
+    private Path plannedTargetPath;
     private int exploreTicks;
     private int repathTicks;
     private int searchRadiusIndex;
@@ -111,6 +119,7 @@ public class ExploreAroundGoal extends Goal {
     private int nextSearchTick;
     private int nextContinuePredicateCheckTick;
     private int nextEscapeRequestTick;
+    private int subGoalProbeReadyTick = Integer.MIN_VALUE;
     private boolean continuePredicatesAllowed = true;
     private boolean waitingForRetry;
     private BlockPos forcedDropTargetPos;
@@ -119,12 +128,17 @@ public class ExploreAroundGoal extends Goal {
     private int movementPaceTicks;
     private boolean explorationSprinting;
     private boolean failedClimbFallbackWalk;
+    private boolean localWaterEscape;
     private final Set<BlockPos> skippedRouteFoliage = new HashSet<>();
     private List<BlockPos> recentRouteNodes = List.of();
     private BlockPos recentRouteTarget;
+    private Path recentRouteSourcePath;
+    private int recentRouteSourceNextNode = -1;
     private BlockPos requestedRouteFoliageClear;
+    private BlockPos buildingLogSurfaceScanOrigin;
     private int recentRouteUntilTick;
     private int routeFoliageClearAttempts;
+    private int buildingLogSurfaceScanCursor = -1;
 
     public ExploreAroundGoal(
             PlayerNpcEntity playerNpc,
@@ -247,8 +261,32 @@ public class ExploreAroundGoal extends Goal {
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
-        if (!this.shouldExplore.test(serverLevel) || this.shouldYieldToSubGoal.test(serverLevel)) {
+        if (!this.shouldExplore.test(serverLevel)) {
             return false;
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.nextSearchTick = this.playerNpc.tickCount + 1 + this.playerNpc.getRandom().nextInt(4);
+            return false;
+        }
+        // Survival escape must not run the resource predicate/tree scan first. A wet NPC has no
+        // usable land work route, and the local escape state below owns this admitted batch.
+        if (!this.isInWater(serverLevel)) {
+            if (this.shouldYieldToSubGoal.test(serverLevel)) {
+                this.subGoalProbeReadyTick = Integer.MIN_VALUE;
+                return false;
+            }
+            if (this.subGoalProbeReadyTick != this.playerNpc.tickCount) {
+                // The resource predicate may have used its one path to prove there is no usable
+                // nearby target. Defer exploration selection so it cannot add a second path to
+                // the same admitted NPC tick. The cached predicate is cheap on the retry.
+                this.subGoalProbeReadyTick = this.playerNpc.tickCount + 1;
+                this.nextSearchTick = this.playerNpc.tickCount + 1;
+                this.canUseThrottle.retryIn(this.playerNpc, 1);
+                return false;
+            }
+            this.subGoalProbeReadyTick = Integer.MIN_VALUE;
+        } else {
+            this.subGoalProbeReadyTick = Integer.MIN_VALUE;
         }
 
         this.clearForcedDrop();
@@ -256,6 +294,10 @@ public class ExploreAroundGoal extends Goal {
         this.retryWaitTicks = 0;
         this.targetPos = this.findReachableSurfaceTarget(serverLevel);
         if (this.targetPos == null) {
+            if (this.isInWater(serverLevel)) {
+                this.scheduleWaterEscapeRetry();
+                return false;
+            }
             if (this.tryStartMiningLogColumnDrop(serverLevel)) {
                 return true;
             }
@@ -288,6 +330,12 @@ public class ExploreAroundGoal extends Goal {
             return false;
         }
 
+        if (this.localWaterEscape) {
+            return this.targetPos != null
+                    && this.exploreTicks < MAX_EXPLORE_TICKS
+                    && this.isInWater(serverLevel);
+        }
+
         if (this.forcedDropTargetPos != null) {
             return this.pathStuckFallbackAi.isRunning()
                     || (this.forcedDropTicks > 0
@@ -297,9 +345,17 @@ public class ExploreAroundGoal extends Goal {
         }
 
         if (this.playerNpc.tickCount >= this.nextContinuePredicateCheckTick) {
-            this.nextContinuePredicateCheckTick = this.playerNpc.tickCount + CONTINUE_PREDICATE_INTERVAL_TICKS;
-            this.continuePredicatesAllowed = this.shouldExplore.test(serverLevel)
-                    && !this.shouldYieldToSubGoal.test(serverLevel);
+            if (PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+                this.nextContinuePredicateCheckTick = this.playerNpc.tickCount
+                        + CONTINUE_PREDICATE_INTERVAL_TICKS
+                        + this.playerNpc.getRandom().nextInt(5);
+                this.continuePredicatesAllowed = this.shouldExplore.test(serverLevel)
+                        && !this.shouldYieldToSubGoal.test(serverLevel);
+            } else {
+                this.nextContinuePredicateCheckTick = this.playerNpc.tickCount
+                        + 1
+                        + this.playerNpc.getRandom().nextInt(4);
+            }
         }
         if (!this.continuePredicatesAllowed) {
             return false;
@@ -327,12 +383,16 @@ public class ExploreAroundGoal extends Goal {
         this.skippedRouteFoliage.clear();
         this.recentRouteNodes = List.of();
         this.recentRouteTarget = null;
+        this.recentRouteSourcePath = null;
+        this.recentRouteSourceNextNode = -1;
         this.requestedRouteFoliageClear = null;
         this.recentRouteUntilTick = 0;
         this.routeFoliageClearAttempts = 0;
         this.stopExplorationSprint();
         this.continuePredicatesAllowed = true;
-        this.nextContinuePredicateCheckTick = 0;
+        this.nextContinuePredicateCheckTick = this.playerNpc.tickCount
+                + 1
+                + Math.floorMod(this.playerNpc.getUUID().hashCode(), CONTINUE_PREDICATE_INTERVAL_TICKS);
         this.playerNpc.setCurrentAiState("ai.player_npc.exploring");
         if (this.waitingForRetry) {
             this.playerNpc.setCurrentAiDetail(this.retryDetail());
@@ -348,6 +408,10 @@ public class ExploreAroundGoal extends Goal {
                 ? "walking after blocked exploration climb"
                 : this.detail);
         if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            if (this.localWaterEscape) {
+                this.pathNavigationAi.tickLocalWaterEscape(serverLevel, this.speed);
+                return;
+            }
             this.moveToTarget(serverLevel);
         }
     }
@@ -363,6 +427,18 @@ public class ExploreAroundGoal extends Goal {
         }
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             this.targetPos = null;
+            return;
+        }
+
+
+        if (this.localWaterEscape) {
+            if (this.pathNavigationAi.tickLocalWaterEscape(serverLevel, this.speed)) {
+                return;
+            }
+            this.targetPos = null;
+            this.localWaterEscape = false;
+            this.scheduleWaterEscapeRetry();
+            this.playerNpc.setCurrentAiDetail("water escape unavailable; backing off");
             return;
         }
 
@@ -387,10 +463,21 @@ public class ExploreAroundGoal extends Goal {
 
         this.rememberCurrentNavigationRoute();
         boolean shouldRepath = this.repathTicks-- <= 0;
+        boolean navigationEnded = this.playerNpc.getNavigation().isDone()
+                || this.playerNpc.getNavigation().isStuck();
         if (shouldRepath
-                && (this.playerNpc.getNavigation().isDone() || this.playerNpc.getNavigation().isStuck())
+                && navigationEnded
                 && this.tryStartRouteFoliageClear(serverLevel, true)) {
             this.repathTicks = REPATH_INTERVAL_TICKS;
+            return;
+        }
+        if (shouldRepath
+                && navigationEnded
+                && (this.playerNpc.getNavigation().getPath() == null || this.playerNpc.getNavigation().isStuck())
+                && !this.isGenuinelyLocalDescent(this.playerNpc.blockPosition(), this.targetPos)) {
+            this.playerNpc.setCurrentAiDetail("exploration route ended; choosing another target");
+            this.targetPos = null;
+            this.scheduleRetry(serverLevel);
             return;
         }
 
@@ -402,8 +489,10 @@ public class ExploreAroundGoal extends Goal {
                 30.0F,
                 30.0F
         );
-        if (shouldRepath) {
+        if (shouldRepath && navigationEnded) {
             this.moveToTarget(serverLevel);
+            this.repathTicks = REPATH_INTERVAL_TICKS;
+        } else if (shouldRepath) {
             this.repathTicks = REPATH_INTERVAL_TICKS;
         }
     }
@@ -412,6 +501,7 @@ public class ExploreAroundGoal extends Goal {
     public void stop() {
         ACTIVE_SUPPLY_EXPLORERS.remove(this.playerNpc);
         this.targetPos = null;
+        this.plannedTargetPath = null;
         this.exploreTicks = 0;
         this.repathTicks = 0;
         this.retryWaitTicks = 0;
@@ -419,11 +509,14 @@ public class ExploreAroundGoal extends Goal {
         this.continuePredicatesAllowed = true;
         this.waitingForRetry = false;
         this.failedClimbFallbackWalk = false;
+        this.localWaterEscape = false;
         this.routeFoliageClearBlockAi.stop();
         this.routeFoliageToolAi.restoreMainHand();
         this.skippedRouteFoliage.clear();
         this.recentRouteNodes = List.of();
         this.recentRouteTarget = null;
+        this.recentRouteSourcePath = null;
+        this.recentRouteSourceNextNode = -1;
         this.requestedRouteFoliageClear = null;
         this.recentRouteUntilTick = 0;
         this.routeFoliageClearAttempts = 0;
@@ -436,8 +529,18 @@ public class ExploreAroundGoal extends Goal {
     }
 
     private BlockPos findReachableSurfaceTarget(ServerLevel serverLevel) {
+        this.plannedTargetPath = null;
         BlockPos center = this.playerNpc.blockPosition();
         boolean waterTravel = this.isInWater(serverLevel);
+        this.localWaterEscape = false;
+        if (waterTravel) {
+            if (this.pathNavigationAi.canStartLocalWaterEscape(serverLevel)) {
+                this.localWaterEscape = true;
+                this.searchRadiusIndex = 0;
+                return center.immutable();
+            }
+            return null;
+        }
         int[] band = SEARCH_DISTANCE_BANDS[Math.max(0, Math.min(this.searchRadiusIndex, SEARCH_DISTANCE_BANDS.length - 1))];
         for (int attempt = 0; attempt < ATTEMPTS_PER_RADIUS; attempt++) {
             double angle = this.playerNpc.getRandom().nextDouble() * Math.PI * 2.0D;
@@ -454,9 +557,16 @@ public class ExploreAroundGoal extends Goal {
             }
 
             Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
-            if (waterTravel
-                    || this.pathNavigationAi.isValidPathTo(candidate, path)
-                    || this.pathNavigationAi.canSafelyDropTo(serverLevel, candidate, MAX_EXPLORE_SAFE_DROP_BLOCKS)) {
+            boolean validPath = this.pathNavigationAi.isValidPathTo(candidate, path);
+            boolean localSafeDrop = this.isGenuinelyLocalDescent(center, candidate)
+                    && this.pathNavigationAi.canSafelyDropToLocalTarget(
+                    serverLevel,
+                    candidate,
+                    MAX_EXPLORE_SAFE_DROP_BLOCKS,
+                    2
+            );
+            if (validPath || localSafeDrop) {
+                this.plannedTargetPath = validPath ? path : null;
                 this.searchRadiusIndex = 0;
                 this.nextSearchTick = 0;
                 return candidate.immutable();
@@ -476,45 +586,72 @@ public class ExploreAroundGoal extends Goal {
     }
 
     private BlockPos findBuildingLogLocalSurfaceTarget(ServerLevel serverLevel, BlockPos center) {
+        if (this.buildingLogSurfaceScanOrigin == null
+                || this.buildingLogSurfaceScanOrigin.distSqr(center) > BUILDING_LOG_SCAN_RESET_DISTANCE_SQR) {
+            this.buildingLogSurfaceScanOrigin = center.immutable();
+            this.buildingLogSurfaceScanCursor = -1;
+        }
+        BlockPos scanCenter = this.buildingLogSurfaceScanOrigin;
         List<BlockPos> candidates = new ArrayList<>();
         int radius = BUILDING_LOG_LOCAL_SURFACE_RADIUS;
         int minRadiusSqr = BUILDING_LOG_LOCAL_SURFACE_MIN_RADIUS * BUILDING_LOG_LOCAL_SURFACE_MIN_RADIUS;
         int maxRadiusSqr = radius * radius;
-        for (int dx = -radius; dx <= radius; dx++) {
-            for (int dz = -radius; dz <= radius; dz++) {
-                int distanceSqr = dx * dx + dz * dz;
-                if (distanceSqr < minRadiusSqr || distanceSqr > maxRadiusSqr) {
-                    continue;
-                }
-
-                int x = center.getX() + dx;
-                int z = center.getZ() + dz;
-                if (!isColumnLoaded(serverLevel, x, z)) {
-                    continue;
-                }
-                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-                BlockPos candidate = new BlockPos(x, y, z);
-                if (PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)
-                        || !this.isSafeExploreTarget(serverLevel, center, candidate)) {
-                    continue;
-                }
-                candidates.add(candidate.immutable());
+        int diameter = radius * 2 + 1;
+        int totalOffsets = diameter * diameter;
+        int startIndex = this.buildingLogSurfaceScanCursor < 0
+                ? this.playerNpc.getRandom().nextInt(totalOffsets)
+                : this.buildingLogSurfaceScanCursor;
+        int checkedColumns = 0;
+        int attemptedOffsets = 0;
+        for (;
+             attemptedOffsets < totalOffsets && checkedColumns < BUILDING_LOG_LOCAL_SURFACE_COLUMN_CHECKS;
+             attemptedOffsets++) {
+            // The stride is coprime with the 37x37 search grid, so a bounded pass samples the
+            // whole area instead of repeatedly favoring one edge or one narrow distance band.
+            int index = (startIndex + attemptedOffsets * BUILDING_LOG_LOCAL_SURFACE_SCAN_STRIDE) % totalOffsets;
+            int dx = index / diameter - radius;
+            int dz = index % diameter - radius;
+            int distanceSqr = dx * dx + dz * dz;
+            if (distanceSqr < minRadiusSqr || distanceSqr > maxRadiusSqr) {
+                continue;
             }
+
+            int x = scanCenter.getX() + dx;
+            int z = scanCenter.getZ() + dz;
+            if (!isColumnLoaded(serverLevel, x, z)) {
+                continue;
+            }
+            checkedColumns++;
+            int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+            BlockPos candidate = new BlockPos(x, y, z);
+            if (PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)
+                    || !this.isSafeExploreTarget(serverLevel, center, candidate)) {
+                continue;
+            }
+            candidates.add(candidate.immutable());
         }
+        this.buildingLogSurfaceScanCursor = Math.floorMod(
+                startIndex + attemptedOffsets * BUILDING_LOG_LOCAL_SURFACE_SCAN_STRIDE,
+                totalOffsets
+        );
         if (candidates.isEmpty()) {
             return null;
         }
 
         candidates.sort(Comparator
-                .comparingDouble((BlockPos pos) -> pos.distSqr(center))
+                .comparingDouble((BlockPos pos) -> pos.distSqr(scanCenter))
                 .thenComparingInt(BlockPos::getY));
-        return this.pathNavigationAi.findReachableRandomizedCandidate(
+        Optional<PathNavigationAi.ReachablePathCandidate> selected = this.pathNavigationAi.findReachablePathCandidate(
                 serverLevel,
                 candidates,
                 BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL,
-                BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS,
-                MAX_EXPLORE_SAFE_DROP_BLOCKS
-        ).orElse(null);
+                BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS
+        );
+        if (selected.isEmpty()) {
+            return null;
+        }
+        this.plannedTargetPath = selected.get().path();
+        return selected.get().pos();
     }
 
     private boolean isSafeExploreTarget(ServerLevel serverLevel, BlockPos center, BlockPos pos) {
@@ -535,9 +672,21 @@ public class ExploreAroundGoal extends Goal {
 
         this.rememberCurrentNavigationRoute();
 
-        boolean moved = this.failedClimbFallbackWalk
+        Path plannedPath = this.plannedTargetPath;
+        this.plannedTargetPath = null;
+        boolean moved = plannedPath != null
+                && this.pathNavigationAi.isValidPathTo(this.targetPos, plannedPath)
+                ? this.playerNpc.getNavigation().moveTo(plannedPath, Math.min(this.speed, 1.0D))
+                : this.failedClimbFallbackWalk
                 ? this.pathNavigationAi.moveToExact(serverLevel, this.targetPos, Math.min(this.speed, 1.0D), 0)
-                : this.pathNavigationAi.moveTo(serverLevel, this.targetPos, this.speed, MAX_EXPLORE_SAFE_DROP_BLOCKS);
+                : this.pathNavigationAi.moveTo(
+                serverLevel,
+                this.targetPos,
+                this.speed,
+                this.isGenuinelyLocalDescent(this.playerNpc.blockPosition(), this.targetPos)
+                        ? MAX_EXPLORE_SAFE_DROP_BLOCKS
+                        : 0
+        );
         if (moved) {
             this.rememberCurrentNavigationRoute();
             return;
@@ -578,6 +727,12 @@ public class ExploreAroundGoal extends Goal {
                 || serverLevel.getFluidState(feet.above()).is(FluidTags.WATER);
     }
 
+    private void scheduleWaterEscapeRetry() {
+        this.nextSearchTick = this.playerNpc.tickCount
+                + WATER_ESCAPE_RETRY_MIN_TICKS
+                + this.playerNpc.getRandom().nextInt(WATER_ESCAPE_RETRY_RANDOM_TICKS + 1);
+    }
+
     /**
      * Keep only the next few nodes of the path that belongs to this exploration target. If a
      * repath fails immediately after reaching one of those nodes, the saved corridor lets us
@@ -597,6 +752,12 @@ public class ExploreAroundGoal extends Goal {
         }
 
         int firstNode = Math.min(Math.max(0, path.getNextNodeIndex()), path.getNodeCount() - 1);
+        if (path == this.recentRouteSourcePath
+                && firstNode == this.recentRouteSourceNextNode
+                && this.targetPos.equals(this.recentRouteTarget)) {
+            this.recentRouteUntilTick = this.playerNpc.tickCount + RECENT_ROUTE_MEMORY_TICKS;
+            return;
+        }
         int endNode = Math.min(path.getNodeCount(), firstNode + ROUTE_FOLIAGE_NODE_LOOKAHEAD);
         List<BlockPos> nodes = new ArrayList<>(endNode - firstNode);
         for (int index = firstNode; index < endNode; index++) {
@@ -608,6 +769,8 @@ public class ExploreAroundGoal extends Goal {
 
         this.recentRouteNodes = List.copyOf(nodes);
         this.recentRouteTarget = this.targetPos.immutable();
+        this.recentRouteSourcePath = path;
+        this.recentRouteSourceNextNode = firstNode;
         this.recentRouteUntilTick = this.playerNpc.tickCount + RECENT_ROUTE_MEMORY_TICKS;
     }
 
@@ -804,9 +967,25 @@ public class ExploreAroundGoal extends Goal {
             return false;
         }
         if (this.playerNpc.tickCount < request.nextAttemptTick()
-                || !this.detail.equals(request.ownerDetail())
-                || !this.shouldExplore.test(serverLevel)
-                || this.shouldYieldToSubGoal.test(serverLevel)) {
+                || !this.detail.equals(request.ownerDetail())) {
+            return false;
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            FAILED_CLIMB_FALLBACK_REQUESTS.put(this.playerNpc, new FailedClimbFallbackRequest(
+                    request.failedTarget(),
+                    request.ownerDetail(),
+                    request.expiresAtTick(),
+                    this.playerNpc.tickCount + 1 + this.playerNpc.getRandom().nextInt(4)
+            ));
+            return false;
+        }
+        if (!this.shouldExplore.test(serverLevel) || this.shouldYieldToSubGoal.test(serverLevel)) {
+            FAILED_CLIMB_FALLBACK_REQUESTS.put(this.playerNpc, new FailedClimbFallbackRequest(
+                    request.failedTarget(),
+                    request.ownerDetail(),
+                    request.expiresAtTick(),
+                    this.playerNpc.tickCount + FAILED_CLIMB_FALLBACK_RETRY_TICKS
+            ));
             return false;
         }
 
@@ -917,6 +1096,11 @@ public class ExploreAroundGoal extends Goal {
     }
 
     private void continueFromReachedTarget(ServerLevel serverLevel) {
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.playerNpc.getNavigation().stop();
+            this.playerNpc.setCurrentAiDetail("waiting to choose next exploration target");
+            return;
+        }
         if (!this.shouldExplore.test(serverLevel) || this.shouldYieldToSubGoal.test(serverLevel)) {
             this.continuePredicatesAllowed = false;
             this.targetPos = null;
@@ -937,6 +1121,8 @@ public class ExploreAroundGoal extends Goal {
         this.skippedRouteFoliage.clear();
         this.recentRouteNodes = List.of();
         this.recentRouteTarget = null;
+        this.recentRouteSourcePath = null;
+        this.recentRouteSourceNextNode = -1;
         this.requestedRouteFoliageClear = null;
         this.recentRouteUntilTick = 0;
         this.routeFoliageClearAttempts = 0;
@@ -977,10 +1163,19 @@ public class ExploreAroundGoal extends Goal {
         }
 
         this.searchRadiusIndex = completedFullSearch ? 0 : this.searchRadiusIndex + 1;
-        this.retryWaitTicks = RADIUS_RETRY_COOLDOWN_TICKS;
+        this.retryWaitTicks = RADIUS_RETRY_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(RADIUS_RETRY_COOLDOWN_TICKS + 1);
         this.nextSearchTick = this.playerNpc.tickCount + this.retryWaitTicks;
         this.waitingForRetry = true;
         this.playerNpc.getNavigation().stop();
+    }
+
+    private boolean isGenuinelyLocalDescent(BlockPos from, BlockPos target) {
+        if (from == null || target == null || target.getY() >= from.getY()) {
+            return false;
+        }
+        int dx = target.getX() - from.getX();
+        int dz = target.getZ() - from.getZ();
+        return dx * dx + dz * dz <= 2 * 2;
     }
 
     private boolean tryStartMiningLogColumnDrop(ServerLevel serverLevel) {
@@ -1027,6 +1222,7 @@ public class ExploreAroundGoal extends Goal {
 
         BlockPos floor = feet.below();
         if (!serverLevel.isInWorldBounds(floor)
+                || !serverLevel.hasChunkAt(floor)
                 || serverLevel.getBlockState(floor).getCollisionShape(serverLevel, floor).isEmpty()) {
             return false;
         }
@@ -1034,7 +1230,8 @@ public class ExploreAroundGoal extends Goal {
         int solidSides = 0;
         for (Direction direction : Direction.Plane.HORIZONTAL) {
             BlockPos side = floor.relative(direction);
-            if (serverLevel.getBlockState(side).isSolidRender(serverLevel, side)) {
+            if (serverLevel.hasChunkAt(side)
+                    && serverLevel.getBlockState(side).isSolidRender(serverLevel, side)) {
                 solidSides++;
             }
         }

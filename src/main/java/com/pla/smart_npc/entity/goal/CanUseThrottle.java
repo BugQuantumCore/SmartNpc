@@ -35,6 +35,12 @@ final class CanUseThrottle {
         return true;
     }
 
+    /** Overrides the normal one-second cadence after a shared-budget deferral or partial slice. */
+    void retryIn(PlayerNpcEntity playerNpc, int ticks) {
+        this.initialized = true;
+        this.nextCheckTick = playerNpc.tickCount + Math.max(1, ticks);
+    }
+
     void reset() {
         this.nextCheckTick = 0;
         this.initialized = false;

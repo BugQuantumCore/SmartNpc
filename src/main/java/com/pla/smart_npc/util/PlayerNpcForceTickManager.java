@@ -46,9 +46,13 @@ import java.util.concurrent.CompletableFuture;
 
 @Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PlayerNpcForceTickManager {
-    private static final int FORCE_TICK_RADIUS_CHUNKS = 1;
+    // One distance-2 region ticket already propagates the center through the surrounding loaded
+    // status levels. Anchoring every chunk in a 3x3 square made all nine chunks independent
+    // force-tick centers per NPC and scaled badly for distant NPCs.
+    private static final int FORCE_TICK_RADIUS_CHUNKS = 0;
     private static final int FORCE_TICK_DISTANCE = 2;
     private static final int TRACKED_NPC_REFRESH_INTERVAL_TICKS = 20;
+    private static final int TRACKED_NPC_METADATA_REFRESH_INTERVAL_TICKS = 20 * 5;
     private static final int RESTORED_ENTITY_LOAD_GRACE_TICKS = 20 * 30;
     private static final String NPC_TAB_PREFIX = "[NPC] ";
     private static final String NPC_TAB_PROFILE_PREFIX = "zzNPC";
@@ -107,14 +111,19 @@ public final class PlayerNpcForceTickManager {
             return;
         }
 
-        restorePersistentTickets(server);
-        reconcileLoadedNpcs(server);
+        // ServerStarted/the first enabled server tick owns restoration and reconciliation. A
+        // joining viewer only needs the already-managed tab entries, not another world-wide
+        // entity reconciliation and ticket refresh.
+        ensureInitialized(server);
+        List<ServerPlayer> tabEntries = new ArrayList<>();
         for (ManagedNpc managedNpc : new ArrayList<>(MANAGED_NPCS.values())) {
             PlayerNpcEntity npc = managedNpc.resolve(server);
-            if (npc == null) {
-                continue;
+            if (npc != null && npc.level() instanceof ServerLevel level) {
+                tabEntries.add(managedNpc.tabPlayer(level, npc));
             }
-            managedNpc.sendTabAdd(serverPlayer, npc);
+        }
+        if (!tabEntries.isEmpty()) {
+            serverPlayer.connection.send(ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(tabEntries));
         }
     }
 
@@ -123,6 +132,7 @@ public final class PlayerNpcForceTickManager {
         if (event.phase != TickEvent.Phase.END) {
             return;
         }
+        long performanceStartNanos = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
 
         MinecraftServer server = event.getServer();
         boolean enabled = isEnabled();
@@ -131,6 +141,7 @@ public final class PlayerNpcForceTickManager {
                 releaseAll(server);
             }
             lastEnabled = false;
+            PlayerNpcPerformanceMonitor.recordForceManagerTick(performanceStartNanos);
             return;
         }
 
@@ -141,6 +152,7 @@ public final class PlayerNpcForceTickManager {
         }
 
         updateTrackedNpcs(server);
+        PlayerNpcPerformanceMonitor.recordForceManagerTick(performanceStartNanos);
     }
 
     @SubscribeEvent
@@ -498,8 +510,9 @@ public final class PlayerNpcForceTickManager {
             for (int dz = -FORCE_TICK_RADIUS_CHUNKS; dz <= FORCE_TICK_RADIUS_CHUNKS; dz++) {
                 ChunkPos candidate = new ChunkPos(center.x + dx, center.z + dz);
                 // The NPC's center is already loaded during live tracking and must be restored
-                // after a restart. Neighbour tickets only retain chunks which another loader has
-                // already brought in; AI force management must not become a chunk generator.
+                // after a restart. Keep a single moving anchor: the distance-2 ticket supplies the
+                // loaded navigation fringe without turning every neighbouring chunk into another
+                // force-tick center.
                 if (candidate.equals(center) || level.hasChunk(candidate.x, candidate.z)) {
                     result.add(candidate);
                 }
@@ -526,6 +539,7 @@ public final class PlayerNpcForceTickManager {
         private String displayName = "";
         private String username = "";
         private String profileSignature = "";
+        private int nextMetadataRefreshTick;
         private int unresolvedTicks;
         private boolean tabListed;
 
@@ -541,31 +555,46 @@ public final class PlayerNpcForceTickManager {
         private void updateFrom(MinecraftServer server, PlayerNpcEntity npc) {
             ServerLevel level = (ServerLevel) npc.level();
             net.minecraft.resources.ResourceKey<Level> currentLevelKey = level.dimension();
-            if (this.levelKey != null && !this.levelKey.equals(currentLevelKey)) {
+            boolean dimensionChanged = this.levelKey == null || !this.levelKey.equals(currentLevelKey);
+            if (this.levelKey != null && dimensionChanged) {
                 this.releaseTickets(server);
             }
 
+            ChunkPos nextCenterChunk = npc.chunkPosition();
+            String nextUsername = npc.hasUsername() ? npc.getUsername().getCombinedNames() : "";
+            boolean persistentStateChanged = dimensionChanged
+                    || !Objects.equals(this.centerChunk, nextCenterChunk)
+                    || !Objects.equals(this.username, nextUsername);
             this.levelKey = currentLevelKey;
+            boolean entityIdChanged = this.entityId != npc.getId();
             this.entityId = npc.getId();
-            this.username = npc.hasUsername() ? npc.getUsername().getCombinedNames() : "";
-
-            String nextDisplayName = displayName(npc);
-            boolean displayNameChanged = !Objects.equals(this.displayName, nextDisplayName);
-            this.displayName = nextDisplayName;
-
-            String nextProfileSignature = profilePropertiesSignature(npc.getProfile());
-            boolean profileChanged = !Objects.equals(this.profileSignature, nextProfileSignature);
-            this.profileSignature = nextProfileSignature;
+            this.username = nextUsername;
             this.unresolvedTicks = 0;
 
-            this.updateForceTickets(level, npc.chunkPosition());
-            PlayerNpcForceTickData.get(server).put(
-                    this.npcId,
-                    currentLevelKey,
-                    npc.chunkPosition(),
-                    this.username
-            );
-            this.updateTabList(server, level, npc, displayNameChanged, profileChanged);
+            this.updateForceTickets(level, nextCenterChunk);
+            if (persistentStateChanged) {
+                PlayerNpcForceTickData.get(server).put(
+                        this.npcId,
+                        currentLevelKey,
+                        nextCenterChunk,
+                        this.username
+                );
+            }
+
+            int serverTick = server.getTickCount();
+            if (!this.tabListed || entityIdChanged || serverTick >= this.nextMetadataRefreshTick) {
+                this.nextMetadataRefreshTick = serverTick
+                        + TRACKED_NPC_METADATA_REFRESH_INTERVAL_TICKS
+                        + Math.floorMod(this.npcId.hashCode(), TRACKED_NPC_REFRESH_INTERVAL_TICKS);
+                String nextDisplayName = displayName(npc);
+                boolean displayNameChanged = !Objects.equals(this.displayName, nextDisplayName);
+                this.displayName = nextDisplayName;
+
+                String nextProfileSignature = profilePropertiesSignature(npc.getProfile());
+                boolean profileChanged = !Objects.equals(this.profileSignature, nextProfileSignature);
+                this.profileSignature = nextProfileSignature;
+                this.updateTabList(server, level, npc, displayNameChanged, profileChanged);
+            }
         }
 
         @Nullable
@@ -618,6 +647,9 @@ public final class PlayerNpcForceTickManager {
         }
 
         private void updateForceTickets(ServerLevel level, ChunkPos nextCenterChunk) {
+            if (Objects.equals(this.centerChunk, nextCenterChunk) && !this.forcedChunks.isEmpty()) {
+                return;
+            }
             Set<ChunkPos> nextChunks = forceTickChunksAround(level, nextCenterChunk);
             for (ChunkPos oldChunk : new ArrayList<>(this.forcedChunks)) {
                 if (!nextChunks.contains(oldChunk)) {
@@ -640,7 +672,12 @@ public final class PlayerNpcForceTickManager {
                     chunkPos,
                     FORCE_TICK_DISTANCE,
                     new TicketKey(this.npcId, chunkPos.toLong()),
-                    true
+                    // Level 31 already keeps the center ENTITY_TICKING so the NPC, scheduled
+                    // ticks, and ticking block entities continue to run. Forge's forceTicks flag
+                    // additionally opts an otherwise-distant chunk into tickChunk/random ticks
+                    // and natural spawning. Match vanilla /forceload semantics and do not make
+                    // every roaming NPC a synthetic player for chunk-environment work.
+                    false
             );
         }
 
@@ -650,7 +687,7 @@ public final class PlayerNpcForceTickManager {
                     chunkPos,
                     FORCE_TICK_DISTANCE,
                     new TicketKey(this.npcId, chunkPos.toLong()),
-                    true
+                    false
             );
         }
 
@@ -678,6 +715,9 @@ public final class PlayerNpcForceTickManager {
                 boolean displayNameChanged,
                 boolean profileChanged
         ) {
+            if (this.tabListed && !displayNameChanged && !profileChanged) {
+                return;
+            }
             net.minecraftforge.common.util.FakePlayer fakePlayer = this.tabPlayer(level, npc);
             if (!this.tabListed) {
                 server.getPlayerList().broadcastAll(ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(fakePlayer)));
@@ -698,14 +738,6 @@ public final class PlayerNpcForceTickManager {
                         fakePlayer
                 ));
             }
-        }
-
-        private void sendTabAdd(ServerPlayer viewer, PlayerNpcEntity npc) {
-            if (!(npc.level() instanceof ServerLevel level)) {
-                return;
-            }
-
-            viewer.connection.send(ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(this.tabPlayer(level, npc))));
         }
 
         private net.minecraftforge.common.util.FakePlayer tabPlayer(ServerLevel level, PlayerNpcEntity npc) {

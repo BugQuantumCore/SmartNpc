@@ -1,6 +1,5 @@
 package com.pla.smart_npc.entity.goal;
 
-import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
@@ -17,6 +16,7 @@ import com.pla.smart_npc.util.PlayerNpcFarmPlan;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Phase;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -60,11 +60,18 @@ public final class FarmSetupGoal extends Goal {
     private static final int MAX_FARM_CLEAR_APPROACH_STANDS = 12;
     private static final int REPAIR_DIRT_SEARCH_RADIUS = 12;
     private static final int MAX_REPAIR_DIRT_PATH_CHECKS = 12;
+    // The activation-wide budget is shared by all nested farm target/stand helpers. Keep the
+    // admitted slice to one path and let the existing cursor/cadence continue discovery later.
+    private static final int MAX_SETUP_SELECTION_PATHS = 1;
+    private static final int MAX_REPAIR_DIRT_COLUMNS_PER_PASS = 96;
+    private static final double REPAIR_DIRT_SEARCH_RESET_DISTANCE_SQR = 4.0D * 4.0D;
     private static final int MAX_PLACEMENT_RECOVERY_ATTEMPTS = 3;
     private static final int MAX_UNREACHABLE_RECOVERY_ATTEMPTS = 3;
     private static final int FARM_UPWARD_RECOVERY_TICKS = 20 * 8;
     private static final int FARM_UPWARD_RECOVERY_EXTRA_BLOCKS = 3;
     private static final int RETURN_TO_FARM_TICKS = 20 * 25;
+    private static final int FAILED_FARM_RETURN_RETRY_TICKS = 20 * 20;
+    private static final int FAILED_FARM_RETURN_RETRY_JITTER_TICKS = 20 * 10;
     private static final int LOCAL_ROUTE_ESCAPE_RISE = 3;
     private static final double FARM_STAND_REACHED_SQR = 0.95D * 0.95D;
     private static final double FARM_CLEAR_STAND_CENTERED_SQR = 0.35D * 0.35D;
@@ -72,6 +79,7 @@ public final class FarmSetupGoal extends Goal {
     private static final double MAX_NON_FULL_SUPPORT_STAND_OFFSET = 0.55D;
     private static final double INTERACTION_DISTANCE_SQR = 3.75D * 3.75D;
     private static final double CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
+    private static final List<ColumnOffset> REPAIR_DIRT_COLUMN_OFFSETS = createRepairDirtColumnOffsets();
 
     private final PlayerNpcEntity playerNpc;
     private final PathNavigationAi pathNavigationAi;
@@ -99,11 +107,20 @@ public final class FarmSetupGoal extends Goal {
     private int actionTicks;
     private int repathTicks;
     private int routeFailureTicks;
+    private int routeClearRetryTicks;
     private int placementRecoveryAttempts;
     private boolean showingActionItem;
     private boolean finished;
     private BlockPos recoveryPlanOrigin;
+    private BlockPos repairDirtSearchOrigin;
+    private BlockPos failedFarmReturnPlanOrigin;
+    private BlockPos failedFarmReturnTarget;
+    private Path plannedStandPath;
     private int unreachableRecoveryAttempts;
+    private int repairDirtSearchColumnCursor;
+    private int failedFarmReturnRetryAfterTick;
+    private long lastExpensiveWorkAdmissionTick = Long.MIN_VALUE;
+    private NavigationPathBudget activationPathBudget;
 
     public FarmSetupGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -121,6 +138,7 @@ public final class FarmSetupGoal extends Goal {
                 && serverLevel != null
                 && FarmAi.isFarmingJobActive(playerNpc)
                 && PlayerNpcFarmPlan.get(playerNpc).isEmpty()
+                && !FarmAi.isPlanSearchPending(playerNpc, serverLevel)
                 && !playerNpc.shouldPrioritizeLogGathering()
                 && playerNpc.getGatherCooldown() <= 0
                 && !serverLevel.isNight()
@@ -141,22 +159,36 @@ public final class FarmSetupGoal extends Goal {
                 || this.playerNpc.getHoleEscapeCooldown() > 0
                 || serverLevel.isNight()
                 || serverLevel.isThundering()
-                || this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
-                && !BuildHouseGoal.isHomeLayoutFinished(this.playerNpc, serverLevel)
                 || !this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
         this.resetPlanState();
+        this.activationPathBudget = new NavigationPathBudget(MAX_SETUP_SELECTION_PATHS);
         if (PlayerNpcFarmPlan.get(this.playerNpc).isEmpty()
                 && this.playerNpc.shouldPrioritizeLogGathering()) {
             return false;
         }
-        this.plan = FarmAi.getOrCreatePlan(this.playerNpc, serverLevel).orElse(null);
+        this.plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        boolean admissionHeld = false;
         if (this.plan == null) {
-            this.playerNpc.setIdleTraceDetail("farm setup blocked: no suitable dirt area", 40);
+            this.plan = FarmAi.getOrCreatePlan(this.playerNpc, serverLevel).orElse(null);
+            admissionHeld = this.plan != null;
+        }
+        if (this.plan == null) {
+            this.playerNpc.setIdleTraceDetail(
+                    FarmAi.isPlanSearchPending(this.playerNpc, serverLevel)
+                            ? "farm setup: checking nearby dirt area in bounded passes"
+                            : "farm setup blocked: no suitable dirt area",
+                    40
+            );
             return false;
         }
+        if (!admissionHeld && !PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.playerNpc.setIdleTraceDetail("farm setup queued for shared search slice", 20);
+            return false;
+        }
+        this.lastExpensiveWorkAdmissionTick = serverLevel.getServer().getTickCount();
         this.trackRecoveryPlan();
 
         if (!this.advanceMaterialPhases()) {
@@ -180,15 +212,25 @@ public final class FarmSetupGoal extends Goal {
         BlockPos damagedGround = this.findNearestRepairableGround(serverLevel);
         if (damagedGround != null) {
             if (this.hasGroundRepairMaterial()) {
+                this.resetRepairDirtSearch();
                 return this.selectAction(serverLevel, Action.REPAIR_GROUND, damagedGround);
             }
-            if (this.selectRepairDirtGatheringAction(serverLevel)) {
+            RepairDirtSearchResult repairDirtSearch = this.selectRepairDirtGatheringAction(serverLevel);
+            if (repairDirtSearch == RepairDirtSearchResult.FOUND) {
                 return true;
+            }
+            if (repairDirtSearch == RepairDirtSearchResult.PENDING) {
+                this.playerNpc.setIdleTraceDetail(
+                        "farm ground repair: checking nearby dirt in bounded passes",
+                        40
+                );
+                return false;
             }
             this.playerNpc.setIdleTraceDetail("farm ground repair blocked: needs dirt @ "
                     + posText(damagedGround), 40);
             return false;
         }
+        this.resetRepairDirtSearch();
         if (this.plan.phase() != Phase.READY && !FarmAi.hasReachableEntry(this.playerNpc, serverLevel, this.plan)) {
             if (this.trySelectFarmRouteRecoveryClear(serverLevel)) {
                 return true;
@@ -200,9 +242,14 @@ public final class FarmSetupGoal extends Goal {
                     && FarmAi.canReplaceUnreachableUnpreparedPlan(this.playerNpc, serverLevel, this.plan)) {
                 PlayerNpcFarmPlan.clear(this.playerNpc);
                 this.resetRecoveryPlan();
-                this.plan = FarmAi.getOrCreatePlan(this.playerNpc, serverLevel).orElse(null);
+                this.plan = FarmAi.getOrCreatePlan(this.playerNpc, serverLevel, true).orElse(null);
                 if (this.plan == null) {
-                    this.playerNpc.setIdleTraceDetail("farm setup blocked: no reachable dirt area", 40);
+                    this.playerNpc.setIdleTraceDetail(
+                            FarmAi.isPlanSearchPending(this.playerNpc, serverLevel)
+                                    ? "farm setup: checking replacement dirt area in bounded passes"
+                                    : "farm setup blocked: no reachable dirt area",
+                            40
+                    );
                     return false;
                 }
                 this.trackRecoveryPlan();
@@ -212,6 +259,7 @@ public final class FarmSetupGoal extends Goal {
             return this.selectReturnToFarmAction();
         } else {
             this.unreachableRecoveryAttempts = 0;
+            this.clearFarmReturnRetry();
         }
 
         BlockPos obstruction = this.findNearestMaintenanceObstruction(serverLevel);
@@ -331,6 +379,7 @@ public final class FarmSetupGoal extends Goal {
 
     @Override
     public void start() {
+        this.activationPathBudget = null;
         this.actionTicks = 0;
         this.repathTicks = 0;
         this.routeFailureTicks = 0;
@@ -342,9 +391,14 @@ public final class FarmSetupGoal extends Goal {
             this.toolAi.equipTool(HoeItem.class);
         }
         if (this.isFarmReturnAction()) {
-            this.returnPositionAi.start(this.targetPos);
+            Path selectedPath = this.plannedStandPath;
+            this.plannedStandPath = null;
+            this.returnPositionAi.start(this.targetPos, selectedPath);
         } else if (this.action != Action.CLEAR) {
-            this.moveToStand(serverLevel());
+            ServerLevel serverLevel = serverLevel();
+            if (this.tryAcquireExpensiveWork(serverLevel) && this.moveToStand(serverLevel)) {
+                this.repathTicks = REPATH_INTERVAL_TICKS;
+            }
         }
     }
 
@@ -479,6 +533,7 @@ public final class FarmSetupGoal extends Goal {
         this.targetPos = target.immutable();
         this.clearRequestedTargetPos = action == Action.CLEAR ? target.immutable() : null;
         this.clearResolvedTargetPos = null;
+        this.plannedStandPath = null;
         if (action != Action.CLEAR) {
             this.standPos = this.findInteractionStand(serverLevel, target, action == Action.REPAIR_GROUND);
             if (this.standPos != null) {
@@ -565,8 +620,13 @@ public final class FarmSetupGoal extends Goal {
         if (this.plan == null || this.plan.pathPositions().isEmpty()) {
             return false;
         }
+        BlockPos returnTarget = this.plan.pathPositions().get(0).above().immutable();
+        if (this.isFarmReturnOnCooldown(this.plan.origin(), returnTarget)) {
+            this.playerNpc.setIdleTraceDetail("farm return retry cooling down @ " + posText(returnTarget), 40);
+            return false;
+        }
         this.action = Action.RETURN_TO_FARM;
-        this.targetPos = this.plan.pathPositions().get(0).above().immutable();
+        this.targetPos = returnTarget;
         this.standPos = this.targetPos;
         return true;
     }
@@ -612,6 +672,9 @@ public final class FarmSetupGoal extends Goal {
                 <= INTERACTION_DISTANCE_SQR;
         if (reachedTarget) {
             this.unreachableRecoveryAttempts = 0;
+            if (this.action == Action.RETURN_TO_FARM) {
+                this.clearFarmReturnRetry();
+            }
             if (this.action == Action.APPROACH_FARM_WORK && this.clearRequestedTargetPos != null) {
                 BlockPos requestedTarget = this.clearRequestedTargetPos.immutable();
                 BlockPos failedStand = this.targetPos.immutable();
@@ -711,6 +774,8 @@ public final class FarmSetupGoal extends Goal {
             this.markClearRetry(this.clearResolvedTargetPos);
         } else if (this.action == Action.APPROACH_PLACEMENT_WORK) {
             this.markPlacementRetry(this.pendingPlacementTargetPos);
+        } else if (this.action == Action.RETURN_TO_FARM) {
+            this.markFarmReturnRetry(this.plan.origin(), this.targetPos);
         }
         this.unreachableRecoveryAttempts++;
         this.requestLocalRouteEscape();
@@ -810,27 +875,50 @@ public final class FarmSetupGoal extends Goal {
 
     private void tickApproach(ServerLevel serverLevel) {
         if (this.standPos == null || !PathNavigationAi.canStandAt(serverLevel, this.standPos)) {
+            if (!this.tryAcquireExpensiveWork(serverLevel)) {
+                this.deferApproachForSharedBudget();
+                return;
+            }
+            this.activationPathBudget = new NavigationPathBudget(MAX_SETUP_SELECTION_PATHS);
             this.standPos = this.findInteractionStand(
                     serverLevel,
                     this.targetPos,
                     this.action == Action.REPAIR_GROUND
             );
+            this.activationPathBudget = null;
+            if (this.standPos != null) {
+                this.repathTicks = 0;
+            }
         }
         BlockPos feet = this.playerNpc.blockPosition();
         if (!feet.equals(this.lastApproachPos)) {
             this.lastApproachPos = feet.immutable();
             this.routeFailureTicks = 0;
+            this.routeClearRetryTicks = 0;
         } else {
             this.routeFailureTicks++;
         }
         if (this.standPos != null && this.repathTicks-- <= 0) {
+            if (!this.tryAcquireExpensiveWork(serverLevel)) {
+                this.deferApproachForSharedBudget();
+                return;
+            }
             this.moveToStand(serverLevel);
             this.repathTicks = REPATH_INTERVAL_TICKS;
         }
-        if (this.routeFailureTicks >= ROUTE_CLEAR_TRIGGER_TICKS && this.tryStartRouteClear(serverLevel)) {
-            this.action = Action.CLEAR;
-            this.routeFailureTicks = 0;
-            return;
+        if (this.routeFailureTicks >= ROUTE_CLEAR_TRIGGER_TICKS && this.routeClearRetryTicks-- <= 0) {
+            if (!this.tryAcquireExpensiveWork(serverLevel)) {
+                this.deferRouteClearForSharedBudget();
+                return;
+            }
+            if (this.tryStartRouteClear(serverLevel)) {
+                this.action = Action.CLEAR;
+                this.routeFailureTicks = 0;
+                this.routeClearRetryTicks = 0;
+                return;
+            }
+            this.routeClearRetryTicks = REPATH_INTERVAL_TICKS
+                    + this.playerNpc.getRandom().nextInt(REPATH_INTERVAL_TICKS / 2 + 1);
         }
         if (this.routeFailureTicks > ROUTE_CLEAR_TRIGGER_TICKS * 3) {
             if (this.isPlacementAction()) {
@@ -922,6 +1010,8 @@ public final class FarmSetupGoal extends Goal {
         if (this.recoveryPlanOrigin == null || !this.recoveryPlanOrigin.equals(this.plan.origin())) {
             this.recoveryPlanOrigin = this.plan.origin().immutable();
             this.unreachableRecoveryAttempts = 0;
+            this.clearFarmReturnRetry();
+            this.resetRepairDirtSearch();
             this.clearRetryAfter.clear();
             this.placementRetryAfter.clear();
         }
@@ -930,8 +1020,67 @@ public final class FarmSetupGoal extends Goal {
     private void resetRecoveryPlan() {
         this.recoveryPlanOrigin = null;
         this.unreachableRecoveryAttempts = 0;
+        this.clearFarmReturnRetry();
         this.clearRetryAfter.clear();
         this.placementRetryAfter.clear();
+    }
+
+    private boolean tryAcquireExpensiveWork(ServerLevel serverLevel) {
+        if (serverLevel == null || serverLevel.getServer() == null) {
+            return false;
+        }
+        long tick = serverLevel.getServer().getTickCount();
+        if (this.lastExpensiveWorkAdmissionTick == tick) {
+            return true;
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            return false;
+        }
+        this.lastExpensiveWorkAdmissionTick = tick;
+        return true;
+    }
+
+    private void deferApproachForSharedBudget() {
+        this.repathTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+        this.playerNpc.setCurrentAiDetail(this.describeAction() + " (queued for shared search slice)");
+    }
+
+    private void deferRouteClearForSharedBudget() {
+        this.routeClearRetryTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+        this.playerNpc.setCurrentAiDetail(this.describeAction() + " (queued for shared search slice)");
+    }
+
+    private void markFarmReturnRetry(BlockPos planOrigin, BlockPos target) {
+        if (planOrigin == null || target == null) {
+            return;
+        }
+        this.failedFarmReturnPlanOrigin = planOrigin.immutable();
+        this.failedFarmReturnTarget = target.immutable();
+        this.failedFarmReturnRetryAfterTick = this.playerNpc.tickCount
+                + FAILED_FARM_RETURN_RETRY_TICKS
+                + this.playerNpc.getRandom().nextInt(FAILED_FARM_RETURN_RETRY_JITTER_TICKS + 1);
+    }
+
+    private boolean isFarmReturnOnCooldown(BlockPos planOrigin, BlockPos target) {
+        if (planOrigin == null
+                || target == null
+                || this.failedFarmReturnPlanOrigin == null
+                || this.failedFarmReturnTarget == null
+                || !this.failedFarmReturnPlanOrigin.equals(planOrigin)
+                || !this.failedFarmReturnTarget.equals(target)) {
+            return false;
+        }
+        if (this.playerNpc.tickCount >= this.failedFarmReturnRetryAfterTick) {
+            this.clearFarmReturnRetry();
+            return false;
+        }
+        return true;
+    }
+
+    private void clearFarmReturnRetry() {
+        this.failedFarmReturnPlanOrigin = null;
+        this.failedFarmReturnTarget = null;
+        this.failedFarmReturnRetryAfterTick = 0;
     }
 
     private void markClearRetry(BlockPos pos) {
@@ -1124,27 +1273,38 @@ public final class FarmSetupGoal extends Goal {
         return InventoryUtils.hasItem(this.playerNpc, FarmSetupGoal::isGroundRepairItem);
     }
 
-    private boolean selectRepairDirtGatheringAction(ServerLevel serverLevel) {
+    private RepairDirtSearchResult selectRepairDirtGatheringAction(ServerLevel serverLevel) {
         BlockPos feet = this.playerNpc.blockPosition();
+        if (this.repairDirtSearchOrigin == null
+                || this.repairDirtSearchOrigin.distSqr(feet) > REPAIR_DIRT_SEARCH_RESET_DISTANCE_SQR) {
+            this.repairDirtSearchOrigin = feet.immutable();
+            this.repairDirtSearchColumnCursor = 0;
+        }
+
         List<BlockPos> candidates = new ArrayList<>();
-        for (int dx = -REPAIR_DIRT_SEARCH_RADIUS; dx <= REPAIR_DIRT_SEARCH_RADIUS; dx++) {
-            for (int dz = -REPAIR_DIRT_SEARCH_RADIUS; dz <= REPAIR_DIRT_SEARCH_RADIUS; dz++) {
-                if (dx * dx + dz * dz > REPAIR_DIRT_SEARCH_RADIUS * REPAIR_DIRT_SEARCH_RADIUS) {
-                    continue;
-                }
-                int x = feet.getX() + dx;
-                int z = feet.getZ() + dz;
-                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
-                BlockPos candidate = new BlockPos(x, y, z);
-                if (this.isSafeRepairDirtTarget(serverLevel, candidate)) {
-                    candidates.add(candidate);
-                }
+        int endCursor = Math.min(
+                REPAIR_DIRT_COLUMN_OFFSETS.size(),
+                this.repairDirtSearchColumnCursor + MAX_REPAIR_DIRT_COLUMNS_PER_PASS
+        );
+        for (int index = this.repairDirtSearchColumnCursor; index < endCursor; index++) {
+            ColumnOffset offset = REPAIR_DIRT_COLUMN_OFFSETS.get(index);
+            int x = this.repairDirtSearchOrigin.getX() + offset.dx();
+            int z = this.repairDirtSearchOrigin.getZ() + offset.dz();
+            if (!serverLevel.hasChunk(x >> 4, z >> 4)) {
+                continue;
+            }
+            int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
+            BlockPos candidate = new BlockPos(x, y, z);
+            if (this.isSafeRepairDirtTarget(serverLevel, candidate)) {
+                candidates.add(candidate);
             }
         }
+        this.repairDirtSearchColumnCursor = endCursor;
         candidates.sort(Comparator.comparingDouble(feet::distSqr));
         int checks = 0;
         for (BlockPos candidate : candidates) {
-            if (checks++ >= MAX_REPAIR_DIRT_PATH_CHECKS) {
+            if (checks++ >= MAX_REPAIR_DIRT_PATH_CHECKS
+                    || this.activationPathBudget != null && this.activationPathBudget.exhausted()) {
                 break;
             }
             BlockPos candidateStand = this.findInteractionStand(serverLevel, candidate);
@@ -1154,13 +1314,20 @@ public final class FarmSetupGoal extends Goal {
             this.action = Action.GATHER_REPAIR_DIRT;
             this.targetPos = candidate.immutable();
             this.standPos = candidateStand.immutable();
-            return true;
+            this.resetRepairDirtSearch();
+            return RepairDirtSearchResult.FOUND;
         }
-        return false;
+
+        boolean complete = this.repairDirtSearchColumnCursor >= REPAIR_DIRT_COLUMN_OFFSETS.size();
+        if (complete) {
+            this.resetRepairDirtSearch();
+        }
+        return complete ? RepairDirtSearchResult.EXHAUSTED : RepairDirtSearchResult.PENDING;
     }
 
     private boolean isSafeRepairDirtTarget(ServerLevel serverLevel, BlockPos pos) {
         if (pos == null
+                || !serverLevel.hasChunkAt(pos)
                 || pos.equals(this.playerNpc.blockPosition().below())
                 || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)
                 || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
@@ -1169,6 +1336,27 @@ public final class FarmSetupGoal extends Goal {
         }
         BlockState state = serverLevel.getBlockState(pos);
         return state.is(Blocks.DIRT) || state.is(Blocks.GRASS_BLOCK);
+    }
+
+    private void resetRepairDirtSearch() {
+        this.repairDirtSearchOrigin = null;
+        this.repairDirtSearchColumnCursor = 0;
+    }
+
+    private static List<ColumnOffset> createRepairDirtColumnOffsets() {
+        List<ColumnOffset> offsets = new ArrayList<>();
+        for (int dx = -REPAIR_DIRT_SEARCH_RADIUS; dx <= REPAIR_DIRT_SEARCH_RADIUS; dx++) {
+            for (int dz = -REPAIR_DIRT_SEARCH_RADIUS; dz <= REPAIR_DIRT_SEARCH_RADIUS; dz++) {
+                if (dx * dx + dz * dz <= REPAIR_DIRT_SEARCH_RADIUS * REPAIR_DIRT_SEARCH_RADIUS) {
+                    offsets.add(new ColumnOffset(dx, dz));
+                }
+            }
+        }
+        offsets.sort(Comparator
+                .comparingInt((ColumnOffset offset) -> offset.dx() * offset.dx() + offset.dz() * offset.dz())
+                .thenComparingInt(ColumnOffset::dx)
+                .thenComparingInt(ColumnOffset::dz));
+        return List.copyOf(offsets);
     }
 
     private void tickGatherRepairDirt(ServerLevel serverLevel) {
@@ -1403,6 +1591,7 @@ public final class FarmSetupGoal extends Goal {
     }
 
     private BlockPos findInteractionStand(ServerLevel serverLevel, BlockPos target, boolean avoidStandingAboveTarget) {
+        this.plannedStandPath = null;
         if (target == null) {
             return null;
         }
@@ -1412,7 +1601,7 @@ public final class FarmSetupGoal extends Goal {
         }
         List<BlockPos> candidates = this.interactionStandCandidates(target);
         candidates.sort(Comparator.comparingDouble(this.playerNpc.blockPosition()::distSqr));
-        int checks = 0;
+        NavigationPathBudget pathBudget = this.pathBudgetForSelection();
         for (BlockPos candidate : candidates) {
             if (candidate.equals(feet)
                     || avoidStandingAboveTarget && candidate.equals(target.above())
@@ -1420,7 +1609,7 @@ public final class FarmSetupGoal extends Goal {
                     || distanceFromStandToTargetSqr(candidate, target) > INTERACTION_DISTANCE_SQR) {
                 continue;
             }
-            if (checks++ >= MAX_PLACEMENT_STAND_PATH_CHECKS) {
+            if (!pathBudget.tryConsume()) {
                 break;
             }
             Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
@@ -1428,6 +1617,7 @@ public final class FarmSetupGoal extends Goal {
                     && path.canReach()
                     && path.getEndNode() != null
                     && path.getEndNode().asBlockPos().equals(candidate)) {
+                this.plannedStandPath = path;
                 return candidate.immutable();
             }
         }
@@ -1435,6 +1625,7 @@ public final class FarmSetupGoal extends Goal {
     }
 
     private BlockPos findFarmClearApproachStand(ServerLevel serverLevel, BlockPos workTarget) {
+        this.plannedStandPath = null;
         if (workTarget == null
                 || this.failedFarmClearApproachStands.size() >= MAX_FARM_CLEAR_APPROACH_STANDS
                 || !this.isSafeClearTarget(serverLevel, workTarget)) {
@@ -1444,7 +1635,7 @@ public final class FarmSetupGoal extends Goal {
         BlockPos feet = this.playerNpc.blockPosition();
         List<BlockPos> candidates = this.interactionStandCandidates(workTarget);
         candidates.sort(Comparator.comparingDouble(feet::distSqr));
-        int pathChecks = 0;
+        NavigationPathBudget pathBudget = this.pathBudgetForSelection();
         for (BlockPos candidate : candidates) {
             if (this.failedFarmClearApproachStands.contains(candidate)
                     || !this.canOccupyPlacementStand(serverLevel, candidate)
@@ -1455,7 +1646,7 @@ public final class FarmSetupGoal extends Goal {
             if (candidate.equals(feet)) {
                 return candidate.immutable();
             }
-            if (pathChecks++ >= MAX_PLACEMENT_STAND_PATH_CHECKS) {
+            if (!pathBudget.tryConsume()) {
                 break;
             }
             Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
@@ -1463,10 +1654,17 @@ public final class FarmSetupGoal extends Goal {
                     && path.canReach()
                     && path.getEndNode() != null
                     && path.getEndNode().asBlockPos().equals(candidate)) {
+                this.plannedStandPath = path;
                 return candidate.immutable();
             }
         }
         return null;
+    }
+
+    private NavigationPathBudget pathBudgetForSelection() {
+        return this.activationPathBudget == null
+                ? new NavigationPathBudget(MAX_PLACEMENT_STAND_PATH_CHECKS)
+                : this.activationPathBudget;
     }
 
     private BlockPos resolveSafeFarmClearTargetFromStand(
@@ -1555,7 +1753,20 @@ public final class FarmSetupGoal extends Goal {
         if (serverLevel == null || this.standPos == null) {
             return false;
         }
+        Path selectedPath = this.plannedStandPath;
+        this.plannedStandPath = null;
+        if (isExactPathTo(selectedPath, this.standPos)) {
+            return this.playerNpc.getNavigation().moveTo(selectedPath, 1.0D);
+        }
         return this.pathNavigationAi.moveToExact(serverLevel, this.standPos, 1.0D, 0);
+    }
+
+    private static boolean isExactPathTo(Path path, BlockPos target) {
+        return path != null
+                && target != null
+                && path.canReach()
+                && path.getEndNode() != null
+                && path.getEndNode().asBlockPos().equals(target);
     }
 
     private static String posText(BlockPos pos) {
@@ -1735,9 +1946,12 @@ public final class FarmSetupGoal extends Goal {
         this.actionTicks = 0;
         this.repathTicks = 0;
         this.routeFailureTicks = 0;
+        this.routeClearRetryTicks = 0;
         this.placementRecoveryAttempts = 0;
         this.failedFarmClearApproachStands.clear();
         this.finished = false;
+        this.activationPathBudget = null;
+        this.plannedStandPath = null;
     }
 
     private ServerLevel serverLevel() {
@@ -1778,5 +1992,34 @@ public final class FarmSetupGoal extends Goal {
         GATHER_REPAIR_DIRT,
         TILL,
         OPEN_GATE
+    }
+
+    private enum RepairDirtSearchResult {
+        FOUND,
+        PENDING,
+        EXHAUSTED
+    }
+
+    private record ColumnOffset(int dx, int dz) {
+    }
+
+    private static final class NavigationPathBudget {
+        private int remaining;
+
+        private NavigationPathBudget(int maximumPaths) {
+            this.remaining = Math.max(0, maximumPaths);
+        }
+
+        private boolean tryConsume() {
+            if (this.remaining <= 0) {
+                return false;
+            }
+            this.remaining--;
+            return true;
+        }
+
+        private boolean exhausted() {
+            return this.remaining <= 0;
+        }
     }
 }

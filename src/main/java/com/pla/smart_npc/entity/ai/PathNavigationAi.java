@@ -107,12 +107,40 @@ public final class PathNavigationAi {
             int horizontalRadius,
             int verticalDown,
             int verticalUp) {
+        return this.moveToWithLocalFallback(
+                serverLevel,
+                target,
+                speed,
+                maxSafeDrop,
+                horizontalRadius,
+                verticalDown,
+                verticalUp,
+                MAX_LOCAL_ROUTE_PATH_CHECKS
+        );
+    }
+
+    public boolean moveToWithLocalFallback(
+            ServerLevel serverLevel,
+            BlockPos target,
+            double speed,
+            int maxSafeDrop,
+            int horizontalRadius,
+            int verticalDown,
+            int verticalUp,
+            int maxLocalPathChecks) {
         this.lastLocalRouteTarget = null;
         if (this.moveTo(serverLevel, target, speed, maxSafeDrop)) {
             return true;
         }
 
-        RouteStep routeStep = this.findLocalRouteStep(serverLevel, target, horizontalRadius, verticalDown, verticalUp);
+        RouteStep routeStep = this.findLocalRouteStep(
+                serverLevel,
+                target,
+                horizontalRadius,
+                verticalDown,
+                verticalUp,
+                maxLocalPathChecks
+        );
         if (routeStep == null) {
             this.lastMoveFailureDetail = this.lastMoveFailureDetail
                     + " localCandidates=" + this.lastLocalCandidateCount
@@ -141,6 +169,31 @@ public final class PathNavigationAi {
      */
     public boolean tickWaterTravel(ServerLevel serverLevel, BlockPos target, double speed) {
         return this.escapeWaterIfNeeded(serverLevel, target, speed);
+    }
+
+    /**
+     * Runs survival-first local water recovery without inventing a distant work destination.
+     * Exploration uses this while it has no valid land path, so a trapped NPC does not repeatedly
+     * path-test unrelated 30-block surface targets.
+     */
+    public boolean tickLocalWaterEscape(ServerLevel serverLevel, double speed) {
+        WaterEscapeAi.TickResult result = this.waterEscapeAi.tick(
+                serverLevel,
+                Math.min(1.0D, Math.max(0.1D, speed)),
+                null
+        );
+        if (result == WaterEscapeAi.TickResult.RUNNING || result == WaterEscapeAi.TickResult.DONE) {
+            this.lastMoveFailureDetail = "";
+            if (result == WaterEscapeAi.TickResult.RUNNING && !this.waterEscapeAi.detail().isBlank()) {
+                this.playerNpc.setCurrentAiDetail(this.waterEscapeAi.detail());
+            }
+            return true;
+        }
+        return false;
+    }
+
+    public boolean canStartLocalWaterEscape(ServerLevel serverLevel) {
+        return this.waterEscapeAi.canStart(serverLevel);
     }
 
     public void stopWaterTravel() {
@@ -177,6 +230,29 @@ public final class PathNavigationAi {
                 && this.findSafeDropStep(serverLevel, this.playerNpc.blockPosition(), target, maxSafeDrop) != null;
     }
 
+    /**
+     * Safe-drop checks only prove the next adjacent step, not a route to a distant destination.
+     * Callers selecting a new destination must use this bounded form so a far target still needs
+     * a complete navigation path.
+     */
+    public boolean canSafelyDropToLocalTarget(
+            ServerLevel serverLevel,
+            BlockPos target,
+            int maxSafeDrop,
+            int maxHorizontalDistance
+    ) {
+        if (target == null) {
+            return false;
+        }
+        BlockPos feet = this.playerNpc.blockPosition();
+        int dx = target.getX() - feet.getX();
+        int dz = target.getZ() - feet.getZ();
+        int radius = Math.max(0, maxHorizontalDistance);
+        return target.getY() < feet.getY()
+                && dx * dx + dz * dz <= radius * radius
+                && this.canSafelyDropTo(serverLevel, target, maxSafeDrop);
+    }
+
     public Optional<BlockPos> findReachableRandomizedCandidate(
             ServerLevel serverLevel,
             List<BlockPos> candidates,
@@ -209,6 +285,45 @@ public final class PathNavigationAi {
             }
         }
         return Optional.empty();
+    }
+
+    public Optional<ReachablePathCandidate> findReachablePathCandidate(
+            ServerLevel serverLevel,
+            List<BlockPos> candidates,
+            int preferredPoolSize,
+            int maxChecks
+    ) {
+        if (candidates.isEmpty()) {
+            return Optional.empty();
+        }
+
+        List<BlockPos> ordered = new ArrayList<>(candidates);
+        int preferredCount = Math.min(Math.max(1, preferredPoolSize), ordered.size());
+        if (preferredCount > 1) {
+            Collections.rotate(
+                    ordered.subList(0, preferredCount),
+                    this.playerNpc.getRandom().nextInt(preferredCount)
+            );
+        }
+
+        int checks = 0;
+        int checkLimit = Math.max(1, maxChecks);
+        for (BlockPos candidate : ordered) {
+            if (checks++ >= checkLimit) {
+                break;
+            }
+            if (!canStandAt(serverLevel, candidate)) {
+                continue;
+            }
+            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            if (this.isValidPathTo(candidate, path)) {
+                return Optional.of(new ReachablePathCandidate(candidate.immutable(), path));
+            }
+        }
+        return Optional.empty();
+    }
+
+    public record ReachablePathCandidate(BlockPos pos, Path path) {
     }
 
     public boolean hasValidPathTo(BlockPos target) {
@@ -305,7 +420,8 @@ public final class PathNavigationAi {
 
         for (Direction direction : directions) {
             BlockPos step = feet.relative(direction);
-            if (this.hasBlockingCollision(serverLevel, step)
+            if (!serverLevel.hasChunkAt(step)
+                    || this.hasBlockingCollision(serverLevel, step)
                     || this.hasBlockingCollision(serverLevel, step.above())
                     || !serverLevel.getFluidState(step).isEmpty()
                     || !serverLevel.getFluidState(step.above()).isEmpty()) {
@@ -327,7 +443,8 @@ public final class PathNavigationAi {
             BlockPos target,
             int horizontalRadius,
             int verticalDown,
-            int verticalUp) {
+            int verticalUp,
+            int maxPathChecks) {
         BlockPos feet = this.playerNpc.blockPosition();
         double currentTargetDistance = blockDistanceSqr(feet, target);
         List<BlockPos> candidates = new ArrayList<>();
@@ -356,8 +473,9 @@ public final class PathNavigationAi {
 
         candidates.sort(Comparator.comparingDouble(candidate -> this.localRouteScore(serverLevel, feet, candidate, target)));
         int checks = 0;
+        int checkLimit = Math.max(0, maxPathChecks);
         for (BlockPos candidate : candidates) {
-            if (checks++ >= MAX_LOCAL_ROUTE_PATH_CHECKS) {
+            if (checks++ >= checkLimit) {
                 break;
             }
             this.lastLocalPathChecks = checks;

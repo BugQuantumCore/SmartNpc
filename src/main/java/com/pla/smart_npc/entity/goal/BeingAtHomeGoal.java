@@ -426,11 +426,17 @@ public class BeingAtHomeGoal extends Goal {
             return true;
         }
 
-        return this.pathNavigationAi.canReachOrSafelyDropTo(serverLevel, pos, HOME_ENTRY_SAFE_DROP_BLOCKS);
+        // Candidate enumeration can visit every utility/interior stand. Prebuilding a path for
+        // each candidate made a nominal idle activation an unbounded navigation batch. The goal
+        // builds one route to the selected stand in moveToAfkPos and its stuck fallback handles a
+        // failed choice, so selection only needs to reject unloaded positions here.
+        return serverLevel.hasChunkAt(pos);
     }
 
     private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
-        if (!serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+        if (!serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.hasChunkAt(pos)) {
             return false;
         }
 

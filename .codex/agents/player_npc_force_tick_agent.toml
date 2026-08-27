@@ -24,7 +24,10 @@ Key implementation files:
 Rules:
 - Keep `forceTickManage` default-on and make all helper behavior disappear or fall back cleanly when it is disabled.
 - Do not persist force-tick tickets; the manager owns runtime tickets and releases them on movement, death, unload, config disable, and server stop.
-- Preserve the 3x3 chunk radius around the NPC's current chunk unless the user explicitly asks for a different radius.
+- Preserve exactly one moving distance-2 region-ticket anchor at the NPC's current chunk. Ticket propagation owns the surrounding loaded fringe; do not restore a 3x3 grid of independent force-tick anchors.
+- Add and remove that ticket with Forge `forceTicks=false`. Distance 2 already yields the level-31 entity-ticking center; `true` additionally makes remote centers run natural spawning and random chunk ticks. The boolean participates in ticket identity, so add/remove must match.
+- Server start/feature enable owns persistent-ticket restoration and loaded-NPC reconciliation. Player login calls the idempotent initializer and sends one batched tab initialization; it must not rescan every level or refresh all tickets per viewer.
+- The staggered refresh skips unchanged ticket centers and saved-data writes. Display/profile metadata may use a slower stagger than the one-second movement refresh, and unchanged metadata must not recopy FakePlayer properties or broadcast packets.
 - Use unique ticket values per NPC UUID and chunk so overlapping Player NPC force-tick areas release independently.
 - Keep tab-list NPC rows prefixed with `[NPC] ` and sorted below normal real players.
 - Keep `/smart_npc tp <name>` backed by the currently tracked alive NPC list, and preserve random selection for duplicate names.

@@ -4,15 +4,16 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -43,6 +44,7 @@ public final class ClearBlockAi {
     private static final int MAX_APPROACH_TICKS = 20 * 8;
     private static final int MAX_CLEAR_TARGET_TICKS = 20 * 15;
     private static final int MAX_CENTERED_BLOCKED_STAND_TICKS = 20;
+    private static final int MAX_BREAK_RAY_SHAPE_COMPONENTS = 12;
 
     private final PlayerNpcEntity playerNpc;
     private final BreakingBlockAi breakingBlockAi;
@@ -202,8 +204,11 @@ public final class ClearBlockAi {
 
         Predicate<BlockState> effectivePredicate = targetPredicate;
         BlockState state = serverLevel.getBlockState(target.get());
-        if (allowSoftColumnCover && !targetPredicate.test(state) && isSoftCoverState(state)) {
-            effectivePredicate = blockState -> targetPredicate.test(blockState) || isSoftCoverState(blockState);
+        if (allowSoftColumnCover
+                && !targetPredicate.test(state)
+                && isPartialShapePathObstruction(serverLevel, target.get(), state)) {
+            effectivePredicate = blockState -> targetPredicate.test(blockState)
+                    || isPotentialPartialShapeState(blockState);
         }
         return this.start(serverLevel, target.get(), effectivePredicate, detail, requiredTicks,
                 clearDistanceSqr, allowSoftColumnCover, allowOwnedFarmDestruction);
@@ -268,7 +273,7 @@ public final class ClearBlockAi {
             return TickResult.RUNNING;
         }
 
-        if (!canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos)) {
+        if (!canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos, this.allowSoftCover)) {
             this.breakingBlockAi.stop();
             if (!this.moveNearTarget(serverLevel)) {
                 this.stop();
@@ -448,7 +453,7 @@ public final class ClearBlockAi {
             ).isPresent()) {
                 return Optional.of(candidate);
             }
-            if (canBreakFromCurrentPosition(serverLevel, playerNpc, candidate)) {
+            if (canBreakFromCurrentPosition(serverLevel, playerNpc, candidate, allowSoftColumnCover)) {
                 return Optional.of(candidate);
             }
             Optional<BlockPos> cover = findColumnCover(serverLevel, playerNpc, candidate, targetPredicate, maxDistanceSqr, allowSoftColumnCover);
@@ -458,7 +463,7 @@ public final class ClearBlockAi {
             if (pathChecks++ >= MAX_BREAK_STAND_PATH_CHECKS) {
                 break;
             }
-            if (findReachableBreakStand(playerNpc, serverLevel, candidate).isPresent()) {
+            if (findReachableBreakStand(playerNpc, serverLevel, candidate, allowSoftColumnCover).isPresent()) {
                 return Optional.of(candidate);
             }
         }
@@ -519,7 +524,8 @@ public final class ClearBlockAi {
             }
             BlockState state = serverLevel.getBlockState(cover);
             boolean targetMatch = targetPredicate.test(state);
-            boolean softCover = allowSoftColumnCover && isSoftCoverState(state);
+            boolean softCover = allowSoftColumnCover
+                    && isPartialShapePathObstruction(serverLevel, cover, state);
             if (playerNpc.distanceToSqr(centerX(cover), centerY(cover), centerZ(cover)) > maxDistanceSqr
                     || !targetMatch && !softCover
                     || !isBreakablePathObstruction(serverLevel, cover, state, softCover)) {
@@ -549,25 +555,30 @@ public final class ClearBlockAi {
         }
 
         return !state.getCollisionShape(serverLevel, pos).isEmpty()
-                || allowSoftCover && isSoftPathObstructionState(state);
+                || allowSoftCover && isPartialShapePathObstruction(serverLevel, pos, state);
     }
 
-    private static boolean isSoftCoverState(BlockState state) {
+    private static boolean isPotentialPartialShapeState(BlockState state) {
         return state != null
                 && !state.isAir()
-                && state.canBeReplaced();
+                && (state.canBeReplaced() || !state.canOcclude());
     }
 
-    private static boolean isSoftPathObstructionState(BlockState state) {
-        return isSoftCoverState(state)
-                || state.is(Blocks.TORCH)
-                || state.is(Blocks.WALL_TORCH)
-                || state.is(Blocks.SOUL_TORCH)
-                || state.is(Blocks.SOUL_WALL_TORCH)
-                || state.is(Blocks.REDSTONE_TORCH)
-                || state.is(Blocks.REDSTONE_WALL_TORCH)
-                || state.is(BlockTags.FLOWERS)
-                || state.is(BlockTags.SAPLINGS);
+    private static boolean isPartialShapePathObstruction(
+            ServerLevel serverLevel,
+            BlockPos pos,
+            BlockState state
+    ) {
+        if (serverLevel == null || pos == null || state == null || !serverLevel.hasChunkAt(pos)) {
+            return false;
+        }
+        VoxelShape collision = state.getCollisionShape(serverLevel, pos);
+        VoxelShape outline = state.getShape(serverLevel, pos);
+        return isPotentialPartialShapeState(state)
+                || collision.isEmpty()
+                || !Block.isShapeFullBlock(collision)
+                || outline.isEmpty()
+                || !Block.isShapeFullBlock(outline);
     }
 
     private static boolean isClearable(ServerLevel serverLevel, BlockPos pos, Predicate<BlockState> targetPredicate) {
@@ -592,7 +603,7 @@ public final class ClearBlockAi {
             return false;
         }
 
-        if (canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos)) {
+        if (canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos, this.allowSoftCover)) {
             this.approachTicks = 0;
             this.centeredBlockedStandTicks = 0;
             return true;
@@ -601,8 +612,14 @@ public final class ClearBlockAi {
             return false;
         }
 
-        if (this.standPos == null || !canUseBreakStand(serverLevel, this.standPos, this.targetPos)) {
-            this.standPos = findReachableBreakStand(this.playerNpc, serverLevel, this.targetPos).orElse(null);
+        if (this.standPos == null
+                || !canUseBreakStand(serverLevel, this.standPos, this.targetPos, this.allowSoftCover)) {
+            this.standPos = findReachableBreakStand(
+                    this.playerNpc,
+                    serverLevel,
+                    this.targetPos,
+                    this.allowSoftCover
+            ).orElse(null);
             this.approachRepathTicks = 0;
         }
         if (this.standPos == null) {
@@ -683,12 +700,21 @@ public final class ClearBlockAi {
             ServerLevel serverLevel,
             BlockPos targetPos
     ) {
+        return findReachableBreakStand(playerNpc, serverLevel, targetPos, false);
+    }
+
+    private static Optional<BlockPos> findReachableBreakStand(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            BlockPos targetPos,
+            boolean allowSoftCover
+    ) {
         if (playerNpc == null || serverLevel == null || targetPos == null) {
             return Optional.empty();
         }
         ArrayList<BlockPos> candidates = new ArrayList<>();
         BlockPos playerFeet = playerNpc.blockPosition();
-        if (canUseBreakStand(serverLevel, playerFeet, targetPos)) {
+        if (canUseBreakStand(serverLevel, playerFeet, targetPos, allowSoftCover)) {
             candidates.add(playerFeet.immutable());
         }
 
@@ -696,7 +722,8 @@ public final class ClearBlockAi {
             for (int dy = -BREAK_STAND_VERTICAL_RANGE; dy <= BREAK_STAND_VERTICAL_RANGE; dy++) {
                 for (int dz = -BREAK_STAND_RADIUS; dz <= BREAK_STAND_RADIUS; dz++) {
                     BlockPos candidate = targetPos.offset(dx, dy, dz);
-                    if (candidate.equals(targetPos) || !canUseBreakStand(serverLevel, candidate, targetPos)) {
+                    if (candidate.equals(targetPos)
+                            || !canUseBreakStand(serverLevel, candidate, targetPos, allowSoftCover)) {
                         continue;
                     }
                     candidates.add(candidate.immutable());
@@ -727,9 +754,18 @@ public final class ClearBlockAi {
     }
 
     private static boolean canUseBreakStand(ServerLevel serverLevel, BlockPos standPos, BlockPos targetPos) {
+        return canUseBreakStand(serverLevel, standPos, targetPos, false);
+    }
+
+    private static boolean canUseBreakStand(
+            ServerLevel serverLevel,
+            BlockPos standPos,
+            BlockPos targetPos,
+            boolean allowSoftCover
+    ) {
         return PathNavigationAi.canStandAt(serverLevel, standPos)
                 && distanceFromStandToTargetSqr(standPos, targetPos) <= BREAK_REACH_DISTANCE_SQR
-                && hasClearBreakRay(serverLevel, standPos, targetPos);
+                && hasClearBreakRay(serverLevel, standPos, targetPos, allowSoftCover);
     }
 
     private static boolean isWithinBreakReach(PlayerNpcEntity playerNpc, BlockPos targetPos) {
@@ -740,8 +776,17 @@ public final class ClearBlockAi {
     }
 
     private static boolean canBreakFromCurrentPosition(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockPos targetPos) {
+        return canBreakFromCurrentPosition(serverLevel, playerNpc, targetPos, false);
+    }
+
+    private static boolean canBreakFromCurrentPosition(
+            ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
+            BlockPos targetPos,
+            boolean allowSoftCover
+    ) {
         return isWithinBreakReach(playerNpc, targetPos)
-                && (hasClearBreakRay(serverLevel, playerNpc, targetPos)
+                && (hasClearBreakRay(serverLevel, playerNpc, targetPos, allowSoftCover)
                 || isImmediateBodyObstruction(serverLevel, playerNpc, targetPos));
     }
 
@@ -760,24 +805,66 @@ public final class ClearBlockAi {
     }
 
     private static boolean hasClearBreakRay(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockPos targetPos) {
+        return hasClearBreakRay(serverLevel, playerNpc, targetPos, false);
+    }
+
+    private static boolean hasClearBreakRay(
+            ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
+            BlockPos targetPos,
+            boolean allowSoftCover
+    ) {
         return hasClearBreakRay(
                 serverLevel,
                 new Vec3(playerNpc.getX(), playerNpc.getEyeY(), playerNpc.getZ()),
-                targetPos
+                targetPos,
+                allowSoftCover
         );
     }
 
     private static boolean hasClearBreakRay(ServerLevel serverLevel, BlockPos standPos, BlockPos targetPos) {
+        return hasClearBreakRay(serverLevel, standPos, targetPos, false);
+    }
+
+    private static boolean hasClearBreakRay(
+            ServerLevel serverLevel,
+            BlockPos standPos,
+            BlockPos targetPos,
+            boolean allowSoftCover
+    ) {
         return hasClearBreakRay(
                 serverLevel,
                 new Vec3(standPos.getX() + 0.5D, standPos.getY() + STAND_EYE_HEIGHT, standPos.getZ() + 0.5D),
-                targetPos
+                targetPos,
+                allowSoftCover
         );
     }
 
     private static boolean hasClearBreakRay(ServerLevel serverLevel, Vec3 eye, BlockPos targetPos) {
+        return hasClearBreakRay(serverLevel, eye, targetPos, false);
+    }
+
+    private static boolean hasClearBreakRay(
+            ServerLevel serverLevel,
+            Vec3 eye,
+            BlockPos targetPos,
+            boolean allowSoftCover
+    ) {
         BlockHitResult hit = clipBreakRay(serverLevel, eye, targetPos);
-        return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(targetPos);
+        if (hit.getType() == HitResult.Type.BLOCK) {
+            return hit.getBlockPos().equals(targetPos);
+        }
+        // Some modded terrain deliberately exposes no outline. A MISS proves the same OUTLINE
+        // segment encountered no wall; only explicit partial-shape callers may use that result,
+        // and only when the loaded/revalidated target still has an empty outline.
+        if (!allowSoftCover
+                || hit.getType() != HitResult.Type.MISS
+                || !serverLevel.hasChunkAt(targetPos)) {
+            return false;
+        }
+        BlockState targetState = serverLevel.getBlockState(targetPos);
+        return targetState.getShape(serverLevel, targetPos).isEmpty()
+                && isPartialShapePathObstruction(serverLevel, targetPos, targetState);
     }
 
     private static Optional<BlockPos> findBreakRayBlocker(
@@ -818,11 +905,53 @@ public final class ClearBlockAi {
     private static BlockHitResult clipBreakRay(ServerLevel serverLevel, Vec3 eye, BlockPos targetPos) {
         return serverLevel.clip(new ClipContext(
                 eye,
-                Vec3.atCenterOf(targetPos),
+                breakRayTarget(serverLevel, eye, targetPos),
                 ClipContext.Block.OUTLINE,
                 ClipContext.Fluid.NONE,
                 null
         ));
+    }
+
+    private static Vec3 breakRayTarget(ServerLevel serverLevel, Vec3 eye, BlockPos targetPos) {
+        if (!serverLevel.hasChunkAt(targetPos)) {
+            return Vec3.atCenterOf(targetPos);
+        }
+        VoxelShape outline = serverLevel.getBlockState(targetPos).getShape(serverLevel, targetPos);
+        if (outline.isEmpty()) {
+            return Vec3.atCenterOf(targetPos);
+        }
+
+        // Aim inside the nearest real outline component rather than at the block-cell center.
+        // Mushrooms, petals, slabs, fences, and modded multipart terrain may not occupy that cell
+        // center. ClipContext still reports the first outline hit, so an intervening wall rejects
+        // the request before the intended partial shape can be reached.
+        List<AABB> components = outline.toAabbs();
+        AABB nearest = null;
+        double nearestDistanceSqr = Double.MAX_VALUE;
+        int componentLimit = Math.min(MAX_BREAK_RAY_SHAPE_COMPONENTS, components.size());
+        for (int index = 0; index < componentLimit; index++) {
+            AABB component = components.get(index);
+            double distanceSqr = distanceToShapeCenterSqr(eye, targetPos, component);
+            if (distanceSqr < nearestDistanceSqr) {
+                nearest = component;
+                nearestDistanceSqr = distanceSqr;
+            }
+        }
+        if (nearest == null) {
+            return Vec3.atCenterOf(targetPos);
+        }
+        return new Vec3(
+                targetPos.getX() + (nearest.minX + nearest.maxX) * 0.5D,
+                targetPos.getY() + (nearest.minY + nearest.maxY) * 0.5D,
+                targetPos.getZ() + (nearest.minZ + nearest.maxZ) * 0.5D
+        );
+    }
+
+    private static double distanceToShapeCenterSqr(Vec3 eye, BlockPos targetPos, AABB box) {
+        double dx = eye.x - (targetPos.getX() + (box.minX + box.maxX) * 0.5D);
+        double dy = eye.y - (targetPos.getY() + (box.minY + box.maxY) * 0.5D);
+        double dz = eye.z - (targetPos.getZ() + (box.minZ + box.maxZ) * 0.5D);
+        return dx * dx + dy * dy + dz * dz;
     }
 
     private static boolean isAtBreakStand(PlayerNpcEntity playerNpc, BlockPos standPos) {

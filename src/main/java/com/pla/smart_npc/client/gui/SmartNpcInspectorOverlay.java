@@ -49,6 +49,8 @@ public class SmartNpcInspectorOverlay {
     private static final int PANEL_WIDTH = 196;
     private static final int PANEL_HEIGHT = 294;
     private static final int REQUIREMENTS_PANEL_WIDTH = 250;
+    private static final int RESOURCE_PANEL_WIDTH = 264;
+    private static final int RESOURCE_PANEL_MAX_LINES = 20;
     private static final int REQUIREMENTS_PANEL_MAX_LINES = 20;
     private static final int REQUIREMENT_ROW_HEIGHT = 24;
     private static final String REQUIREMENTS_PAYLOAD_VERSION = "#smart_npc_requirements_v1";
@@ -68,6 +70,7 @@ public class SmartNpcInspectorOverlay {
     private static String snapshotPerformanceText = "";
     private static String snapshotDailyJobText = "";
     private static String snapshotRequirementsText = "";
+    private static String snapshotAiResourceText = "";
     private static boolean snapshotTraceEnabled;
     private static boolean requirementsVisible;
     private static long lastRefreshGameTime = Long.MIN_VALUE;
@@ -94,6 +97,7 @@ public class SmartNpcInspectorOverlay {
     private static String cachedDailyJobText = "";
     private static String cachedBuildStatusText = "";
     private static List<String> cachedPerformanceLines = List.of("");
+    private static List<String> cachedAiResourceLines = List.of("");
     private static String cachedTraceText = "";
     private static Component cachedRequirementsTitle = Component.empty();
     private static Component cachedRequirementsLayout = Component.empty();
@@ -109,7 +113,15 @@ public class SmartNpcInspectorOverlay {
 
     public static void handlePacket(PlayerNpcInspectorPacket packet) {
         int previousEntityId = inspectedEntityId;
-        if (packet.entityId() < 0) {
+        if (packet.entityId() == -1) {
+            disableTraceIfNeeded();
+            stopInspectator(Minecraft.getInstance(), true);
+            requirementsVisible = false;
+            pendingInspectatorTargetTicks = 0;
+            previousRequirementsToggleDown = false;
+            resetRequirementScroll();
+            resetRequirementScrollInput();
+        } else if (packet.entityId() == PlayerNpcInspectorPacket.OVERALL_ENTITY_ID) {
             disableTraceIfNeeded();
             stopInspectator(Minecraft.getInstance(), true);
             requirementsVisible = false;
@@ -128,6 +140,7 @@ public class SmartNpcInspectorOverlay {
         snapshotPerformanceText = packet.performanceText();
         snapshotDailyJobText = packet.dailyJobText();
         snapshotRequirementsText = packet.requirementsText();
+        snapshotAiResourceText = packet.aiResourceText();
         snapshotTraceEnabled = packet.traceEnabled();
         lastDisplayCacheMillis = Long.MIN_VALUE;
     }
@@ -269,13 +282,24 @@ public class SmartNpcInspectorOverlay {
 
     @SubscribeEvent
     public static void onRenderGui(RenderGuiEvent.Post event) {
-        if (inspectedEntityId < 0) {
+        if (inspectedEntityId == -1) {
             return;
         }
 
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null || minecraft.player == null) {
             clear();
+            return;
+        }
+
+        GuiGraphics guiGraphics = event.getGuiGraphics();
+        int screenWidth = minecraft.getWindow().getGuiScaledWidth();
+        int screenHeight = minecraft.getWindow().getGuiScaledHeight();
+        if (inspectedEntityId == PlayerNpcInspectorPacket.OVERALL_ENTITY_ID) {
+            requestRefresh(minecraft);
+            refreshOverallDisplayCache(minecraft.font);
+            int resourceX = screenWidth - RESOURCE_PANEL_WIDTH - 12;
+            renderAiResourcePanel(guiGraphics, minecraft.font, resourceX, 18);
             return;
         }
 
@@ -292,9 +316,6 @@ public class SmartNpcInspectorOverlay {
         requestRefresh(minecraft);
         refreshDisplayCache(minecraft.font, playerNpc);
 
-        GuiGraphics guiGraphics = event.getGuiGraphics();
-        int screenWidth = minecraft.getWindow().getGuiScaledWidth();
-        int screenHeight = minecraft.getWindow().getGuiScaledHeight();
         int x = screenWidth - PANEL_WIDTH - 12;
         int y = 18;
         renderPanel(guiGraphics, minecraft.font, x, y);
@@ -359,6 +380,7 @@ public class SmartNpcInspectorOverlay {
                 Component.translatable("gui.player_npc.inspector.performance", snapshotPerformanceText).getString(),
                 PANEL_WIDTH - 16
         );
+        cachedAiResourceLines = resourceLines(font, snapshotAiResourceText, RESOURCE_PANEL_WIDTH - 16);
         cachedTraceText = trimToWidth(
                 font,
                 Component.translatable(
@@ -439,6 +461,16 @@ public class SmartNpcInspectorOverlay {
         guiGraphics.drawString(font, cachedInspectatorHint, x + 8, y + PANEL_HEIGHT - 15, 0xFF94A3B8, false);
     }
 
+    private static void refreshOverallDisplayCache(Font font) {
+        long now = Util.getMillis();
+        if (lastDisplayCacheMillis != Long.MIN_VALUE
+                && now - lastDisplayCacheMillis < DISPLAY_CACHE_INTERVAL_MS) {
+            return;
+        }
+        lastDisplayCacheMillis = now;
+        cachedAiResourceLines = resourceLines(font, snapshotAiResourceText, RESOURCE_PANEL_WIDTH - 16);
+    }
+
     private static void renderRequirementsPanel(GuiGraphics guiGraphics, Font font, int x, int y) {
         if (!cachedRequirementRows.isEmpty()) {
             renderRequirementRowsPanel(guiGraphics, font, x, y);
@@ -460,6 +492,36 @@ public class SmartNpcInspectorOverlay {
                 break;
             }
             guiGraphics.drawString(font, line, x + 8, lineY, 0xFFD6E4FF, false);
+            lineY += lineHeight;
+        }
+    }
+
+    private static void renderAiResourcePanel(GuiGraphics guiGraphics, Font font, int x, int y) {
+        int lineHeight = 11;
+        int height = Math.min(PANEL_HEIGHT, 34 + cachedAiResourceLines.size() * lineHeight);
+        guiGraphics.fill(x, y, x + RESOURCE_PANEL_WIDTH, y + height, 0xE80F1720);
+        guiGraphics.fill(x, y, x + RESOURCE_PANEL_WIDTH, y + 1, 0xFF60A5FA);
+        guiGraphics.fill(x, y + height - 1, x + RESOURCE_PANEL_WIDTH, y + height, 0xFF243447);
+        guiGraphics.fill(x, y, x + 1, y + height, 0xFF243447);
+        guiGraphics.fill(x + RESOURCE_PANEL_WIDTH - 1, y, x + RESOURCE_PANEL_WIDTH, y + height, 0xFF243447);
+        guiGraphics.drawString(
+                font,
+                Component.translatable("gui.player_npc.inspector.ai_resources_title"),
+                x + 8,
+                y + 7,
+                0xFFBFDBFE,
+                false
+        );
+
+        int lineY = y + 23;
+        for (String line : cachedAiResourceLines) {
+            if (lineY + lineHeight > y + height - 4) {
+                break;
+            }
+            int color = line.startsWith("> ") ? 0xFF74E291
+                    : line.startsWith("  ") ? 0xFF94A3B8
+                    : 0xFFD6E4FF;
+            guiGraphics.drawString(font, line, x + 8, lineY, color, false);
             lineY += lineHeight;
         }
     }
@@ -598,6 +660,18 @@ public class SmartNpcInspectorOverlay {
             lines.add("");
         }
         return lines;
+    }
+
+    private static List<String> resourceLines(Font font, String text, int fullLineWidth) {
+        List<String> lines = new ArrayList<>(RESOURCE_PANEL_MAX_LINES);
+        String source = text == null || text.isBlank() ? "No scheduler resource holders" : text;
+        for (String rawLine : source.split("\\R", -1)) {
+            if (lines.size() >= RESOURCE_PANEL_MAX_LINES) {
+                break;
+            }
+            lines.add(trimToWidth(font, rawLine, fullLineWidth));
+        }
+        return lines.isEmpty() ? List.of("") : List.copyOf(lines);
     }
 
     private static List<String> requirementsLines(Font font, String text, int fullLineWidth) {
@@ -797,6 +871,18 @@ public class SmartNpcInspectorOverlay {
 
     private static void tickInspectatorControls(Minecraft minecraft) {
         boolean chatOpen = isChatScreen(minecraft.screen);
+        if (inspectedEntityId == PlayerNpcInspectorPacket.OVERALL_ENTITY_ID) {
+            if (inspectatorActive) {
+                stopInspectator(minecraft, true);
+            }
+            resetInspectatorToggle();
+            previousCycleLeftDown = false;
+            previousCycleRightDown = false;
+            previousTraceToggleDown = false;
+            previousRequirementsToggleDown = false;
+            resetRequirementScrollInput();
+            return;
+        }
         if (inspectedEntityId < 0 || minecraft.screen != null && !chatOpen) {
             if (inspectatorActive) {
                 stopInspectator(minecraft, true);
@@ -1274,6 +1360,7 @@ public class SmartNpcInspectorOverlay {
         snapshotBuildStatusText = "";
         snapshotPerformanceText = "";
         snapshotRequirementsText = "";
+        snapshotAiResourceText = "";
         snapshotTraceEnabled = false;
         requirementsVisible = false;
         resetRequirementScroll();
@@ -1287,6 +1374,7 @@ public class SmartNpcInspectorOverlay {
         cachedInterestsText = "";
         cachedBuildStatusText = "";
         cachedPerformanceLines = List.of("");
+        cachedAiResourceLines = List.of("");
         cachedTraceText = "";
         cachedRequirementsTitle = Component.empty();
         cachedRequirementsLayout = Component.empty();

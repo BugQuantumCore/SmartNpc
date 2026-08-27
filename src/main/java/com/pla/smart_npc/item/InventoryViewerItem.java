@@ -3,6 +3,7 @@ package com.pla.smart_npc.item;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.network.PlayerNpcInspectorData;
 import com.pla.smart_npc.network.PlayerNpcInspectorPacket;
+import com.pla.smart_npc.network.PlayerNpcInspectatorModePacket;
 import com.pla.smart_npc.network.SmartNpcNetwork;
 import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
 import net.minecraft.ChatFormatting;
@@ -64,9 +65,16 @@ public class InventoryViewerItem extends Item {
     public @NotNull InteractionResultHolder<ItemStack> use(@NotNull Level level, @NotNull Player player, @NotNull InteractionHand hand) {
         ItemStack stack = player.getItemInHand(hand);
         if (player instanceof ServerPlayer serverPlayer) {
+            boolean overall = player.isShiftKeyDown();
+            if (overall && PlayerNpcInspectatorModePacket.isInspectatorActive(serverPlayer)) {
+                PlayerNpcInspectatorModePacket.restorePlayer(serverPlayer);
+            }
             SmartNpcNetwork.CHANNEL.send(
                     PacketDistributor.PLAYER.with(() -> serverPlayer),
-                    PlayerNpcInspectorPacket.clear()
+                    overall
+                            ? PlayerNpcInspectorPacket.overall(
+                                    PlayerNpcInspectorData.createAiResourceText(serverPlayer.server, null))
+                            : PlayerNpcInspectorPacket.clear()
             );
         }
         return InteractionResultHolder.sidedSuccess(stack, level.isClientSide());

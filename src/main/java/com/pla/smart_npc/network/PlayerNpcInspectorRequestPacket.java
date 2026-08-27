@@ -42,6 +42,14 @@ public class PlayerNpcInspectorRequestPacket {
                 return;
             }
 
+            if (packet.entityId == PlayerNpcInspectorPacket.OVERALL_ENTITY_ID) {
+                SmartNpcNetwork.CHANNEL.send(
+                        PacketDistributor.PLAYER.with(() -> sender),
+                        PlayerNpcInspectorPacket.overall(PlayerNpcInspectorData.createAiResourceText(sender.server, null))
+                );
+                return;
+            }
+
             Entity entity = sender.level().getEntity(packet.entityId);
             if (!(entity instanceof PlayerNpcEntity playerNpc)
                     || !playerNpc.isAlive()

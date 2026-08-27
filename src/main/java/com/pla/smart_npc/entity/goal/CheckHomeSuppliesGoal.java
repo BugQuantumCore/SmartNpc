@@ -1,8 +1,10 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.ChestAi;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcBaseUtil;
 import com.pla.smart_npc.util.PlayerNpcBuildStatusUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -59,6 +61,8 @@ public class CheckHomeSuppliesGoal extends Goal {
     private final PlayerNpcEntity playerNpc;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private PlayerNpcHomeUtil.HomeArea homeArea;
+    private BlockPos baseAnchor;
+    private boolean nonBuilderBase;
     private BlockPos targetPos;
     private BlockPos standPos;
     private Mode mode;
@@ -99,8 +103,12 @@ public class CheckHomeSuppliesGoal extends Goal {
         }
 
         this.resetPlan();
-        this.homeArea = PlayerNpcHomeUtil.getHome(this.playerNpc).orElse(null);
-        if (this.homeArea == null || !this.isNearHome()) {
+        this.nonBuilderBase = !this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING);
+        this.homeArea = this.nonBuilderBase ? null : PlayerNpcHomeUtil.getHome(this.playerNpc).orElse(null);
+        this.baseAnchor = this.homeArea == null
+                ? PlayerNpcBaseUtil.getNonBuilderBase(this.playerNpc, serverLevel).orElse(null)
+                : PlayerNpcHomeUtil.center(this.homeArea);
+        if (this.baseAnchor == null || !this.isNearHome()) {
             return false;
         }
 
@@ -126,7 +134,7 @@ public class CheckHomeSuppliesGoal extends Goal {
             this.markChecked(LAST_CHEST_CHECK_DAY, day);
         }
 
-        if (!this.checkedToday(LAST_FURNACE_CHECK_DAY, day)) {
+        if (!this.nonBuilderBase && !this.checkedToday(LAST_FURNACE_CHECK_DAY, day)) {
             BlockPos furnace = this.findHomeFurnace(serverLevel);
             if (furnace != null && this.plan(serverLevel, furnace, Mode.FURNACE)) {
                 return true;
@@ -558,10 +566,21 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private BlockPos findHomeChest(ServerLevel serverLevel) {
-        return ChestAi.findHomeSupplyChest(this.playerNpc, serverLevel, this.homeArea);
+        if (!this.nonBuilderBase) {
+            return ChestAi.findHomeSupplyChest(this.playerNpc, serverLevel, this.homeArea);
+        }
+        BlockPos ownedChest = ChestAi.findOwnedSupplyChest(this.playerNpc, serverLevel);
+        return ownedChest != null
+                && this.baseAnchor != null
+                && this.baseAnchor.distSqr(ownedChest) <= HOME_ACTION_DISTANCE_SQR
+                ? ownedChest
+                : null;
     }
 
     private BlockPos findHomeFurnace(ServerLevel serverLevel) {
+        if (this.homeArea == null) {
+            return null;
+        }
         return this.findBlock(serverLevel, Blocks.FURNACE);
     }
 
@@ -653,8 +672,12 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private boolean isNearHome() {
-        BlockPos homeCenter = this.homeArea.origin().offset(this.homeArea.width() / 2, 1, this.homeArea.depth() / 2);
-        return this.playerNpc.distanceToSqr(homeCenter.getX() + 0.5D, homeCenter.getY(), homeCenter.getZ() + 0.5D) <= HOME_ACTION_DISTANCE_SQR;
+        return this.baseAnchor != null
+                && this.playerNpc.distanceToSqr(
+                this.baseAnchor.getX() + 0.5D,
+                this.baseAnchor.getY(),
+                this.baseAnchor.getZ() + 0.5D
+        ) <= HOME_ACTION_DISTANCE_SQR;
     }
 
     private long currentDay(ServerLevel serverLevel) {
@@ -716,6 +739,8 @@ public class CheckHomeSuppliesGoal extends Goal {
 
     private void resetPlan() {
         this.homeArea = null;
+        this.baseAnchor = null;
+        this.nonBuilderBase = false;
         this.targetPos = null;
         this.standPos = null;
         this.mode = null;

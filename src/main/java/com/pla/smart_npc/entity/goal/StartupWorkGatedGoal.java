@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.ai.goal.Goal;
 
@@ -35,12 +36,16 @@ public final class StartupWorkGatedGoal extends Goal {
 
     @Override
     public boolean canUse() {
-        return this.isStartupGraceComplete() && this.delegate.canUse();
+        return this.isStartupGraceComplete()
+                && PlayerNpcAiWorkBudget.canStartWork(this.playerNpc)
+                && this.delegate.canUse();
     }
 
     @Override
     public boolean canContinueToUse() {
-        return this.isStartupGraceComplete() && this.delegate.canContinueToUse();
+        return this.isStartupGraceComplete()
+                && PlayerNpcAiWorkBudget.canContinueWork(this.playerNpc)
+                && this.delegate.canContinueToUse();
     }
 
     @Override
@@ -55,12 +60,14 @@ public final class StartupWorkGatedGoal extends Goal {
 
     @Override
     public void start() {
+        PlayerNpcAiWorkBudget.onWorkStarted(this.playerNpc);
         this.delegate.start();
     }
 
     @Override
     public void stop() {
         this.delegate.stop();
+        PlayerNpcAiWorkBudget.onWorkStopped(this.playerNpc);
     }
 
     @Override

@@ -9,6 +9,7 @@ import com.pla.smart_npc.util.PlayerNpcFarmPlan.Phase;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Shape;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -33,8 +34,10 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 /** Shared farming mechanics built around {@link PlayerNpcFarmPlan}. */
 public final class FarmAi {
@@ -44,6 +47,8 @@ public final class FarmAi {
     public static final int FARM_FURNACE_STONE = 8;
 
     private static final int PLAN_SEARCH_ATTEMPTS = 112;
+    private static final int PLAN_SEARCH_ATTEMPTS_PER_PASS = 8;
+    private static final int PLAN_SEARCH_RESET_DISTANCE_SQR = 5 * 5;
     private static final int MIN_SITE_CENTER_DISTANCE = 5;
     private static final int MAX_SITE_SEARCH_RADIUS = 14;
     private static final int MAX_SITE_VERTICAL_OFFSET = 4;
@@ -51,6 +56,8 @@ public final class FarmAi {
     private static final int FARM_TORCH_LOW_LIGHT_LEVEL = 7;
     private static final int FARM_STONE_PROTECTION_BUFFER = 2;
     private static final int FARM_TORCH_CHARCOAL_LOG_TARGET = 3;
+    private static final List<SiteOffset> NEARBY_SITE_OFFSETS = List.copyOf(createNearbySiteOffsets());
+    private static final Map<PlayerNpcEntity, PlanSearchCursor> PLAN_SEARCH_CURSORS = new WeakHashMap<>();
 
     private FarmAi() {
     }
@@ -100,8 +107,23 @@ public final class FarmAi {
     }
 
     public static Optional<Plan> getOrCreatePlan(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return getOrCreatePlan(playerNpc, serverLevel, false);
+    }
+
+    /**
+     * Continues the bounded farm-site search while reusing a caller-owned expensive-work permit.
+     * Running setup recovery can clear an invalid plan and request its replacement in the same
+     * activation; making that caller reacquire would turn a valid deferral into a false exhausted
+     * result.
+     */
+    public static Optional<Plan> getOrCreatePlan(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            boolean admissionHeld
+    ) {
         Optional<Plan> existing = getPlan(playerNpc, serverLevel);
         if (existing.isPresent()) {
+            PLAN_SEARCH_CURSORS.remove(playerNpc);
             return existing;
         }
         Optional<Plan> invalidOrOtherDimension = PlayerNpcFarmPlan.get(playerNpc);
@@ -111,29 +133,44 @@ public final class FarmAi {
                 return Optional.empty();
             }
             PlayerNpcFarmPlan.clear(playerNpc);
+            PLAN_SEARCH_CURSORS.remove(playerNpc);
         }
 
         BlockPos searchCenter = playerNpc.blockPosition();
+        String dimension = serverLevel.dimension().location().toString();
+        PlanSearchCursor cursor = PLAN_SEARCH_CURSORS.get(playerNpc);
+        if (cursor == null
+                || !dimension.equals(cursor.dimension)
+                || cursor.searchCenter.distSqr(searchCenter) >= PLAN_SEARCH_RESET_DISTANCE_SQR) {
+            cursor = new PlanSearchCursor(dimension, searchCenter.immutable());
+            PLAN_SEARCH_CURSORS.put(playerNpc, cursor);
+        }
+        if (cursor.exhausted || !admissionHeld && !PlayerNpcAiWorkBudget.tryAcquire(serverLevel, playerNpc)) {
+            return Optional.empty();
+        }
+
         BlockPos gateAnchor = PlayerNpcHomeUtil.getHome(playerNpc)
                 .map(PlayerNpcHomeUtil::center)
-                .orElse(searchCenter);
-        List<SiteOffset> offsets = nearbySiteOffsets();
-        Set<Long> triedOrigins = new LinkedHashSet<>();
-        int attempts = 0;
-        for (SiteOffset offset : offsets) {
-            if (attempts++ >= PLAN_SEARCH_ATTEMPTS) {
-                break;
-            }
+                .orElse(cursor.searchCenter);
+        int passAttempts = 0;
+        while (cursor.nextOffsetIndex < NEARBY_SITE_OFFSETS.size()
+                && cursor.totalAttempts < PLAN_SEARCH_ATTEMPTS
+                && passAttempts++ < PLAN_SEARCH_ATTEMPTS_PER_PASS) {
+            SiteOffset offset = NEARBY_SITE_OFFSETS.get(cursor.nextOffsetIndex++);
+            cursor.totalAttempts++;
             int width = MIN_SIZE + playerNpc.getRandom().nextInt(MAX_SIZE - MIN_SIZE + 1);
             int depth = MIN_SIZE + playerNpc.getRandom().nextInt(MAX_SIZE - MIN_SIZE + 1);
-            int centerX = searchCenter.getX() + offset.dx();
-            int centerZ = searchCenter.getZ() + offset.dz();
+            int centerX = cursor.searchCenter.getX() + offset.dx();
+            int centerZ = cursor.searchCenter.getZ() + offset.dz();
+            if (!serverLevel.hasChunk(centerX >> 4, centerZ >> 4)) {
+                continue;
+            }
             int groundY = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, centerX, centerZ) - 1;
-            if (Math.abs(groundY + 1 - searchCenter.getY()) > MAX_SITE_VERTICAL_OFFSET) {
+            if (Math.abs(groundY + 1 - cursor.searchCenter.getY()) > MAX_SITE_VERTICAL_OFFSET) {
                 continue;
             }
             BlockPos origin = new BlockPos(centerX - width / 2, groundY, centerZ - depth / 2);
-            if (!triedOrigins.add(origin.asLong())) {
+            if (!cursor.triedOrigins.add(origin.asLong())) {
                 continue;
             }
 
@@ -150,16 +187,33 @@ public final class FarmAi {
                     Phase.GATHER_LOGS,
                     water,
                     gate,
-                    serverLevel.dimension().location().toString()
+                    dimension
             );
             if (!canClaimPlan(playerNpc, serverLevel, candidate)) {
                 continue;
             }
 
             PlayerNpcFarmPlan.save(playerNpc, candidate);
+            PLAN_SEARCH_CURSORS.remove(playerNpc);
             return Optional.of(candidate);
         }
+        if (cursor.totalAttempts >= PLAN_SEARCH_ATTEMPTS
+                || cursor.nextOffsetIndex >= NEARBY_SITE_OFFSETS.size()) {
+            cursor.exhausted = true;
+        }
         return Optional.empty();
+    }
+
+    /** True while the current bounded site search still has work; exploration must wait for it. */
+    public static boolean isPlanSearchPending(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null || serverLevel == null || PlayerNpcFarmPlan.get(playerNpc).isPresent()) {
+            return false;
+        }
+        PlanSearchCursor cursor = PLAN_SEARCH_CURSORS.get(playerNpc);
+        String currentDimension = serverLevel.dimension().location().toString();
+        return cursor == null
+                || !currentDimension.equals(cursor.dimension)
+                || !cursor.exhausted;
     }
 
     public static boolean needsFarmLogs(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -647,9 +701,14 @@ public final class FarmAi {
     }
 
     private static boolean canClaimPlan(PlayerNpcEntity playerNpc, ServerLevel serverLevel, Plan plan) {
+        BlockPos farX = plan.origin().offset(plan.width(), 0, 0);
+        BlockPos farZ = plan.origin().offset(0, 0, plan.depth());
+        BlockPos farCorner = plan.origin().offset(plan.width(), 0, plan.depth());
         if (!isPlanGeometryValid(playerNpc, plan)
                 || !serverLevel.hasChunkAt(plan.origin())
-                || !serverLevel.hasChunkAt(plan.origin().offset(plan.width(), 0, plan.depth()))) {
+                || !serverLevel.hasChunkAt(farX)
+                || !serverLevel.hasChunkAt(farZ)
+                || !serverLevel.hasChunkAt(farCorner)) {
             return false;
         }
         for (BlockPos ground : plan.allGroundPositions()) {
@@ -670,7 +729,7 @@ public final class FarmAi {
                 && hasReachableEntry(playerNpc, serverLevel, plan);
     }
 
-    private static List<SiteOffset> nearbySiteOffsets() {
+    private static List<SiteOffset> createNearbySiteOffsets() {
         List<SiteOffset> offsets = new ArrayList<>();
         for (int dx = -MAX_SITE_SEARCH_RADIUS; dx <= MAX_SITE_SEARCH_RADIUS; dx++) {
             for (int dz = -MAX_SITE_SEARCH_RADIUS; dz <= MAX_SITE_SEARCH_RADIUS; dz++) {
@@ -783,6 +842,20 @@ public final class FarmAi {
     private record SiteOffset(int dx, int dz) {
         private int distanceSqr() {
             return this.dx * this.dx + this.dz * this.dz;
+        }
+    }
+
+    private static final class PlanSearchCursor {
+        private final String dimension;
+        private final BlockPos searchCenter;
+        private final Set<Long> triedOrigins = new LinkedHashSet<>();
+        private int nextOffsetIndex;
+        private int totalAttempts;
+        private boolean exhausted;
+
+        private PlanSearchCursor(String dimension, BlockPos searchCenter) {
+            this.dimension = dimension;
+            this.searchCenter = searchCenter;
         }
     }
 }
