@@ -434,3 +434,5 @@ Otherwise it delegates to:
 ```java
 PathfinderMob.checkMobSpawnRules(...)
 ```
+
+After the ordinary name/day/vanilla rules pass, non-egg/non-command/non-structure spawning must reserve a slot from `PlayerNpcNaturalSpawnCap`. `maxNaturalPlayerNpcs=0` disables natural spawning, positive values are fixed caps, and `-1` uses the separate conservative hardware/MSPT automatic population policy. The reservation is concurrency-safe for fresh-chunk worker threads and is converted to a persisted living UUID on entity join; it does not grant an AI worker resource or depend on force-ticket management.

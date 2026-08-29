@@ -23,8 +23,12 @@ public final class TreeAi {
     private static final int LEAF_RADIUS = 4;
     // Exploration advances the search center after a miss, so a smaller nearest-first slice makes
     // steady progress without letting several gatherers scan thousands of blocks in one tick.
-    private static final int MAX_SEARCH_BLOCK_READS = 1536;
-    private static final int MAX_LEAF_BLOCK_READS = 512;
+    // A miss is part of goal eligibility and runs synchronously on the server thread. The old
+    // 1,536-read pass repeatedly measured at 97-192 ms with only four idle NPCs; ExploreAround's
+    // log-priority predicate paid the same pass before choosing a destination. Keep one pass
+    // deliberately small and let exploration move the observation center after a miss.
+    private static final int MAX_SEARCH_BLOCK_READS = 50;
+    private static final int MAX_LEAF_BLOCK_READS = 32;
     private static final Map<Integer, List<ColumnOffset>> SEARCH_COLUMNS_BY_RADIUS = new HashMap<>();
 
     private TreeAi() {
@@ -35,6 +39,20 @@ public final class TreeAi {
     }
 
     public static Optional<Tree> findNearest(ServerLevel serverLevel, BlockPos center, int radius, Predicate<BlockPos> allowedLogPos) {
+        return findNearestSlice(serverLevel, center, radius, allowedLogPos, 0).tree();
+    }
+
+    /**
+     * Runs one retained column slice. Callers that must eventually cover a stationary search
+     * area retain {@link SearchSlice#nextColumnIndex()} between admitted passes.
+     */
+    public static SearchSlice findNearestSlice(
+            ServerLevel serverLevel,
+            BlockPos center,
+            int radius,
+            Predicate<BlockPos> allowedLogPos,
+            int startColumnIndex
+    ) {
         Set<BlockPos> visited = new HashSet<>();
         SearchBudget searchBudget = new SearchBudget(MAX_SEARCH_BLOCK_READS);
         SearchBudget leafBudget = new SearchBudget(MAX_LEAF_BLOCK_READS);
@@ -47,7 +65,10 @@ public final class TreeAi {
         // horizontal lower-bound already exceeds that tree's full squared distance cannot contain
         // a closer stump. The previous cuboid traversal always read every block in the full
         // 65x25x65 volume even when a tree stood across a small river.
-        for (ColumnOffset offset : searchColumns(radius)) {
+        List<ColumnOffset> columns = searchColumns(radius);
+        int columnIndex = Math.max(0, Math.min(startColumnIndex, columns.size()));
+        for (; columnIndex < columns.size(); columnIndex++) {
+            ColumnOffset offset = columns.get(columnIndex);
             if (searchBudget.exhausted()) {
                 break;
             }
@@ -76,7 +97,9 @@ public final class TreeAi {
             }
         }
 
-        return Optional.ofNullable(bestTree != null ? bestTree : bestLooseLog);
+        Optional<Tree> result = Optional.ofNullable(bestTree != null ? bestTree : bestLooseLog);
+        boolean complete = columnIndex >= columns.size();
+        return new SearchSlice(result, complete ? 0 : columnIndex, complete);
     }
 
     private static List<ColumnOffset> searchColumns(int radius) {
@@ -186,6 +209,9 @@ public final class TreeAi {
     }
 
     private record ColumnOffset(int dx, int dz, int distanceSqr) {
+    }
+
+    public record SearchSlice(Optional<Tree> tree, int nextColumnIndex, boolean complete) {
     }
 
     private static final class SearchBudget {

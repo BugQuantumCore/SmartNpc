@@ -428,6 +428,7 @@ public final class PlayerNpcForceTickManager {
 
         if (removePersistentEntry) {
             PlayerNpcForceTickData.get(server).remove(npcId);
+            PlayerNpcNaturalSpawnCap.onKnownNpcPermanentlyRemoved(server, npcId);
         }
     }
 

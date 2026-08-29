@@ -1,7 +1,9 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.PlayerNpcAlertManager;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.ai.util.DefaultRandomPos;
@@ -9,6 +11,7 @@ import net.minecraft.world.item.ArmorItem;
 import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.SwordItem;
+import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.EnumSet;
@@ -17,11 +20,15 @@ public class RespondToNpcAlertGoal extends Goal {
     private static final double ALERT_RADIUS = 36.0D;
     private static final double AVOID_SPEED = 1.0D;
     private static final int AVOID_TICKS = 80;
+    private static final int AVOID_REPATH_TICKS = 20;
+    private static final float PATH_NODE_MULTIPLIER = 0.15F;
 
     private final PlayerNpcEntity playerNpc;
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(10);
     private LivingEntity threat;
     private boolean avoiding;
     private int avoidTicks;
+    private int repathTicks;
 
     public RespondToNpcAlertGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -34,7 +41,8 @@ public class RespondToNpcAlertGoal extends Goal {
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isHealing()
-                || this.playerNpc.getTarget() != null) {
+                || this.playerNpc.getTarget() != null
+                || !this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
@@ -71,6 +79,7 @@ public class RespondToNpcAlertGoal extends Goal {
         this.playerNpc.setTarget(null);
         this.playerNpc.setCurrentAiState("ai.player_npc.avoiding_alert");
         this.moveAway();
+        this.repathTicks = AVOID_REPATH_TICKS;
     }
 
     @Override
@@ -82,8 +91,9 @@ public class RespondToNpcAlertGoal extends Goal {
 
         this.playerNpc.setTarget(null);
         this.playerNpc.getLookControl().setLookAt(this.threat, 40.0F, 40.0F);
-        if (this.playerNpc.getNavigation().isDone() || this.avoidTicks % 20 == 0) {
+        if (this.repathTicks-- <= 0) {
             this.moveAway();
+            this.repathTicks = AVOID_REPATH_TICKS;
         }
     }
 
@@ -93,6 +103,7 @@ public class RespondToNpcAlertGoal extends Goal {
         this.threat = null;
         this.avoiding = false;
         this.avoidTicks = 0;
+        this.repathTicks = 0;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }
 
@@ -124,7 +135,14 @@ public class RespondToNpcAlertGoal extends Goal {
             }
             awayPos = this.playerNpc.position().add(away.normalize().scale(12.0D));
         }
-        this.playerNpc.getNavigation().moveTo(awayPos.x, awayPos.y, awayPos.z, AVOID_SPEED);
+        Path path = PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                BlockPos.containing(awayPos.x, awayPos.y, awayPos.z),
+                PATH_NODE_MULTIPLIER
+        );
+        if (path != null && path.getNodeCount() > 0) {
+            this.playerNpc.getNavigation().moveTo(path, AVOID_SPEED);
+        }
     }
 
     private double powerScore(LivingEntity entity) {

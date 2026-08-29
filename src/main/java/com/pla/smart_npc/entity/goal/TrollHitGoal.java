@@ -1,6 +1,8 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
@@ -11,6 +13,7 @@ import net.minecraft.world.entity.npc.AbstractVillager;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -24,6 +27,7 @@ public class TrollHitGoal extends Goal {
     private static final int MAX_RUN_TICKS = 95;
     private static final int PATH_RECALCULATE_TICKS = 10;
     private static final int COOLDOWN_TICKS = 20 * 65;
+    private static final float PATH_NODE_MULTIPLIER = 0.15F;
 
     private final PlayerNpcEntity playerNpc;
     private LivingEntity victim;
@@ -93,7 +97,7 @@ public class TrollHitGoal extends Goal {
             this.playerNpc.setTarget(this.victim);
             this.playerNpc.setCurrentAiState("ai.player_npc.troll_hit");
             this.playerNpc.setCurrentAiDetail(this.victim.getDisplayName().getString());
-            this.playerNpc.getNavigation().moveTo(this.victim, RUN_SPEED);
+            this.moveAlongBoundedPath(this.victim.blockPosition());
             this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
         }
     }
@@ -140,7 +144,7 @@ public class TrollHitGoal extends Goal {
         this.playerNpc.getLookControl().setLookAt(this.victim, 60.0F, 60.0F);
         if (this.playerNpc.distanceToSqr(this.victim) > ATTACK_DISTANCE_SQR) {
             if (this.pathRecalculateTicks-- <= 0) {
-                this.playerNpc.getNavigation().moveTo(this.victim, RUN_SPEED);
+                this.moveAlongBoundedPath(this.victim.blockPosition());
                 this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
             }
             return;
@@ -204,7 +208,18 @@ public class TrollHitGoal extends Goal {
 
     private void moveToFleePos() {
         if (this.fleePos != null) {
-            this.playerNpc.getNavigation().moveTo(this.fleePos.x, this.fleePos.y, this.fleePos.z, RUN_SPEED);
+            this.moveAlongBoundedPath(BlockPos.containing(this.fleePos.x, this.fleePos.y, this.fleePos.z));
+        }
+    }
+
+    private void moveAlongBoundedPath(BlockPos targetPos) {
+        Path path = PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                targetPos,
+                PATH_NODE_MULTIPLIER
+        );
+        if (path != null && path.getNodeCount() > 0) {
+            this.playerNpc.getNavigation().moveTo(path, RUN_SPEED);
         }
     }
 }

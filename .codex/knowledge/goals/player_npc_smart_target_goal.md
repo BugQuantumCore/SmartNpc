@@ -2,7 +2,7 @@
 
 ## Source
 
-- `src/main/java/com/pla/player_npc/entity/goal/PlayerNpcSmartTargetGoal.java`
+- `src/main/java/com/pla/smart_npc/entity/goal/PlayerNpcSmartTargetGoal.java`
 - Registered from `PlayerNpcEntity.registerGoals()`.
 
 ## Purpose
@@ -34,3 +34,7 @@ Selects a target only when the score is positive and the NPC is not clearly outm
 If the current target is dead, removed, out of range, or no longer attackable, the goal clears it immediately before the 20 tick scan interval check so idle worker goals such as gathering, biome log search, building, and mining can run on the next goal pass. Failed scans no longer write `target scan: none` to the inspector detail. When a target is selected, the detail shows the chosen target name.
 
 Animals are only selected when the NPC lacks healing food. Villagers require villager/hostile personality bias and still use a very low attack chance, so NPCs should not commonly destroy villages.
+
+## Performance Contract
+
+The selector performs one `LivingEntity` AABB query on a randomized 20-30 tick cadence, which is less frequent than vanilla `NearestAttackableTargetGoal`'s usual 10-tick random interval. Interest/health state and lazy inventory/drop/own-power decisions are cached once per scan. Candidate `TargetingConditions` checks, including visibility/reachability rules, retain vanilla target-selector semantics. Active combat keeps the selected entity and does not rescan from `tick()` or `canContinueToUse()`.

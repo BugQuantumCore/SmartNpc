@@ -40,6 +40,14 @@ public final class ClearBlockAi {
     private static final int BREAK_STAND_RADIUS = 2;
     private static final int BREAK_STAND_VERTICAL_RANGE = 2;
     private static final int MAX_BREAK_STAND_PATH_CHECKS = 12;
+    private static final int MAX_ACCESSIBLE_CLEAR_CANDIDATES = 12;
+    // Path construction is the expensive part. Selection retries rotate through candidates, so
+    // one total path here bounds the server tick without permanently favoring the nearest miss.
+    private static final int MAX_CLEAR_SELECTION_PATHS = 1;
+    private static final int MAX_RUNNING_CLEAR_STAND_PATHS = 1;
+    private static final int RUNNING_STAND_SELECTION_RETRY_TICKS = 20;
+    private static final int DENIED_PATH_RETRY_MAX_TICKS = 4;
+    private static final float CLEAR_STAND_PATH_NODE_MULTIPLIER = 0.25F;
     private static final int APPROACH_REPATH_INTERVAL_TICKS = 10;
     private static final int MAX_APPROACH_TICKS = 20 * 8;
     private static final int MAX_CLEAR_TARGET_TICKS = 20 * 15;
@@ -57,10 +65,20 @@ public final class ClearBlockAi {
     private double clearDistanceSqr = DEFAULT_CLEAR_DISTANCE_SQR;
     private boolean allowSoftCover;
     private boolean allowOwnedFarmDestruction;
+    private Path plannedApproachPath;
     private int approachRepathTicks;
     private int approachTicks;
     private int clearTargetTicks;
     private int centeredBlockedStandTicks;
+    private int clearSelectionCursor;
+    private int clearSelectionFailedPathAttempts;
+    private int clearSelectionSignature;
+    private boolean clearSelectionInitialized;
+    private boolean clearSelectionPending;
+    private int runningStandSelectionCursor;
+    private int runningStandCandidatesExamined;
+    private int runningStandCandidateCount;
+    private int nextRunningStandSelectionTick;
 
     public ClearBlockAi(PlayerNpcEntity playerNpc, BreakingBlockAi breakingBlockAi) {
         this.playerNpc = playerNpc;
@@ -73,6 +91,35 @@ public final class ClearBlockAi {
 
     public BlockPos targetPos() {
         return this.targetPos;
+    }
+
+    /** True when a bounded startNearest pass has more stand candidates to inspect later. */
+    public boolean hasPendingSelection() {
+        return this.clearSelectionPending;
+    }
+
+    /** True only when the next clear tick would construct a new navigation path. */
+    public boolean needsPathWork(ServerLevel serverLevel) {
+        if (serverLevel == null
+                || this.targetPos == null
+                || canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos, this.allowSoftCover)) {
+            return false;
+        }
+        if (this.playerNpc.tickCount < this.nextRunningStandSelectionTick) {
+            return false;
+        }
+        if (this.standPos == null
+                || !canUseBreakStand(serverLevel, this.standPos, this.targetPos, this.allowSoftCover)) {
+            return true;
+        }
+        if (isAtBreakStand(this.playerNpc, this.standPos)
+                || this.plannedApproachPath != null
+                || this.approachRepathTicks > 0
+                && !this.playerNpc.getNavigation().isDone()
+                && !this.playerNpc.getNavigation().isStuck()) {
+            return false;
+        }
+        return true;
     }
 
     public boolean start(
@@ -190,31 +237,74 @@ public final class ClearBlockAi {
                 : candidates.stream()
                 .filter(pos -> !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos))
                 .toList();
-        Optional<BlockPos> target = findNearestAccessibleClearable(
+        int selectionSignature = clearSelectionSignature(
+                effectiveCandidates,
+                detail,
+                clearDistanceSqr,
+                allowSoftColumnCover,
+                allowOwnedFarmDestruction
+        );
+        if (!this.clearSelectionInitialized || this.clearSelectionSignature != selectionSignature) {
+            this.clearSelectionCursor = 0;
+            this.clearSelectionFailedPathAttempts = 0;
+            this.clearSelectionSignature = selectionSignature;
+            this.clearSelectionInitialized = true;
+        }
+        ClearTargetSelection selection = selectNearestAccessibleClearable(
                 serverLevel,
                 this.playerNpc,
                 effectiveCandidates,
                 targetPredicate,
                 clearDistanceSqr,
-                allowSoftColumnCover
+                allowSoftColumnCover,
+                new NavigationPathBudget(MAX_CLEAR_SELECTION_PATHS),
+                this.clearSelectionCursor
         );
-        if (target.isEmpty()) {
+        if (selection.plan().isEmpty()) {
+            this.clearSelectionCursor = selection.nextCandidateIndex();
+            this.clearSelectionFailedPathAttempts += selection.pathsAttempted();
+            this.clearSelectionPending = selection.pathsAttempted() > 0
+                    && this.clearSelectionFailedPathAttempts < selection.pathCandidateCount();
+            if (!this.clearSelectionPending) {
+                this.resetClearSelectionProgress();
+            }
             return false;
         }
 
+        ClearTargetPlan plan = selection.plan().get();
+        BlockPos target = plan.target();
         Predicate<BlockState> effectivePredicate = targetPredicate;
-        BlockState state = serverLevel.getBlockState(target.get());
+        BlockState state = serverLevel.getBlockState(target);
         if (allowSoftColumnCover
                 && !targetPredicate.test(state)
-                && isPartialShapePathObstruction(serverLevel, target.get(), state)) {
+                && isPartialShapePathObstruction(serverLevel, target, state)) {
             effectivePredicate = blockState -> targetPredicate.test(blockState)
                     || isPotentialPartialShapeState(blockState);
         }
-        return this.start(serverLevel, target.get(), effectivePredicate, detail, requiredTicks,
+        boolean started = this.start(serverLevel, target, effectivePredicate, detail, requiredTicks,
                 clearDistanceSqr, allowSoftColumnCover, allowOwnedFarmDestruction);
+        if (!started) {
+            this.resetClearSelectionProgress();
+            return false;
+        }
+        this.standPos = plan.stand();
+        this.plannedApproachPath = plan.path();
+        if (plan.stand() != null) {
+            // The start pass already evaluated the nearest stand. If that retained route later
+            // becomes unusable, running recovery resumes from the next bounded stand candidate.
+            this.runningStandSelectionCursor = 1;
+            this.runningStandCandidatesExamined = 1;
+            this.runningStandCandidateCount = MAX_BREAK_STAND_PATH_CHECKS;
+        }
+        this.resetClearSelectionProgress();
+        return true;
     }
 
     public TickResult tick(ServerLevel serverLevel) {
+        return this.tick(serverLevel, true);
+    }
+
+    public TickResult tick(ServerLevel serverLevel, boolean pathWorkAllowed) {
         if (this.targetPos == null) {
             return TickResult.IDLE;
         }
@@ -275,7 +365,7 @@ public final class ClearBlockAi {
 
         if (!canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos, this.allowSoftCover)) {
             this.breakingBlockAi.stop();
-            if (!this.moveNearTarget(serverLevel)) {
+            if (!this.moveNearTarget(serverLevel, pathWorkAllowed)) {
                 this.stop();
                 return TickResult.FAILED;
             }
@@ -322,10 +412,13 @@ public final class ClearBlockAi {
         this.clearDistanceSqr = DEFAULT_CLEAR_DISTANCE_SQR;
         this.allowSoftCover = false;
         this.allowOwnedFarmDestruction = false;
+        this.plannedApproachPath = null;
         this.approachRepathTicks = 0;
         this.approachTicks = 0;
         this.clearTargetTicks = 0;
         this.centeredBlockedStandTicks = 0;
+        this.resetClearSelectionProgress();
+        this.resetRunningStandSelection();
     }
 
     /**
@@ -338,9 +431,26 @@ public final class ClearBlockAi {
         }
         this.breakingBlockAi.stop();
         this.standPos = null;
+        this.plannedApproachPath = null;
         this.approachRepathTicks = 0;
         this.approachTicks = 0;
         this.centeredBlockedStandTicks = 0;
+        this.resetRunningStandSelection();
+    }
+
+    private void resetClearSelectionProgress() {
+        this.clearSelectionCursor = 0;
+        this.clearSelectionFailedPathAttempts = 0;
+        this.clearSelectionSignature = 0;
+        this.clearSelectionInitialized = false;
+        this.clearSelectionPending = false;
+    }
+
+    private void resetRunningStandSelection() {
+        this.runningStandSelectionCursor = 0;
+        this.runningStandCandidatesExamined = 0;
+        this.runningStandCandidateCount = 0;
+        this.nextRunningStandSelectionTick = 0;
     }
 
     public String detail() {
@@ -424,6 +534,28 @@ public final class ClearBlockAi {
             double maxDistanceSqr,
             boolean allowSoftColumnCover
     ) {
+        return selectNearestAccessibleClearable(
+                serverLevel,
+                playerNpc,
+                candidates,
+                targetPredicate,
+                maxDistanceSqr,
+                allowSoftColumnCover,
+                new NavigationPathBudget(MAX_BREAK_STAND_PATH_CHECKS),
+                0
+        ).plan().map(ClearTargetPlan::target);
+    }
+
+    private static ClearTargetSelection selectNearestAccessibleClearable(
+            ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
+            Collection<BlockPos> candidates,
+            Predicate<BlockState> targetPredicate,
+            double maxDistanceSqr,
+            boolean allowSoftColumnCover,
+            NavigationPathBudget pathBudget,
+            int startCandidateIndex
+    ) {
         BlockPos origin = playerNpc.blockPosition();
         Set<BlockPos> seen = new HashSet<>();
         ArrayList<BlockPos> clearable = new ArrayList<>();
@@ -441,8 +573,17 @@ public final class ClearBlockAi {
         }
 
         clearable.sort(Comparator.comparingDouble(pos -> pos.distSqr(origin)));
-        int pathChecks = 0;
-        for (BlockPos candidate : clearable) {
+        int candidateCount = clearable.size();
+        if (candidateCount <= 0) {
+            return new ClearTargetSelection(Optional.empty(), 0, 0, 0);
+        }
+        int startIndex = Math.floorMod(startCandidateIndex, candidateCount);
+        int maxCandidates = Math.min(MAX_ACCESSIBLE_CLEAR_CANDIDATES, candidateCount);
+        int nextCandidateIndex = (startIndex + maxCandidates) % candidateCount;
+        int pathsAttempted = 0;
+        for (int offset = 0; offset < maxCandidates; offset++) {
+            int candidateIndex = (startIndex + offset) % candidateCount;
+            BlockPos candidate = clearable.get(candidateIndex);
             if (findBreakRayBlocker(
                     serverLevel,
                     playerNpc,
@@ -451,23 +592,69 @@ public final class ClearBlockAi {
                     maxDistanceSqr,
                     allowSoftColumnCover
             ).isPresent()) {
-                return Optional.of(candidate);
+                return new ClearTargetSelection(
+                        Optional.of(new ClearTargetPlan(candidate, null, null)),
+                        (candidateIndex + 1) % candidateCount,
+                        pathsAttempted,
+                        maxCandidates
+                );
             }
             if (canBreakFromCurrentPosition(serverLevel, playerNpc, candidate, allowSoftColumnCover)) {
-                return Optional.of(candidate);
+                return new ClearTargetSelection(
+                        Optional.of(new ClearTargetPlan(candidate, null, null)),
+                        (candidateIndex + 1) % candidateCount,
+                        pathsAttempted,
+                        maxCandidates
+                );
             }
             Optional<BlockPos> cover = findColumnCover(serverLevel, playerNpc, candidate, targetPredicate, maxDistanceSqr, allowSoftColumnCover);
             if (cover.isPresent()) {
-                return cover;
+                return new ClearTargetSelection(
+                        Optional.of(new ClearTargetPlan(cover.get(), null, null)),
+                        (candidateIndex + 1) % candidateCount,
+                        pathsAttempted,
+                        maxCandidates
+                );
             }
-            if (pathChecks++ >= MAX_BREAK_STAND_PATH_CHECKS) {
-                break;
+            if (pathBudget.exhausted()) {
+                continue;
             }
-            if (findReachableBreakStand(playerNpc, serverLevel, candidate, allowSoftColumnCover).isPresent()) {
-                return Optional.of(candidate);
+            nextCandidateIndex = (candidateIndex + 1) % candidateCount;
+            int remainingBefore = pathBudget.remaining();
+            Optional<ReachableBreakStand> stand = findReachableBreakStandPlan(
+                    playerNpc,
+                    serverLevel,
+                    candidate,
+                    allowSoftColumnCover,
+                    pathBudget,
+                    1
+            );
+            pathsAttempted += Math.max(0, remainingBefore - pathBudget.remaining());
+            if (stand.isPresent()) {
+                return new ClearTargetSelection(
+                        Optional.of(new ClearTargetPlan(candidate, stand.get().stand(), stand.get().path())),
+                        nextCandidateIndex,
+                        pathsAttempted,
+                        maxCandidates
+                );
             }
         }
-        return Optional.empty();
+        return new ClearTargetSelection(Optional.empty(), nextCandidateIndex, pathsAttempted, maxCandidates);
+    }
+
+    private static int clearSelectionSignature(
+            Collection<BlockPos> candidates,
+            String detail,
+            double clearDistanceSqr,
+            boolean allowSoftColumnCover,
+            boolean allowOwnedFarmDestruction
+    ) {
+        int result = candidates == null ? 0 : candidates.hashCode();
+        result = 31 * result + (detail == null ? 0 : detail.hashCode());
+        long distanceBits = Double.doubleToLongBits(clearDistanceSqr);
+        result = 31 * result + (int) (distanceBits ^ distanceBits >>> 32);
+        result = 31 * result + Boolean.hashCode(allowSoftColumnCover);
+        return 31 * result + Boolean.hashCode(allowOwnedFarmDestruction);
     }
 
     /**
@@ -598,32 +785,67 @@ public final class ClearBlockAi {
                 && isBreakablePathObstruction(serverLevel, pos, state, allowSoftCover);
     }
 
-    private boolean moveNearTarget(ServerLevel serverLevel) {
+    private boolean moveNearTarget(ServerLevel serverLevel, boolean pathWorkAllowed) {
         if (this.targetPos == null) {
             return false;
         }
 
         if (canBreakFromCurrentPosition(serverLevel, this.playerNpc, this.targetPos, this.allowSoftCover)) {
+            this.plannedApproachPath = null;
+            this.resetRunningStandSelection();
             this.approachTicks = 0;
             this.centeredBlockedStandTicks = 0;
             return true;
         }
-        if (++this.approachTicks > MAX_APPROACH_TICKS) {
-            return false;
-        }
 
         if (this.standPos == null
                 || !canUseBreakStand(serverLevel, this.standPos, this.targetPos, this.allowSoftCover)) {
-            this.standPos = findReachableBreakStand(
+            this.plannedApproachPath = null;
+            if (this.playerNpc.tickCount < this.nextRunningStandSelectionTick) {
+                return true;
+            }
+            if (!pathWorkAllowed) {
+                this.deferDeniedPathWork();
+                return true;
+            }
+            ReachableBreakStandSelection selection = selectReachableBreakStandPlan(
                     this.playerNpc,
                     serverLevel,
                     this.targetPos,
-                    this.allowSoftCover
-            ).orElse(null);
+                    this.allowSoftCover,
+                    new NavigationPathBudget(MAX_RUNNING_CLEAR_STAND_PATHS),
+                    MAX_BREAK_STAND_PATH_CHECKS,
+                    this.runningStandSelectionCursor
+            );
+            this.runningStandSelectionCursor = selection.nextCandidateIndex();
+            this.runningStandCandidateCount = selection.pathCandidateCount();
+            this.runningStandCandidatesExamined += selection.pathsAttempted();
+            if (selection.plan().isEmpty()) {
+                if (selection.pathsAttempted() <= 0
+                        || this.runningStandCandidatesExamined >= this.runningStandCandidateCount) {
+                    this.resetRunningStandSelection();
+                    return false;
+                }
+                this.nextRunningStandSelectionTick = this.playerNpc.tickCount
+                        + RUNNING_STAND_SELECTION_RETRY_TICKS;
+                return true;
+            }
+            ReachableBreakStand stand = selection.plan().get();
+            this.standPos = stand.stand();
+            this.plannedApproachPath = stand.path();
+            if (selection.pathsAttempted() <= 0) {
+                this.runningStandCandidatesExamined++;
+            }
+            this.nextRunningStandSelectionTick = 0;
             this.approachRepathTicks = 0;
         }
         if (this.standPos == null) {
             return false;
+        }
+        if (++this.approachTicks > MAX_APPROACH_TICKS) {
+            this.standPos = null;
+            this.approachTicks = 0;
+            return this.deferRunningStandSelection();
         }
 
         this.playerNpc.getLookControl().setLookAt(
@@ -635,11 +857,12 @@ public final class ClearBlockAi {
         );
 
         if (isAtBreakStand(this.playerNpc, this.standPos)) {
+            this.plannedApproachPath = null;
             this.playerNpc.getNavigation().stop();
             if (this.isCenteredOnBreakStand() && ++this.centeredBlockedStandTicks > MAX_CENTERED_BLOCKED_STAND_TICKS) {
                 this.standPos = null;
                 this.centeredBlockedStandTicks = 0;
-                return false;
+                return this.deferRunningStandSelection();
             }
             this.nudgeTowardBreakStandCenter();
             return true;
@@ -652,21 +875,60 @@ public final class ClearBlockAi {
             return true;
         }
 
-        Path path = this.playerNpc.getNavigation().createPath(this.standPos, 0);
+        Path path = this.plannedApproachPath;
+        this.plannedApproachPath = null;
+        if (path == null) {
+            if (this.playerNpc.tickCount < this.nextRunningStandSelectionTick) {
+                return true;
+            }
+            if (!pathWorkAllowed) {
+                this.deferDeniedPathWork();
+                return true;
+            }
+            path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    this.standPos,
+                    CLEAR_STAND_PATH_NODE_MULTIPLIER
+            );
+            this.nextRunningStandSelectionTick = 0;
+        }
         if (!isUsablePathToStand(path, this.standPos)) {
             this.standPos = null;
-            return false;
+            return this.deferRunningStandSelection();
         }
         this.approachRepathTicks = APPROACH_REPATH_INTERVAL_TICKS;
-        return this.playerNpc.getNavigation().moveTo(path, 1.0D);
+        if (!this.playerNpc.getNavigation().moveTo(path, 1.0D)) {
+            this.standPos = null;
+            return this.deferRunningStandSelection();
+        }
+        return true;
+    }
+
+    private void deferDeniedPathWork() {
+        this.nextRunningStandSelectionTick = this.playerNpc.tickCount
+                + 1 + this.playerNpc.getRandom().nextInt(DENIED_PATH_RETRY_MAX_TICKS);
+    }
+
+    private boolean deferRunningStandSelection() {
+        this.plannedApproachPath = null;
+        if (this.runningStandCandidateCount <= 0
+                || this.runningStandCandidatesExamined >= this.runningStandCandidateCount) {
+            this.resetRunningStandSelection();
+            return false;
+        }
+        this.nextRunningStandSelectionTick = this.playerNpc.tickCount
+                + RUNNING_STAND_SELECTION_RETRY_TICKS;
+        return true;
     }
 
     private void retargetBlocker(BlockPos blockerPos) {
         this.targetPos = blockerPos.immutable();
         this.standPos = null;
+        this.plannedApproachPath = null;
         this.approachRepathTicks = 0;
         this.approachTicks = 0;
         this.centeredBlockedStandTicks = 0;
+        this.resetRunningStandSelection();
         this.playerNpc.getNavigation().stop();
     }
 
@@ -678,9 +940,11 @@ public final class ClearBlockAi {
 
         this.targetPos = this.requestedTargetPos;
         this.standPos = null;
+        this.plannedApproachPath = null;
         this.approachRepathTicks = 0;
         this.approachTicks = 0;
         this.centeredBlockedStandTicks = 0;
+        this.resetRunningStandSelection();
         this.playerNpc.getNavigation().stop();
         return true;
     }
@@ -700,17 +964,46 @@ public final class ClearBlockAi {
             ServerLevel serverLevel,
             BlockPos targetPos
     ) {
-        return findReachableBreakStand(playerNpc, serverLevel, targetPos, false);
+        return findReachableBreakStandPlan(
+                playerNpc,
+                serverLevel,
+                targetPos,
+                false,
+                new NavigationPathBudget(MAX_BREAK_STAND_PATH_CHECKS),
+                MAX_BREAK_STAND_PATH_CHECKS
+        ).map(ReachableBreakStand::stand);
     }
 
-    private static Optional<BlockPos> findReachableBreakStand(
+    private static Optional<ReachableBreakStand> findReachableBreakStandPlan(
             PlayerNpcEntity playerNpc,
             ServerLevel serverLevel,
             BlockPos targetPos,
-            boolean allowSoftCover
+            boolean allowSoftCover,
+            NavigationPathBudget pathBudget,
+            int maximumPathsForTarget
     ) {
-        if (playerNpc == null || serverLevel == null || targetPos == null) {
-            return Optional.empty();
+        return selectReachableBreakStandPlan(
+                playerNpc,
+                serverLevel,
+                targetPos,
+                allowSoftCover,
+                pathBudget,
+                maximumPathsForTarget,
+                0
+        ).plan();
+    }
+
+    private static ReachableBreakStandSelection selectReachableBreakStandPlan(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            BlockPos targetPos,
+            boolean allowSoftCover,
+            NavigationPathBudget pathBudget,
+            int maximumPathsForTarget,
+            int startCandidateIndex
+    ) {
+        if (playerNpc == null || serverLevel == null || targetPos == null || pathBudget == null) {
+            return new ReachableBreakStandSelection(Optional.empty(), 0, 0, 0);
         }
         ArrayList<BlockPos> candidates = new ArrayList<>();
         BlockPos playerFeet = playerNpc.blockPosition();
@@ -737,20 +1030,49 @@ public final class ClearBlockAi {
                 pos.getZ() + 0.5D
         )));
 
-        int pathChecks = 0;
-        for (BlockPos candidate : candidates) {
+        int candidateCount = Math.min(Math.max(0, maximumPathsForTarget), candidates.size());
+        if (candidateCount <= 0) {
+            return new ReachableBreakStandSelection(Optional.empty(), 0, 0, 0);
+        }
+        int startIndex = Math.floorMod(startCandidateIndex, candidateCount);
+        int nextCandidateIndex = startIndex;
+        int pathsAttempted = 0;
+        for (int offset = 0; offset < candidateCount; offset++) {
+            int candidateIndex = (startIndex + offset) % candidateCount;
+            BlockPos candidate = candidates.get(candidateIndex);
             if (isAtBreakStand(playerNpc, candidate)) {
-                return Optional.of(candidate);
+                return new ReachableBreakStandSelection(
+                        Optional.of(new ReachableBreakStand(candidate, null)),
+                        (candidateIndex + 1) % candidateCount,
+                        pathsAttempted,
+                        candidateCount
+                );
             }
-            if (pathChecks++ >= MAX_BREAK_STAND_PATH_CHECKS) {
+            if (!pathBudget.tryConsume()) {
                 break;
             }
-            Path path = playerNpc.getNavigation().createPath(candidate, 0);
+            pathsAttempted++;
+            nextCandidateIndex = (candidateIndex + 1) % candidateCount;
+            Path path = PathNavigationAi.createBoundedPath(
+                    playerNpc,
+                    candidate,
+                    CLEAR_STAND_PATH_NODE_MULTIPLIER
+            );
             if (isUsablePathToStand(path, candidate)) {
-                return Optional.of(candidate);
+                return new ReachableBreakStandSelection(
+                        Optional.of(new ReachableBreakStand(candidate, path)),
+                        nextCandidateIndex,
+                        pathsAttempted,
+                        candidateCount
+                );
             }
         }
-        return Optional.empty();
+        return new ReachableBreakStandSelection(
+                Optional.empty(),
+                nextCandidateIndex,
+                pathsAttempted,
+                candidateCount
+        );
     }
 
     private static boolean canUseBreakStand(ServerLevel serverLevel, BlockPos standPos, BlockPos targetPos) {
@@ -992,6 +1314,52 @@ public final class ClearBlockAi {
         }
         Node endNode = path.getEndNode();
         return endNode != null && endNode.asBlockPos().equals(standPos);
+    }
+
+    private record ClearTargetPlan(BlockPos target, BlockPos stand, Path path) {
+    }
+
+    private record ClearTargetSelection(
+            Optional<ClearTargetPlan> plan,
+            int nextCandidateIndex,
+            int pathsAttempted,
+            int pathCandidateCount
+    ) {
+    }
+
+    private record ReachableBreakStand(BlockPos stand, Path path) {
+    }
+
+    private record ReachableBreakStandSelection(
+            Optional<ReachableBreakStand> plan,
+            int nextCandidateIndex,
+            int pathsAttempted,
+            int pathCandidateCount
+    ) {
+    }
+
+    private static final class NavigationPathBudget {
+        private int remaining;
+
+        private NavigationPathBudget(int maximumPaths) {
+            this.remaining = Math.max(0, maximumPaths);
+        }
+
+        private boolean exhausted() {
+            return this.remaining <= 0;
+        }
+
+        private int remaining() {
+            return this.remaining;
+        }
+
+        private boolean tryConsume() {
+            if (this.exhausted()) {
+                return false;
+            }
+            this.remaining--;
+            return true;
+        }
     }
 
     private static void addBodyColumn(List<BlockPos> candidates, BlockPos feet) {

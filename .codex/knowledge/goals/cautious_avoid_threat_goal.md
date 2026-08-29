@@ -27,7 +27,10 @@ becomes invalid, leaves the goal's configured range, or combat begins.
 
 Threat discovery and escape-path creation are activation-only decisions. `CanUseThrottle` gives
 each NPC a randomized 20-30 tick activation cadence, and one activation creates at most one path,
-matching vanilla `AvoidEntityGoal`'s bounded shape. `canContinueToUse()` contains only current
+matching vanilla `AvoidEntityGoal`'s bounded shape. The escape path uses
+`PathNavigationAi.createBoundedPath(..., 0.15F)`, which restores the navigation multiplier in
+`finally`; this keeps safety behavior independent of the routine-worker scheduler while bounding
+its synchronous node expansion. `canContinueToUse()` contains only current
 entity/navigation/distance guards. The active per-tick path may update look direction and vanilla's
 near/far speed modifier, but it must never scan entities, call `DefaultRandomPos`, or create/restart
 a path.

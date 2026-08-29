@@ -49,7 +49,11 @@ public class DigDownForStoneGoal extends Goal {
     private static final int FISHING_SUPPORT_RETRY_COOLDOWN_TICKS = 20;
     private static final int ORE_SEARCH_INTERVAL_TICKS = 20 * 2;
     private static final int CONTINUE_ELIGIBILITY_INTERVAL_TICKS = 20;
-    private static final int MAX_DIG_SITE_PATH_CHECKS = 1;
+    private static final int MAX_DIG_SITE_COLUMNS_PER_SLICE = 64;
+    // Origin discovery is a speculative activation check. A single 0.05 path still
+    // measured above 100 ms in live worlds, so keep it substantially below movement
+    // paths and let later admitted checks try another candidate.
+    private static final float DIG_SITE_PATH_NODE_MULTIPLIER = 0.01F;
     private static final int NEARBY_STONE_ACTIVATION_STAGE_TICKS = 8;
     private static final int CAVE_CHECK_INTERVAL_TICKS = 20;
     private static final int MAX_DIG_SITE_WALK_TICKS = 20 * 25;
@@ -72,6 +76,11 @@ public class DigDownForStoneGoal extends Goal {
     private BlockPos digStepOffset;
     private BlockPos lastLocalProspectWalkPos;
     private BlockPos activeClearTarget;
+    private BlockPos digOriginSearchCenter;
+    private BlockPos digOriginCandidateToValidate;
+    private int digOriginSearchOffset;
+    private int digOriginColumnsScanned;
+    private boolean digOriginSearchPending;
     private int goalTicks;
     private int repathTicks;
     private int digSiteWalkTicks;
@@ -174,6 +183,11 @@ public class DigDownForStoneGoal extends Goal {
 
         this.digOrigin = this.findDigOrigin(serverLevel);
         if (this.digOrigin == null) {
+            if (this.digOriginSearchPending) {
+                int retryTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+                this.canUseThrottle.retryIn(this.playerNpc, retryTicks);
+                return false;
+            }
             if (stoneSupplyActive && GatherStoneGoal.isFishingSupportJob(this.playerNpc)) {
                 // GatherStoneGoal has already found no usable nearby target at this point.
                 // Back off only after the dig-down fallback also fails, otherwise this
@@ -495,37 +509,74 @@ public class DigDownForStoneGoal extends Goal {
 
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
         BlockPos center = home.map(PlayerNpcHomeUtil::center).orElseGet(() -> this.playerNpc.blockPosition().immutable());
-        List<BlockPos> candidates = new ArrayList<>();
-        for (int x = center.getX() - DIG_SITE_MAX_RADIUS; x <= center.getX() + DIG_SITE_MAX_RADIUS; x++) {
-            for (int z = center.getZ() - DIG_SITE_MAX_RADIUS; z <= center.getZ() + DIG_SITE_MAX_RADIUS; z++) {
-                int dx = x - center.getX();
-                int dz = z - center.getZ();
-                int distSqr = dx * dx + dz * dz;
-                if (distSqr < DIG_SITE_MIN_RADIUS * DIG_SITE_MIN_RADIUS || distSqr > DIG_SITE_MAX_RADIUS * DIG_SITE_MAX_RADIUS) {
-                    continue;
-                }
-                if (!serverLevel.hasChunk(x >> 4, z >> 4)) {
-                    continue;
-                }
-                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-                BlockPos candidate = new BlockPos(x, y, z);
-                if (this.canStandAt(serverLevel, candidate)
-                        && this.isAwayFromHome(candidate)
-                        && !this.isProtectedStoneWorkPosition(candidate)
-                        && this.isInsideResourceRadius(candidate)) {
-                    candidates.add(candidate.immutable());
-                }
-            }
+        this.ensureDigOriginSearch(center);
+
+        // A plausible loaded stand starts the running goal without speculative PathFinder work.
+        // Movement owns its separately admitted bounded route on a later entity tick; a failed
+        // route uses the existing short walk cooldown and the retained search chooses another.
+        if (this.digOriginCandidateToValidate != null) {
+            BlockPos candidate = this.digOriginCandidateToValidate;
+            this.digOriginCandidateToValidate = null;
+            this.resetDigOriginSearch();
+            return candidate;
         }
 
-        int checks = Math.min(candidates.size(), MAX_DIG_SITE_PATH_CHECKS);
-        for (int i = 0; i < checks && !candidates.isEmpty(); i++) {
-            BlockPos candidate = candidates.remove(this.playerNpc.getRandom().nextInt(candidates.size()));
-            if (this.pathNavigationAi.canReachOrSafelyDropTo(serverLevel, candidate, MAX_DIG_SITE_SAFE_DROP_BLOCKS)) {
-                return candidate;
+        int area = this.digOriginSearchArea();
+        int end = Math.min(area, this.digOriginColumnsScanned + MAX_DIG_SITE_COLUMNS_PER_SLICE);
+        int diameter = DIG_SITE_MAX_RADIUS * 2 + 1;
+        while (this.digOriginColumnsScanned < end) {
+            int index = (this.digOriginSearchOffset + this.digOriginColumnsScanned++) % area;
+            int dx = index % diameter - DIG_SITE_MAX_RADIUS;
+            int dz = index / diameter - DIG_SITE_MAX_RADIUS;
+            int distSqr = dx * dx + dz * dz;
+            if (distSqr < DIG_SITE_MIN_RADIUS * DIG_SITE_MIN_RADIUS
+                    || distSqr > DIG_SITE_MAX_RADIUS * DIG_SITE_MAX_RADIUS) {
+                continue;
+            }
+            int x = center.getX() + dx;
+            int z = center.getZ() + dz;
+            if (!serverLevel.hasChunk(x >> 4, z >> 4)) {
+                continue;
+            }
+            int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+            BlockPos candidate = new BlockPos(x, y, z);
+            if (this.canStandAt(serverLevel, candidate)
+                    && this.isAwayFromHome(candidate)
+                    && !this.isProtectedStoneWorkPosition(candidate)
+                    && this.isInsideResourceRadius(candidate)) {
+                this.digOriginCandidateToValidate = candidate.immutable();
+                this.digOriginSearchPending = true;
+                return null;
             }
         }
+        this.digOriginSearchPending = this.digOriginColumnsScanned < area;
+        if (!this.digOriginSearchPending) {
+            this.resetDigOriginSearch();
+        }
         return null;
+    }
+
+    private void ensureDigOriginSearch(BlockPos center) {
+        if (center.equals(this.digOriginSearchCenter)) {
+            return;
+        }
+        this.resetDigOriginSearch();
+        this.digOriginSearchCenter = center.immutable();
+        this.digOriginSearchOffset = this.playerNpc.getRandom().nextInt(this.digOriginSearchArea());
+        this.digOriginSearchPending = true;
+    }
+
+    private int digOriginSearchArea() {
+        int diameter = DIG_SITE_MAX_RADIUS * 2 + 1;
+        return diameter * diameter;
+    }
+
+    private void resetDigOriginSearch() {
+        this.digOriginSearchCenter = null;
+        this.digOriginCandidateToValidate = null;
+        this.digOriginSearchOffset = 0;
+        this.digOriginColumnsScanned = 0;
+        this.digOriginSearchPending = false;
     }
 
     private BlockPos findCurrentProspectingOrigin(ServerLevel serverLevel) {
@@ -548,7 +599,12 @@ public class DigDownForStoneGoal extends Goal {
                 continue;
             }
             if (feet.distSqr(immutable) <= LOCAL_STEP_DISTANCE_SQR
-                    || this.pathNavigationAi.canReachOrSafelyDropTo(serverLevel, immutable, MAX_DIG_SITE_SAFE_DROP_BLOCKS)) {
+                    || this.pathNavigationAi.canReachOrSafelyDropTo(
+                    serverLevel,
+                    immutable,
+                    MAX_DIG_SITE_SAFE_DROP_BLOCKS,
+                    DIG_SITE_PATH_NODE_MULTIPLIER
+            )) {
                 return immutable;
             }
         }
@@ -862,8 +918,20 @@ public class DigDownForStoneGoal extends Goal {
             return false;
         }
         boolean moved = this.stairSteps == 0
-                ? this.pathNavigationAi.moveTo(serverLevel, pos, this.speed, MAX_DIG_SITE_SAFE_DROP_BLOCKS)
-                : this.pathNavigationAi.moveToExact(serverLevel, pos, this.speed, MAX_DIG_SITE_SAFE_DROP_BLOCKS);
+                ? this.pathNavigationAi.moveTo(
+                serverLevel,
+                pos,
+                this.speed,
+                MAX_DIG_SITE_SAFE_DROP_BLOCKS,
+                DIG_SITE_PATH_NODE_MULTIPLIER
+        )
+                : this.pathNavigationAi.moveToExact(
+                serverLevel,
+                pos,
+                this.speed,
+                MAX_DIG_SITE_SAFE_DROP_BLOCKS,
+                DIG_SITE_PATH_NODE_MULTIPLIER
+        );
         if (moved) {
             return true;
         }

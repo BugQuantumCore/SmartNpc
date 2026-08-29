@@ -58,11 +58,15 @@ public class GatherLogsGoal extends Goal {
     private static final int MAX_LOG_PATH_CHECKS = 1;
     private static final int MAX_NEARBY_LOG_PATH_CHECKS = 1;
     private static final int MAX_DIRT_PATH_CHECKS = 1;
-    private static final int MAX_DIRT_COLUMNS_PER_SEARCH_PASS = 96;
+    private static final int MAX_DIRT_COLUMNS_PER_SEARCH_PASS = 16;
     private static final double DIRT_SEARCH_RESET_DISTANCE_SQR = 4.0D * 4.0D;
     private static final int MAX_STAND_PATH_CHECKS = 1;
     private static final int MAX_DESCENT_PATH_CHECKS = 1;
     private static final int PILLAR_RECOVERY_SCAN_INTERVAL_TICKS = 20;
+    // Eligibility only needs a cheap reachability signal. A successful retained path is still
+    // followed normally, but a hostile distant chunk must not spend a full tick proving a miss.
+    private static final float LOCAL_SELECTION_PATH_NODE_MULTIPLIER = 0.03F;
+    private static final float DIRT_SELECTION_PATH_NODE_MULTIPLIER = 0.05F;
     private static final int MAX_GATHER_TICKS = 20 * 30;
     private static final int REQUIRED_BREAK_TICKS = 60;
     private static final int LEAF_CLEAR_TICKS = 12;
@@ -127,7 +131,11 @@ public class GatherLogsGoal extends Goal {
     private boolean clearingPillarCollision;
     private boolean foliageRelocationAttempted;
     private boolean logQueueScanDeferred;
+    private boolean logQueueSearchPending;
+    private BlockPos logQueueSearchOrigin;
+    private int logQueueSearchColumnIndex;
     private boolean targetSelectionDeferred;
+    private int targetSelectionNotBeforeTick;
     private String pillarTraceDetail = "";
     private String pathFallbackDetailPrefix = "gathering logs";
     private int lastDetailMode = -1;
@@ -208,7 +216,6 @@ public class GatherLogsGoal extends Goal {
         }
 
         List<BlockPos> logs = tree.get().logsNearestFirst(playerNpc.blockPosition());
-        NavigationPathBudget pathBudget = new NavigationPathBudget(maxPathChecks);
         for (BlockPos candidate : logs) {
             if (!serverLevel.hasChunkAt(candidate)
                     || !serverLevel.getBlockState(candidate).is(BlockTags.LOGS)
@@ -223,10 +230,9 @@ public class GatherLogsGoal extends Goal {
             if (!currentStandProtected && canPillarTowardFrom(playerNpc.blockPosition(), candidate)) {
                 return new LogSearchResult(true, logs);
             }
-            if (pathBudget.exhausted()) {
-                continue;
-            }
-            if (findStandPos(playerNpc, serverLevel, candidate, pathBudget).isPresent()) {
+            // Eligibility asks only whether a safe physical stand exists. PathFinder belongs to
+            // the later running movement phase, never this nested activation predicate.
+            if (findGeometricStandPos(playerNpc, serverLevel, candidate).isPresent()) {
                 return new LogSearchResult(true, logs);
             }
         }
@@ -274,21 +280,17 @@ public class GatherLogsGoal extends Goal {
             this.traceCanUseBlocked("gather logs blocked: build work ready");
             return false;
         }
-        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+        if (!this.tryAcquireExpensiveWork(serverLevel)) {
             return false;
         }
-
-        // canUse already owns this server tick's expensive-work permit.
-        this.prepareLogQueue(serverLevel, true);
-        boolean selected = this.selectNextTarget(serverLevel, true);
-        if (!selected) {
-            this.cacheNearbyUsableLogTarget(false);
-            this.traceCanUseBlocked("gather logs blocked: no usable log target");
-            this.playerNpc.setGatherCooldown(20);
-        } else {
-            this.cacheNearbyUsableLogTarget(true);
-        }
-        return selected;
+        // Eligibility stays path- and tree-scan-free. Start a short search episode, then let a
+        // later running tick own one admitted retained tree/stand slice. Goal.start must not move.
+        this.targetPos = null;
+        this.standPos = null;
+        this.plannedStandPath = null;
+        this.targetSelectionDeferred = true;
+        this.targetSelectionNotBeforeTick = this.playerNpc.tickCount + 1;
+        return true;
     }
 
     @Override
@@ -337,12 +339,13 @@ public class GatherLogsGoal extends Goal {
         this.nextContinueEligibilityCheckTick = this.playerNpc.tickCount
                 + CONTINUE_ELIGIBILITY_INTERVAL_TICKS;
         this.continueEligibilityAllowed = true;
-        this.targetSelectionDeferred = false;
         this.playerNpc.setCurrentAiState("ai.player_npc.gathering_logs");
         this.toolAi.equipTool(AxeItem.class);
         this.resetDetailRefresh();
         this.updateDetail();
-        this.moveToStandPos();
+        if (!this.targetSelectionDeferred && this.targetPos != null) {
+            this.moveToStandPos();
+        }
     }
 
     @Override
@@ -352,6 +355,11 @@ public class GatherLogsGoal extends Goal {
         }
 
         this.gatherTicks++;
+        if (this.targetSelectionDeferred && this.playerNpc.tickCount < this.targetSelectionNotBeforeTick) {
+            this.pillarTraceDetail = "log target selection deferred to next admitted tick";
+            this.updateDetail();
+            return;
+        }
         if (this.tickWaterEscape(serverLevel)) {
             return;
         }
@@ -752,16 +760,35 @@ public class GatherLogsGoal extends Goal {
                 && this.nearbyUsableLogTargetCachePos.distSqr(feet) <= 4.0D * 4.0D
                 && !this.nearbyLogCandidates.isEmpty()) {
             this.logQueue.addAll(this.nearbyLogCandidates);
+            this.logQueueSearchOrigin = null;
+            this.logQueueSearchColumnIndex = 0;
+            this.logQueueSearchPending = false;
             return;
         }
-        Optional<Tree> tree = TreeAi.findNearest(
+        if (this.logQueueSearchOrigin == null || this.logQueueSearchOrigin.distSqr(feet) > 16.0D) {
+            this.logQueueSearchOrigin = feet.immutable();
+            this.logQueueSearchColumnIndex = 0;
+        }
+        TreeAi.SearchSlice treeSlice = TreeAi.findNearestSlice(
                 serverLevel,
-                feet,
+                this.logQueueSearchOrigin,
                 TREE_SEARCH_RADIUS,
                 pos -> !this.isProtectedHomeLogTarget(pos)
-                        && !this.isIgnoredLogTarget(pos)
+                        && !this.isIgnoredLogTarget(pos),
+                this.logQueueSearchColumnIndex
         );
-        tree.ifPresent(value -> this.logQueue.addAll(value.logsNearestFirst(feet)));
+        this.logQueueSearchColumnIndex = treeSlice.nextColumnIndex();
+        this.logQueueSearchPending = treeSlice.tree().isEmpty() && !treeSlice.complete();
+        treeSlice.tree().ifPresent(value -> {
+            this.logQueue.addAll(value.logsNearestFirst(feet));
+            this.logQueueSearchOrigin = null;
+            this.logQueueSearchColumnIndex = 0;
+            this.logQueueSearchPending = false;
+        });
+        if (treeSlice.complete()) {
+            this.logQueueSearchOrigin = null;
+            this.logQueueSearchColumnIndex = 0;
+        }
     }
 
     private boolean shouldStayHomeForWeather(ServerLevel serverLevel) {
@@ -800,7 +827,6 @@ public class GatherLogsGoal extends Goal {
         this.descentTicks = 0;
         this.pillarTraceDetail = "";
         boolean rescanned = false;
-        NavigationPathBudget pathBudget = new NavigationPathBudget(MAX_LOG_PATH_CHECKS);
         while (true) {
             while (!this.logQueue.isEmpty()) {
                 BlockPos candidate = this.logQueue.poll();
@@ -812,18 +838,18 @@ public class GatherLogsGoal extends Goal {
                 boolean currentStandProtected = isProtectedHomeStandPos(this.playerNpc, feet);
                 boolean canMineHere = !currentStandProtected && canMineFromCurrentPosition(this.playerNpc, candidate);
                 boolean canPillarHere = !currentStandProtected && canPillarTowardFrom(feet, candidate);
-                Optional<StandSearchResult> stand = Optional.empty();
-                if (!canMineHere && !canPillarHere && !pathBudget.exhausted()) {
-                    stand = this.findStandTarget(serverLevel, candidate, pathBudget);
+                Optional<BlockPos> geometricStand = Optional.empty();
+                if (!canMineHere && !canPillarHere) {
+                    geometricStand = findGeometricStandPos(this.playerNpc, serverLevel, candidate);
                 }
-                if (stand.isEmpty() && !canMineHere && !canPillarHere) {
+                if (geometricStand.isEmpty() && !canMineHere && !canPillarHere) {
                     continue;
                 }
 
                 this.targetPos = candidate.immutable();
-                if (stand.isPresent()) {
-                    this.standPos = stand.get().stand();
-                    this.plannedStandPath = stand.get().path();
+                if (geometricStand.isPresent()) {
+                    this.standPos = geometricStand.get();
+                    this.plannedStandPath = null;
                 } else if (canMineHere || canPillarHere) {
                     this.standPos = this.playerNpc.blockPosition().immutable();
                 }
@@ -1284,7 +1310,11 @@ public class GatherLogsGoal extends Goal {
             if (pathChecks++ >= MAX_STAND_PATH_CHECKS) {
                 break;
             }
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    LOCAL_SELECTION_PATH_NODE_MULTIPLIER
+            );
             if (isUsablePathToStand(path, candidate)) {
                 betterBases.add(new StandSearchResult(candidate.immutable(), path));
             }
@@ -1345,9 +1375,12 @@ public class GatherLogsGoal extends Goal {
         if (this.selectNextTarget(serverLevel, true)) {
             return true;
         }
-        if (this.logQueueScanDeferred) {
+        if (this.logQueueScanDeferred || this.logQueueSearchPending) {
             this.targetPos = null;
-            return false;
+            this.targetSelectionDeferred = true;
+            this.targetSelectionNotBeforeTick = this.playerNpc.tickCount + 1;
+            this.pillarTraceDetail = "log search continuing in bounded admitted passes";
+            return true;
         }
         if (this.tryStartPillarDescent(serverLevel, true)) {
             return true;
@@ -1551,7 +1584,11 @@ public class GatherLogsGoal extends Goal {
             if (pathChecks++ >= MAX_DESCENT_PATH_CHECKS) {
                 break;
             }
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    LOCAL_SELECTION_PATH_NODE_MULTIPLIER
+            );
             if (this.pathNavigationAi.isValidPathTo(candidate, path)) {
                 this.plannedDescentPath = path;
                 return Optional.of(candidate.immutable());
@@ -1582,6 +1619,11 @@ public class GatherLogsGoal extends Goal {
 
     private DirtSearchResult findNearestDirt(ServerLevel serverLevel) {
         BlockPos center = this.playerNpc.blockPosition();
+        DirtSearchResult immediate = this.findImmediatelyReachableDirt(serverLevel, center);
+        if (immediate != null) {
+            this.resetDirtSearch();
+            return immediate;
+        }
         if (this.dirtSearchOrigin == null
                 || this.dirtSearchOrigin.distSqr(center) > DIRT_SEARCH_RESET_DISTANCE_SQR) {
             this.dirtSearchOrigin = center.immutable();
@@ -1623,7 +1665,12 @@ public class GatherLogsGoal extends Goal {
             if (pathBudget.exhausted()) {
                 break;
             }
-            Optional<StandSearchResult> stand = this.findStandTarget(serverLevel, pos, pathBudget);
+            Optional<StandSearchResult> stand = this.findStandTarget(
+                    serverLevel,
+                    pos,
+                    pathBudget,
+                    DIRT_SELECTION_PATH_NODE_MULTIPLIER
+            );
             if (stand.isPresent()) {
                 DirtSearchResult result = new DirtSearchResult(
                         pos.immutable(),
@@ -1641,6 +1688,36 @@ public class GatherLogsGoal extends Goal {
             this.resetDirtSearch();
         }
         return new DirtSearchResult(null, null, null, complete);
+    }
+
+    private DirtSearchResult findImmediatelyReachableDirt(ServerLevel serverLevel, BlockPos feet) {
+        if (isProtectedHomeStandPos(this.playerNpc, feet)
+                || !this.playerNpc.onGround()
+                || !canStandAt(serverLevel, feet)) {
+            return null;
+        }
+
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                for (int dy = -2; dy <= 2; dy++) {
+                    BlockPos candidate = feet.offset(dx, dy, dz);
+                    if (this.isValidDirtTarget(serverLevel, candidate)
+                            && canMineFromCurrentPosition(this.playerNpc, candidate)) {
+                        candidates.add(candidate.immutable());
+                    }
+                }
+            }
+        }
+        return candidates.stream()
+                .min(Comparator.comparingDouble(pos -> pos.distSqr(feet)))
+                .map(target -> new DirtSearchResult(
+                        target,
+                        feet.immutable(),
+                        null,
+                        true
+                ))
+                .orElse(null);
     }
 
     private void resetDirtSearch() {
@@ -1753,6 +1830,15 @@ public class GatherLogsGoal extends Goal {
         return findStandTarget(this.playerNpc, serverLevel, target, pathBudget);
     }
 
+    private Optional<StandSearchResult> findStandTarget(
+            ServerLevel serverLevel,
+            BlockPos target,
+            NavigationPathBudget pathBudget,
+            float pathNodeMultiplier
+    ) {
+        return findStandTarget(this.playerNpc, serverLevel, target, pathBudget, pathNodeMultiplier);
+    }
+
     private static Optional<BlockPos> findStandPos(
             PlayerNpcEntity playerNpc,
             ServerLevel serverLevel,
@@ -1768,6 +1854,29 @@ public class GatherLogsGoal extends Goal {
             BlockPos target,
             NavigationPathBudget pathBudget
     ) {
+        return findStandTarget(
+                playerNpc,
+                serverLevel,
+                target,
+                pathBudget,
+                LOCAL_SELECTION_PATH_NODE_MULTIPLIER
+        );
+    }
+
+    private static Optional<StandSearchResult> findStandTarget(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            BlockPos target,
+            NavigationPathBudget pathBudget,
+            float pathNodeMultiplier
+    ) {
+        BlockPos feet = playerNpc.blockPosition();
+        if (!isProtectedHomeStandPos(playerNpc, feet)
+                && canStandAt(serverLevel, feet)
+                && (canMineFromStandPosition(feet, target) || canPillarTowardFrom(feet, target))) {
+            return Optional.of(new StandSearchResult(feet.immutable(), null));
+        }
+
         LinkedHashSet<BlockPos> candidates = new LinkedHashSet<>();
         for (Direction direction : Direction.Plane.HORIZONTAL) {
             BlockPos side = target.relative(direction);
@@ -1795,12 +1904,45 @@ public class GatherLogsGoal extends Goal {
             if (!pathBudget.tryConsume()) {
                 break;
             }
-            Path path = playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = PathNavigationAi.createBoundedPath(
+                    playerNpc,
+                    candidate,
+                    pathNodeMultiplier
+            );
             if (isUsablePathToStand(path, candidate)) {
                 return Optional.of(new StandSearchResult(candidate.immutable(), path));
             }
         }
         return Optional.empty();
+    }
+
+    /** Selects a physically valid stand without synchronously proving a navigation route. */
+    private static Optional<BlockPos> findGeometricStandPos(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            BlockPos target
+    ) {
+        BlockPos feet = playerNpc.blockPosition();
+        if (!isProtectedHomeStandPos(playerNpc, feet)
+                && canStandAt(serverLevel, feet)
+                && (canMineFromStandPosition(feet, target) || canPillarTowardFrom(feet, target))) {
+            return Optional.of(feet.immutable());
+        }
+        LinkedHashSet<BlockPos> candidates = new LinkedHashSet<>();
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos side = target.relative(direction);
+            addSurfaceStandCandidate(serverLevel, candidates, side);
+            addVerticalStandCandidates(playerNpc, serverLevel, candidates, side);
+        }
+        addNearbySurfaceStandCandidates(serverLevel, candidates, target);
+        return candidates.stream()
+                .filter(pos -> !isProtectedHomeStandPos(playerNpc, pos))
+                .filter(pos -> canStandAt(serverLevel, pos))
+                .filter(pos -> canMineFromStandPosition(pos, target) || canPillarTowardFrom(pos, target))
+                .min(Comparator
+                        .comparingDouble((BlockPos pos) -> horizontalDistanceToTargetColumnSqr(pos, target))
+                        .thenComparingDouble(pos -> pos.distSqr(feet)))
+                .map(BlockPos::immutable);
     }
 
     private record LogSearchResult(boolean usable, List<BlockPos> logs) {
@@ -1995,7 +2137,15 @@ public class GatherLogsGoal extends Goal {
         Path path = this.plannedStandPath;
         this.plannedStandPath = null;
         if (!isUsablePathToStand(path, this.standPos)) {
-            path = this.playerNpc.getNavigation().createPath(this.standPos, 0);
+            if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                    || !this.tryAcquireExpensiveWork(serverLevel)) {
+                return false;
+            }
+            path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    this.standPos,
+                    LOCAL_SELECTION_PATH_NODE_MULTIPLIER
+            );
         }
         if (isUsablePathToStand(path, this.standPos)) {
             return this.playerNpc.getNavigation().moveTo(path, this.speed);

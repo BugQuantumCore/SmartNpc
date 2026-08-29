@@ -2,15 +2,15 @@
 
 ## Source Files
 
-- `src/main/java/com/pla/player_npc/item/InventoryViewerItem.java`
-- `src/main/java/com/pla/player_npc/client/gui/PlayerNpcInspectorOverlay.java`
-- `src/main/java/com/pla/player_npc/network/PlayerNpcInspectorData.java`
-- `src/main/java/com/pla/player_npc/network/PlayerNpcInspectorPacket.java`
-- `src/main/java/com/pla/player_npc/network/PlayerNpcInspectorRequestPacket.java`
-- `src/main/java/com/pla/player_npc/network/PlayerNpcInspectatorModePacket.java`
-- `src/main/java/com/pla/player_npc/event/PlayerNpcInspectatorEvent.java`
-- `src/main/java/com/pla/player_npc/network/PlayerNpcNetwork.java`
-- `src/main/resources/assets/player_npc/lang/en_us.json`
+- `src/main/java/com/pla/smart_npc/item/InventoryViewerItem.java`
+- `src/main/java/com/pla/smart_npc/client/gui/SmartNpcInspectorOverlay.java`
+- `src/main/java/com/pla/smart_npc/network/PlayerNpcInspectorData.java`
+- `src/main/java/com/pla/smart_npc/network/PlayerNpcInspectorPacket.java`
+- `src/main/java/com/pla/smart_npc/network/PlayerNpcInspectorRequestPacket.java`
+- `src/main/java/com/pla/smart_npc/network/PlayerNpcInspectatorModePacket.java`
+- `src/main/java/com/pla/smart_npc/event/PlayerNpcInspectatorEvent.java`
+- `src/main/java/com/pla/smart_npc/network/SmartNpcNetwork.java`
+- `src/main/resources/assets/smart_npc/lang/en_us.json`
 
 ## Item Behavior
 
@@ -48,19 +48,25 @@ The overlay displays:
 - equipment slots
 - custom inventory slots
 
+The interest row is a responsive list, not a single clipped label. The client wraps the complete translated `Interests: ...` text at comma/word boundaries to the panel width. Every following status row, task detail, main-hand line, equipment grid, inventory grid, footer, panel height, and item hover hitbox derives the same extra line height, so a fourth or later interest remains visible without overlapping or clipping the rest of the panel.
+
 If the detail string is empty, the overlay falls back to `ai.player_npc.looking_for_work` while the state is idle, otherwise it displays the translated AI state as the task text.
 
 Inventory snapshots refresh through `PlayerNpcInspectorRequestPacket` every 20 game ticks. The server validates that the entity is still a live `PlayerNpcEntity` and that the player is within 64 blocks before sending a fresh snapshot; otherwise it sends a clear packet.
 
 Formatted display text is cached for 500 ms. Keep this throttling for FPS-sensitive UI, similar to Minecraft's F3 debug screen pattern.
 
-## Standalone AI Resource Monitor
+AI states are synchronized as translation keys and rendered through `Component.translatable(...)`. Every literal `ai.player_npc.*` state emitted or recognized by goal/entity code must have an `en_us.json` entry; a missing entry otherwise appears verbatim in both the inspector and scheduler-holder view. Task detail is deliberate server-authored diagnostic text rather than a translation key.
+
+## Standalone Resource And Population Monitor
 
 Shift-right-clicking air with the inspector item opens a standalone overall scheduler monitor. Normal right-clicking air retains its original clear/hide behavior. Shift-right-clicking an NPC retains the same NPC inspection behavior as an ordinary NPC click; it must not enter inspectator or open the overall monitor.
 
-The standalone view uses `PlayerNpcInspectorPacket.OVERALL_ENTITY_ID` (`-2`) and `PlayerNpcInspectorPacket.overall(...)`, so it has no entity target and does not enter inspectator camera/mode. `PlayerNpcInspectorRequestPacket` recognizes that sentinel and refreshes the server-authored monitor every 20 ticks. The payload comes from `PlayerNpcAiWorkBudget.resourceSnapshot(...)` and `PlayerNpcPerformanceMonitor`: TPS/MSPT, holder count, active/waiting/effective worker limit, and holder name/state/detail with worker/probe/expensive roles.
+The standalone view uses `PlayerNpcInspectorPacket.OVERALL_ENTITY_ID` (`-2`) and `PlayerNpcInspectorPacket.overall(...)`, so it has no entity target and does not enter inspectator camera/mode. `PlayerNpcInspectorRequestPacket` recognizes that sentinel and refreshes the server-authored monitor every 20 ticks. The payload comes from `PlayerNpcAiWorkBudget.resourceSnapshot(...)`, `PlayerNpcNaturalSpawnCap.snapshot(...)`, and `PlayerNpcPerformanceMonitor`: TPS/MSPT, holder count, active/waiting/effective worker limit, and holder name/state/detail with worker/probe/expensive roles. A separate `NPC population <living> | natural max <effective> (auto/fixed)` line shows loaded and pending counts. Automatic mode adds a feedback line with trimmed baseline MSPT, probe mode/progress, and policy reason, followed by a limits line with explicitly advisory forecast, persisted learned-safe max, and CPU/heap exploration max. The explicit `natural max` is the enforced natural-spawn limit and must not be described as an AI worker limit; the forecast is not enforced. Population includes command/egg NPCs because they consume later natural-spawn capacity even though their own creation bypasses admission.
 
 The payload is capped at eight holders and each name/state/detail field at 96 characters. Probe-only UUID resolution uses direct per-level UUID lookup only within that cap; do not add per-tick entity scans. The overall and single-NPC render branches are mutually exclusive.
+
+The standalone panel must preserve every server-authored diagnostic field. Each logical payload line wraps at word boundaries to the current panel width; continuation rows retain the source indentation and add another two-space indent. The panel grows to the available GUI height. If the wrapped content is taller than the screen, Up/Down scroll through it and the footer shows the visible line range. Do not replace this with per-line ellipsis or a fixed rendered-line cap: population policy, probe progress, and advisory limits are commonly wider than the panel.
 
 Receiving the overall sentinel must stop any active inspectator session, clear trace/requirements UI state, replace the selected NPC panel, and render only the standalone monitor. This makes Shift-right-click air a safe atomic view switch. Receiving the ordinary clear sentinel (`-1`) continues to close both views.
 

@@ -70,6 +70,7 @@ public class ExploreAroundGoal extends Goal {
     private static final int BUILDING_LOG_LOCAL_SURFACE_SCAN_STRIDE = 67;
     private static final int BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL = 10;
     private static final int BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS = 1;
+    private static final float EXPLORE_SELECTION_PATH_NODE_MULTIPLIER = 0.03F;
     private static final double BUILDING_LOG_SCAN_RESET_DISTANCE_SQR = 4.0D * 4.0D;
     private static final int RETURN_HOME_REQUEST_TICKS = 20 * 120;
     private static final int RETURN_HOME_RETRY_COOLDOWN_TICKS = 20 * 15;
@@ -556,7 +557,11 @@ public class ExploreAroundGoal extends Goal {
                 continue;
             }
 
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
+            );
             boolean validPath = this.pathNavigationAi.isValidPathTo(candidate, path);
             boolean localSafeDrop = this.isGenuinelyLocalDescent(center, candidate)
                     && this.pathNavigationAi.canSafelyDropToLocalTarget(
@@ -645,7 +650,8 @@ public class ExploreAroundGoal extends Goal {
                 serverLevel,
                 candidates,
                 BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL,
-                BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS
+                BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS,
+                EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
         );
         if (selected.isEmpty()) {
             return null;
@@ -674,19 +680,28 @@ public class ExploreAroundGoal extends Goal {
 
         Path plannedPath = this.plannedTargetPath;
         this.plannedTargetPath = null;
-        boolean moved = plannedPath != null
-                && this.pathNavigationAi.isValidPathTo(this.targetPos, plannedPath)
-                ? this.playerNpc.getNavigation().moveTo(plannedPath, Math.min(this.speed, 1.0D))
-                : this.failedClimbFallbackWalk
-                ? this.pathNavigationAi.moveToExact(serverLevel, this.targetPos, Math.min(this.speed, 1.0D), 0)
-                : this.pathNavigationAi.moveTo(
-                serverLevel,
-                this.targetPos,
-                this.speed,
-                this.isGenuinelyLocalDescent(this.playerNpc.blockPosition(), this.targetPos)
-                        ? MAX_EXPLORE_SAFE_DROP_BLOCKS
-                        : 0
-        );
+        boolean moved;
+        if (plannedPath != null && this.pathNavigationAi.isValidPathTo(this.targetPos, plannedPath)) {
+            moved = this.playerNpc.getNavigation().moveTo(plannedPath, Math.min(this.speed, 1.0D));
+        } else if (this.failedClimbFallbackWalk) {
+            moved = this.pathNavigationAi.moveToExact(
+                    serverLevel,
+                    this.targetPos,
+                    Math.min(this.speed, 1.0D),
+                    0,
+                    EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
+            );
+        } else {
+            moved = this.pathNavigationAi.moveTo(
+                    serverLevel,
+                    this.targetPos,
+                    this.speed,
+                    this.isGenuinelyLocalDescent(this.playerNpc.blockPosition(), this.targetPos)
+                            ? MAX_EXPLORE_SAFE_DROP_BLOCKS
+                            : 0,
+                    EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
+            );
+        }
         if (moved) {
             this.rememberCurrentNavigationRoute();
             return;
@@ -1037,7 +1052,13 @@ public class ExploreAroundGoal extends Goal {
         int checks = 0;
         while (!candidates.isEmpty() && checks++ < FAILED_CLIMB_FALLBACK_PATH_CHECKS) {
             BlockPos candidate = candidates.remove(this.playerNpc.getRandom().nextInt(candidates.size()));
-            if (this.pathNavigationAi.hasExactPathTo(candidate)) {
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
+            );
+            if (this.pathNavigationAi.isExactPathTo(candidate, path)) {
+                this.plannedTargetPath = path;
                 return candidate.immutable();
             }
         }
@@ -1448,7 +1469,12 @@ public class ExploreAroundGoal extends Goal {
             if (pathChecks++ >= MAX_LOCAL_ESCAPE_PATH_CHECKS) {
                 return candidate;
             }
-            if (!this.pathNavigationAi.hasValidPathTo(candidate)) {
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
+            );
+            if (!this.pathNavigationAi.isValidPathTo(candidate, path)) {
                 return candidate;
             }
         }

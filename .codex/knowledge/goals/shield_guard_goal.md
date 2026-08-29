@@ -2,7 +2,7 @@
 
 ## Source
 
-- `src/main/java/com/pla/player_npc/entity/goal/ShieldGuardGoal.java`
+- `src/main/java/com/pla/smart_npc/entity/goal/ShieldGuardGoal.java`
 - Registered only from `PlayerNpcEntity.registerVanillaCombatReplacementGoals()`, so it only runs when `epicfight_player_npc` is not loaded.
 - Damage blocking support is in `PlayerNpcEntity.tryBlockDamageWithShield`.
 - Render support is in `FakePlayerRenderer`.
@@ -20,3 +20,5 @@ Incoming damage is blocked while the NPC is actively using an offhand shield and
 Inspector state is `ai.player_npc.shield_guarding`.
 
 Cooldown uses `PlayerNpcEntity.shieldGuardCooldown`.
+
+Approach movement retains the 10-tick combat repath cadence but uses a scoped `0.15F` path. Shield defense remains directly available without routine-worker ownership; bounding its synchronous path is local CPU protection, not job scheduling.

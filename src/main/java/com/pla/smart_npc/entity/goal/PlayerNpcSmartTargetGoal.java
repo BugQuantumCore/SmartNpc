@@ -101,12 +101,17 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
     private LivingEntity findTarget() {
         double followDistance = this.getFollowDistance();
         AABB searchBox = this.playerNpc.getBoundingBox().inflate(followDistance, 6.0D, followDistance);
+        TargetSearchContext context = this.createSearchContext();
         LivingEntity bestTarget = null;
         double bestScore = 0.0D;
         String bestState = PlayerNpcEntity.AI_IDLE;
 
-        for (LivingEntity candidate : this.playerNpc.level().getEntitiesOfClass(LivingEntity.class, searchBox, this::isCandidate)) {
-            double score = this.scoreTarget(candidate);
+        for (LivingEntity candidate : this.playerNpc.level().getEntitiesOfClass(
+                LivingEntity.class,
+                searchBox,
+                candidate -> this.isCandidate(candidate, context)
+        )) {
+            double score = this.scoreTarget(candidate, context);
             if (score <= 0.0D || score <= bestScore) {
                 continue;
             }
@@ -123,28 +128,42 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
         return bestTarget;
     }
 
-    private boolean isCandidate(LivingEntity candidate) {
-        return candidate != this.playerNpc
-                && candidate.isAlive()
-                && !candidate.isSpectator()
-                && !this.playerNpc.isAlliedTo(candidate)
-                && !candidate.isAlliedTo(this.playerNpc)
-                && (this.isPlayerLikeTarget(candidate)
-                || this.isMonsterTarget(candidate)
-                || this.isVillagerTarget(candidate)
-                || this.isAnimalTarget(candidate));
+    private TargetSearchContext createSearchContext() {
+        return new TargetSearchContext(
+                this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_PLAYERS),
+                this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_MONSTERS),
+                this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_ANIMALS),
+                this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_VILLAGERS),
+                this.playerNpc.getHealth() / this.playerNpc.getMaxHealth()
+        );
     }
 
-    private double scoreTarget(LivingEntity candidate) {
-        double healthRatio = this.playerNpc.getHealth() / this.playerNpc.getMaxHealth();
+    private boolean isCandidate(LivingEntity candidate, TargetSearchContext context) {
+        if (candidate == this.playerNpc
+                || !candidate.isAlive()
+                || candidate.isSpectator()
+                || this.playerNpc.isAlliedTo(candidate)
+                || candidate.isAlliedTo(this.playerNpc)) {
+            return false;
+        }
+        boolean playerLike = context.huntsPlayers() && this.isPlayerLikeTarget(candidate);
+        boolean monster = this.isMonsterTarget(candidate)
+                && (context.huntsMonsters() || this.playerNpc.isSmartNpcCompatHighDangerThreat(candidate));
+        boolean villager = context.huntsVillagers() && this.isVillagerTarget(candidate);
+        boolean animal = context.huntsAnimals() && this.isAnimalTarget(candidate);
+        return playerLike || monster || villager || animal;
+    }
+
+    private double scoreTarget(LivingEntity candidate, TargetSearchContext context) {
+        double healthRatio = context.healthRatio();
         double distancePenalty = this.playerNpc.distanceTo(candidate) * 0.35D;
         double score = this.playerNpc.getRandom().nextDouble() * 3.0D - distancePenalty;
 
         if (this.isPlayerLikeTarget(candidate)) {
-            if (!this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_PLAYERS)) {
+            if (!context.huntsPlayers()) {
                 return 0.0D;
             }
-            if (this.isClearlyOutmatched(candidate)) {
+            if (this.powerScore(candidate) > context.playerPowerScore() + STRONGER_TARGET_MARGIN) {
                 return 0.0D;
             }
             if (!this.passesAttackChance(candidate, RARE_PLAYER_ATTACK_CHANCE)) {
@@ -157,7 +176,7 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
         } else if (this.isMonsterTarget(candidate)) {
             boolean highDanger = this.playerNpc.isSmartNpcCompatHighDangerThreat(candidate);
             float fleeRatio = this.playerNpc.getSmartNpcFleeHealthRatio(candidate, (float) HEALTHY_RATIO);
-            if (!this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_MONSTERS) && (!highDanger || healthRatio > fleeRatio)) {
+            if (!context.huntsMonsters() && (!highDanger || healthRatio > fleeRatio)) {
                 return 0.0D;
             }
             if (highDanger && healthRatio <= fleeRatio) {
@@ -171,25 +190,18 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
                 return 0.0D;
             }
         } else if (this.isAnimalTarget(candidate)) {
-            if (!this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_ANIMALS)) {
+            if (!context.huntsAnimals()) {
                 return 0.0D;
             }
-            if (this.playerNpc.hasAnimalLootPriority()) {
+            if (!context.needsAnimalFood()) {
                 return 0.0D;
             }
-            if (this.playerNpc.shouldPrioritizeLogGathering()) {
-                return 0.0D;
-            }
-            boolean needsFood = !InventoryUtils.hasHealingFood(this.playerNpc);
-            if (!needsFood) {
-                return 0.0D;
-            }
-            if (this.hasNearbyCollectableSupplyDrop()) {
+            if (context.nearbyCollectableSupplyDrop()) {
                 return 0.0D;
             }
             score += 17.0D;
         } else if (this.isVillagerTarget(candidate)) {
-            if (!this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_VILLAGERS)) {
+            if (!context.huntsVillagers()) {
                 return 0.0D;
             }
             if (!this.passesAttackChance(candidate, RARE_VILLAGER_ATTACK_CHANCE)) {
@@ -230,10 +242,6 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
 
     private boolean hasNearbyCollectableSupplyDrop() {
         return this.playerNpc.hasCollectableSupplyDropNearby(24.0D);
-    }
-
-    private boolean isClearlyOutmatched(LivingEntity candidate) {
-        return this.powerScore(candidate) > this.powerScore(this.playerNpc) + STRONGER_TARGET_MARGIN;
     }
 
     private double powerScore(LivingEntity entity) {
@@ -316,5 +324,80 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
                 || "ai.player_npc.using_flint_and_steel".equals(state)
                 || "ai.player_npc.using_lava_bucket".equals(state)
                 || "ai.player_npc.blocking_projectile".equals(state);
+    }
+
+    private final class TargetSearchContext {
+        private final boolean huntsPlayers;
+        private final boolean huntsMonsters;
+        private final boolean huntsAnimals;
+        private final boolean huntsVillagers;
+        private final double healthRatio;
+        @Nullable
+        private Double cachedPlayerPowerScore;
+        @Nullable
+        private Boolean cachedNeedsAnimalFood;
+        @Nullable
+        private Boolean cachedNearbyCollectableSupplyDrop;
+
+        private TargetSearchContext(
+                boolean huntsPlayers,
+                boolean huntsMonsters,
+                boolean huntsAnimals,
+                boolean huntsVillagers,
+                double healthRatio
+        ) {
+            this.huntsPlayers = huntsPlayers;
+            this.huntsMonsters = huntsMonsters;
+            this.huntsAnimals = huntsAnimals;
+            this.huntsVillagers = huntsVillagers;
+            this.healthRatio = healthRatio;
+        }
+
+        private boolean huntsPlayers() {
+            return this.huntsPlayers;
+        }
+
+        private boolean huntsMonsters() {
+            return this.huntsMonsters;
+        }
+
+        private boolean huntsAnimals() {
+            return this.huntsAnimals;
+        }
+
+        private boolean huntsVillagers() {
+            return this.huntsVillagers;
+        }
+
+        private double healthRatio() {
+            return this.healthRatio;
+        }
+
+        private double playerPowerScore() {
+            if (this.cachedPlayerPowerScore == null) {
+                this.cachedPlayerPowerScore = PlayerNpcSmartTargetGoal.this.powerScore(
+                        PlayerNpcSmartTargetGoal.this.playerNpc
+                );
+            }
+            return this.cachedPlayerPowerScore;
+        }
+
+        private boolean needsAnimalFood() {
+            if (this.cachedNeedsAnimalFood == null) {
+                this.cachedNeedsAnimalFood = this.huntsAnimals
+                        && !PlayerNpcSmartTargetGoal.this.playerNpc.hasAnimalLootPriority()
+                        && !PlayerNpcSmartTargetGoal.this.playerNpc.shouldPrioritizeLogGathering()
+                        && !InventoryUtils.hasHealingFood(PlayerNpcSmartTargetGoal.this.playerNpc);
+            }
+            return this.cachedNeedsAnimalFood;
+        }
+
+        private boolean nearbyCollectableSupplyDrop() {
+            if (this.cachedNearbyCollectableSupplyDrop == null) {
+                this.cachedNearbyCollectableSupplyDrop = this.needsAnimalFood()
+                        && PlayerNpcSmartTargetGoal.this.hasNearbyCollectableSupplyDrop();
+            }
+            return this.cachedNearbyCollectableSupplyDrop;
+        }
     }
 }

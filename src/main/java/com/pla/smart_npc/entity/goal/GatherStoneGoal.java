@@ -1543,7 +1543,9 @@ public class GatherStoneGoal extends Goal {
             return this.recoverFromBlockedStoneAccess(serverLevel, "stone route reached protected farm");
         }
         this.markStoneAccessClearing();
-        ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
+        boolean pathWorkAllowed = !this.clearBlockAi.needsPathWork(serverLevel)
+                || this.tryAcquireExpensiveWork(serverLevel);
+        ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel, pathWorkAllowed);
         if (result == ClearBlockAi.TickResult.RUNNING) {
             if (isInsideProtectedStoneTarget(this.playerNpc, this.clearBlockAi.targetPos())) {
                 this.clearBlockAi.stop();
@@ -1606,6 +1608,7 @@ public class GatherStoneGoal extends Goal {
                 CLEAR_OBSTRUCTION_TICKS,
                 FORCED_CLEAR_DISTANCE_SQR
         );
+        boolean selectionPending = this.clearBlockAi.hasPendingSelection();
         if (started) {
             this.clearedAccessForTarget = true;
             this.markStoneAccessClearing();
@@ -1615,13 +1618,18 @@ public class GatherStoneGoal extends Goal {
                     + " target=" + posText(this.targetPos)
                     + " stand=" + posText(this.standPos)
                     + " candidates=" + candidates.size());
+        } else if (selectionPending) {
+            this.setStoneDiagnostic("stone route clear selection queued for next admitted slice target="
+                    + posText(this.targetPos)
+                    + " stand=" + posText(this.standPos)
+                    + " candidates=" + candidates.size());
         } else {
             this.setStoneDiagnostic("stone route clear not started target=" + posText(this.targetPos)
                     + " stand=" + posText(this.standPos)
                     + " candidates=" + candidates.size()
                     + " feet=" + posText(this.playerNpc.blockPosition()));
         }
-        return started;
+        return started || selectionPending;
     }
 
     private boolean canContinueStoneWork(ServerLevel serverLevel) {

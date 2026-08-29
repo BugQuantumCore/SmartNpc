@@ -9,21 +9,17 @@ public class SmartNpcConfig {
 
     public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
     public static final ForgeConfigSpec SPEC;
-    private static final SpawnConfig DEFAULT_PLAYER_NPC_SPAWN = new SpawnConfig(4, 1, 1);
-    private static final int DEFAULT_MAX_NATURAL_PLAYER_NPCS = 8;
+    private static final SpawnConfig DEFAULT_PLAYER_NPC_SPAWN = new SpawnConfig(1, 1, 1);
+    private static final int DEFAULT_MAX_NATURAL_PLAYER_NPCS = -1;
 
     public static ForgeConfigSpec.ConfigValue<Boolean> TURN_ON_NPC_CHAT;
     public static ForgeConfigSpec.ConfigValue<Boolean> FORCE_TICK_MANAGE;
     public static ForgeConfigSpec.IntValue MAX_NATURAL_PLAYER_NPCS;
+    public static ForgeConfigSpec.IntValue AI_PROCESSING_NPC_LIMIT;
+    public static ForgeConfigSpec.DoubleValue AI_TARGET_SERVER_MSPT;
     public static ForgeConfigSpec.ConfigValue<List<? extends Number>> PLAYER_NPC_SPAWN;
     public static ForgeConfigSpec.ConfigValue<List<? extends String>> BLACKLIST_COMPAT_MOD_WEAPON;
     public static ForgeConfigSpec.ConfigValue<Boolean> PERFORMANCE_MONITOR_ENABLED;
-    public static ForgeConfigSpec.DoubleValue PERFORMANCE_WARNING_AVERAGE_MSPT;
-    public static ForgeConfigSpec.DoubleValue PERFORMANCE_WARNING_SPIKE_MSPT;
-    public static ForgeConfigSpec.IntValue PERFORMANCE_WARNING_COOLDOWN_TICKS;
-    public static ForgeConfigSpec.IntValue PERFORMANCE_WARNING_NPC_TRACE_LIMIT;
-    public static ForgeConfigSpec.IntValue AI_PROCESSING_NPC_LIMIT;
-    public static ForgeConfigSpec.DoubleValue AI_TARGET_SERVER_MSPT;
 
     static {
         TURN_ON_NPC_CHAT = BUILDER.comment(
@@ -33,15 +29,44 @@ public class SmartNpcConfig {
         FORCE_TICK_MANAGE = BUILDER.comment(
                         "Give each loaded Player NPC one moving distance-2 force-ticket anchor at its current chunk.",
                         "Normal ticket propagation supplies the loaded fringe; no independent neighbor anchors are added.",
-                        "Also exposes tracked Player NPCs in helper features.")
+                        "Also exposes tracked Player NPCs in remote helper features such as the tab list and teleport command.",
+                        "This does not enable or disable the AI scheduler or natural-spawn population cap.",
+                        "Normally loaded/ticking NPCs remain scheduled when false; distant unloaded NPCs do not tick or appear in force-manager remote diagnostics.")
                 .define("forceTickManage", true);
 
         MAX_NATURAL_PLAYER_NPCS = BUILDER.comment(
                         "Maximum number of living Player NPCs allowed before natural spawning stops.",
-                        "This limit is used only when forceTickManage is true and counts Player NPCs from every spawn source.",
-                        "0 disables natural Player NPC spawning. -1 explicitly removes this numeric limit.",
-                        "The default is 8 to prevent a fresh installation from accumulating an unbounded force-loaded population.")
+                        "0 disables natural Player NPC spawning. Positive values are fixed caps.",
+                        "-1 (the default) starts at max 4, clamped lower on weak JVMs by a CPU/RAM exploration ceiling; this is not a guaranteed safe population.",
+                        "Automatic feedback uses a rolling baseline that omits the highest 5% of tick samples, so isolated job/path spikes do not masquerade as passive population cost.",
+                        "A full/loaded cap at <=40 baseline MSPT grows by 2 after two five-second checks, only up to 10; <=45 MSPT grows by 1 after three checks.",
+                        "At 45-50 baseline MSPT an occupied cap is held without growth; an unfilled probe is retracted if headroom is lost.",
+                        "At 50+ baseline MSPT future admission targets one NPC below the measured overloaded population, then waits for natural attrition before reducing again.",
+                        "A tested safe cap is persisted across restart, but restore never opens slots above the current living population except the startup allowance.",
+                        "A lower automatic cap never despawns existing NPCs. Concurrent spawn reservations prevent fresh-world candidates from overshooting it.",
+                        "The population cap is separate from the routine AI worker limit and applies whether forceTickManage is on or off.",
+                        "When performanceMonitor.enabled is false or has not produced its first stable sample, automatic mode stays at its startup-safe cap.")
                 .defineInRange("maxNaturalPlayerNpcs", DEFAULT_MAX_NATURAL_PLAYER_NPCS, -1, Integer.MAX_VALUE);
+
+        BUILDER.push("aiScheduler");
+        AI_PROCESSING_NPC_LIMIT = BUILDER.comment(
+                        "Maximum Player NPCs that may hold routine AI worker turns at once.",
+                        "-1 starts at one worker and explores up to min(12, 2 per CPU thread, 3 per max-heap GiB).",
+                        "Growth requires every current worker slot occupied plus another queued NPC, so unused slots are not learned as safe.",
+                        "At/below target (40 ms default), growth needs two five-second checks below 3 workers, then three checks.",
+                        "Through min(target+9, 49) ms, cautious growth needs five checks below 3 workers, then six checks.",
+                        "The next band holds; at min(target+12, 52) ms, two consecutive checks remove one worker.",
+                        "Isolated high tick spikes are trimmed from the baseline.",
+                        "0 pauses scheduled routine jobs; positive values set a fixed worker count.",
+                        "This is a worker count, not a percentage of memory. Combat and safety behavior remain responsive.",
+                        "Scheduling is independent of forceTickManage and covers Player NPC entities that are currently loaded and ticking; remote unloaded NPCs do not request or occupy turns.")
+                .defineInRange("processingNpcLimit", -1, -1, 64);
+        AI_TARGET_SERVER_MSPT = BUILDER.comment(
+                        "Server tick-time target used when processingNpcLimit is -1.",
+                        "-1 selects the automatic 40 ms target, leaving headroom below Minecraft's 50 ms / 20 TPS deadline.",
+                        "This limits CPU time pressure; it is not a heap-memory allocation percentage.")
+                .defineInRange("targetServerMspt", -1.0D, -1.0D, 49.0D);
+        BUILDER.pop();
 
         PLAYER_NPC_SPAWN = BUILDER.comment(
                         "Spawn config for Player NPC. Format: [weight, minCount, maxCount]. Weight is added to the spawn pool in each overworld biome. 0 disables spawning")
@@ -57,34 +82,9 @@ public class SmartNpcConfig {
 
         BUILDER.push("performanceMonitor");
         PERFORMANCE_MONITOR_ENABLED = BUILDER.comment(
-                        "Log Smart NPC scoped TPS/MSPT warnings and show current server TPS in the Player NPC inspector")
+                        "Log Smart NPC scoped TPS/MSPT warnings and show current server TPS in the Player NPC inspector.",
+                        "Warning thresholds, cooldown, and per-warning trace-line cap use internal monitor defaults.")
                 .define("enabled", true);
-        PERFORMANCE_WARNING_AVERAGE_MSPT = BUILDER.comment(
-                        "Warn when the rolling 5-second average server tick time is at least this many milliseconds. 50 ms is 20 TPS")
-                .defineInRange("averageMsptWarningThreshold", 75.0D, 50.0D, 1000.0D);
-        PERFORMANCE_WARNING_SPIKE_MSPT = BUILDER.comment(
-                        "Warn immediately when one server tick takes at least this many milliseconds")
-                .defineInRange("spikeMsptWarningThreshold", 200.0D, 50.0D, 10000.0D);
-        PERFORMANCE_WARNING_COOLDOWN_TICKS = BUILDER.comment(
-                        "Minimum server ticks between Smart NPC performance warning log entries")
-                .defineInRange("warningCooldownTicks", 200, 20, 72000);
-        PERFORMANCE_WARNING_NPC_TRACE_LIMIT = BUILDER.comment(
-                        "Maximum active Player NPC goal trace lines to include per performance warning")
-                .defineInRange("npcTraceLimit", 8, 0, 64);
-        BUILDER.pop();
-
-        BUILDER.push("aiScheduler");
-        AI_PROCESSING_NPC_LIMIT = BUILDER.comment(
-                        "Maximum Player NPCs that may hold routine AI worker turns at once.",
-                        "-1 lets the scheduler choose from measured server MSPT plus a conservative CPU/RAM capability cap.",
-                        "0 pauses scheduled routine jobs; positive values set a fixed worker count.",
-                        "This is a worker count, not a percentage of memory. Combat, safety, and already-running movement remain responsive.")
-                .defineInRange("processingNpcLimit", -1, -1, 64);
-        AI_TARGET_SERVER_MSPT = BUILDER.comment(
-                        "Server tick-time target used when processingNpcLimit is -1.",
-                        "-1 selects the automatic 40 ms target, leaving headroom below Minecraft's 50 ms / 20 TPS deadline.",
-                        "This limits CPU time pressure; it is not a heap-memory allocation percentage.")
-                .defineInRange("targetServerMspt", -1.0D, -1.0D, 49.0D);
         BUILDER.pop();
 
         SPEC = BUILDER.build();

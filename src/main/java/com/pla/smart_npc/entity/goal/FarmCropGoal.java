@@ -41,8 +41,9 @@ import java.util.WeakHashMap;
 public final class FarmCropGoal extends Goal {
     private static final int LOCAL_SUPPLY_RADIUS = 14;
     private static final int LOCAL_SUPPLY_Y_RANGE = 3;
-    private static final int MAX_LOCAL_PATH_CHECKS = 12;
-    private static final int MAX_OWNED_CROP_PATH_CHECKS = 64;
+    private static final int MAX_LOCAL_PATH_CHECKS = 1;
+    private static final int MAX_OWNED_CROP_PATH_CHECKS = 1;
+    private static final float FARM_PATH_NODE_MULTIPLIER = 0.05F;
     private static final int MAX_ACTION_TICKS = 20 * 20;
     private static final int USE_ACTION_TICKS = 9;
     private static final int CLEAR_TICKS = 18;
@@ -64,6 +65,7 @@ public final class FarmCropGoal extends Goal {
     private Plan plan;
     private BlockPos targetPos;
     private BlockPos standPos;
+    private int[] selectionPathBudget;
     private PlantingCrop plantingCrop;
     private ItemStack previousMainHand = ItemStack.EMPTY;
     private Action action = Action.NONE;
@@ -71,6 +73,10 @@ public final class FarmCropGoal extends Goal {
     private int useTicks;
     private int repathTicks;
     private int routeFailureTicks;
+    private int ownedMatureCropCursor;
+    private int localCropCursor;
+    private int localForageCursor;
+    private int boneMealCropCursor;
     private BlockPos lastApproachPos;
     private boolean showingActionItem;
     private boolean finished;
@@ -252,6 +258,7 @@ public final class FarmCropGoal extends Goal {
             this.playerNpc.setIdleTraceDetail("farm crop blocked: READY plan unavailable", 40);
             return false;
         }
+        this.selectionPathBudget = new int[]{1};
         if (this.selectAction(serverLevel)) {
             return true;
         }
@@ -301,6 +308,7 @@ public final class FarmCropGoal extends Goal {
         if (this.action != Action.CRAFT_BONE_MEAL) {
             this.moveToStand(serverLevel());
         }
+        this.selectionPathBudget = null;
     }
 
     @Override
@@ -586,11 +594,16 @@ public final class FarmCropGoal extends Goal {
     }
 
     private BlockPos findOwnMatureCrop(ServerLevel serverLevel) {
-        return this.plan.cropPositions().stream()
+        List<BlockPos> candidates = this.plan.cropPositions().stream()
                 .filter(pos -> FarmAi.isHarvestableCrop(serverLevel.getBlockState(pos)))
-                .min(Comparator.comparingDouble(this.playerNpc.blockPosition()::distSqr))
+                .sorted(Comparator.comparingDouble(this.playerNpc.blockPosition()::distSqr))
                 .map(BlockPos::immutable)
-                .orElse(null);
+                .toList();
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        int index = Math.floorMod(this.ownedMatureCropCursor++, candidates.size());
+        return candidates.get(index);
     }
 
     private BlockPos findNearbyMatureCrop(ServerLevel serverLevel) {
@@ -618,8 +631,12 @@ public final class FarmCropGoal extends Goal {
             }
         }
         candidates.sort(Comparator.comparingDouble(center::distSqr));
-        int[] remainingPathChecks = {MAX_LOCAL_PATH_CHECKS};
-        for (BlockPos candidate : candidates) {
+        int start = candidates.isEmpty()
+                ? 0
+                : Math.floorMod(crop ? this.localCropCursor++ : this.localForageCursor++, candidates.size());
+        int[] remainingPathChecks = this.selectionPathBudget();
+        for (int offset = 0; offset < candidates.size(); offset++) {
+            BlockPos candidate = candidates.get((start + offset) % candidates.size());
             if (this.findStandNear(serverLevel, candidate, remainingPathChecks, 2) != null) {
                 return candidate;
             }
@@ -653,7 +670,7 @@ public final class FarmCropGoal extends Goal {
         // Rotate the bounded path-check window so one unreachable nearest cell can
         // never starve the rest of the owned plot forever.
         int start = candidates.size() == 1 ? 0 : this.playerNpc.getRandom().nextInt(candidates.size());
-        int[] remainingPathChecks = {MAX_OWNED_CROP_PATH_CHECKS};
+        int[] remainingPathChecks = this.selectionPathBudget();
         for (int offset = 0; offset < candidates.size() && remainingPathChecks[0] > 0; offset++) {
             BlockPos candidate = candidates.get((start + offset) % candidates.size());
             BlockPos stand = this.findStandNear(serverLevel, candidate, remainingPathChecks, 2);
@@ -669,8 +686,10 @@ public final class FarmCropGoal extends Goal {
                 .filter(pos -> this.isBonemealableOwnedCrop(serverLevel, pos))
                 .sorted(Comparator.comparingDouble(this.playerNpc.blockPosition()::distSqr))
                 .toList();
-        int[] remainingPathChecks = {MAX_LOCAL_PATH_CHECKS};
-        for (BlockPos candidate : candidates) {
+        int start = candidates.isEmpty() ? 0 : Math.floorMod(this.boneMealCropCursor++, candidates.size());
+        int[] remainingPathChecks = this.selectionPathBudget();
+        for (int offset = 0; offset < candidates.size(); offset++) {
+            BlockPos candidate = candidates.get((start + offset) % candidates.size());
             BlockPos stand = this.findStandNear(serverLevel, candidate, remainingPathChecks, 2);
             if (stand != null) {
                 return new WorldTarget(candidate.immutable(), stand.immutable());
@@ -816,9 +835,15 @@ public final class FarmCropGoal extends Goal {
         return this.findStandNear(
                 serverLevel,
                 target,
-                new int[]{MAX_LOCAL_PATH_CHECKS},
+                this.selectionPathBudget(),
                 MAX_LOCAL_PATH_CHECKS
         );
+    }
+
+    private int[] selectionPathBudget() {
+        return this.selectionPathBudget != null
+                ? this.selectionPathBudget
+                : new int[]{MAX_LOCAL_PATH_CHECKS};
     }
 
     private BlockPos findStandNear(
@@ -854,7 +879,11 @@ public final class FarmCropGoal extends Goal {
             }
             remainingPathChecks[0]--;
             checksForTarget++;
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    FARM_PATH_NODE_MULTIPLIER
+            );
             if (path != null
                     && path.canReach()
                     && path.getEndNode() != null
@@ -868,7 +897,13 @@ public final class FarmCropGoal extends Goal {
     private boolean moveToStand(ServerLevel serverLevel) {
         return serverLevel != null
                 && this.standPos != null
-                && this.pathNavigationAi.moveToExact(serverLevel, this.standPos, 1.0D, 0);
+                && this.pathNavigationAi.moveToExact(
+                serverLevel,
+                this.standPos,
+                1.0D,
+                0,
+                FARM_PATH_NODE_MULTIPLIER
+        );
     }
 
     private static boolean hasEmptyCropPosition(ServerLevel serverLevel, Plan plan) {
@@ -953,6 +988,7 @@ public final class FarmCropGoal extends Goal {
         this.plan = null;
         this.targetPos = null;
         this.standPos = null;
+        this.selectionPathBudget = null;
         this.plantingCrop = null;
         this.action = Action.NONE;
         this.actionTicks = 0;
@@ -1026,7 +1062,11 @@ public final class FarmCropGoal extends Goal {
             }
             remainingPathChecks[0]--;
             checksForTarget++;
-            Path path = playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = PathNavigationAi.createBoundedPath(
+                    playerNpc,
+                    candidate,
+                    FARM_PATH_NODE_MULTIPLIER
+            );
             if (path != null
                     && path.canReach()
                     && path.getEndNode() != null

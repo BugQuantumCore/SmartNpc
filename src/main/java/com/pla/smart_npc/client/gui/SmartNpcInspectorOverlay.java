@@ -50,11 +50,14 @@ public class SmartNpcInspectorOverlay {
     private static final int PANEL_HEIGHT = 294;
     private static final int REQUIREMENTS_PANEL_WIDTH = 250;
     private static final int RESOURCE_PANEL_WIDTH = 264;
-    private static final int RESOURCE_PANEL_MAX_LINES = 20;
+    private static final int RESOURCE_PANEL_MIN_WIDTH = 160;
+    private static final int RESOURCE_PANEL_HEADER_HEIGHT = 23;
+    private static final int RESOURCE_PANEL_FOOTER_HEIGHT = 15;
     private static final int REQUIREMENTS_PANEL_MAX_LINES = 20;
     private static final int REQUIREMENT_ROW_HEIGHT = 24;
     private static final String REQUIREMENTS_PAYLOAD_VERSION = "#smart_npc_requirements_v1";
     private static final int SLOT_SIZE = 18;
+    private static final int TEXT_LINE_HEIGHT = 11;
     private static final int TASK_DETAIL_MAX_LINES = 3;
     private static final int REFRESH_INTERVAL_TICKS = 20;
     private static final long DISPLAY_CACHE_INTERVAL_MS = 500L;
@@ -89,11 +92,15 @@ public class SmartNpcInspectorOverlay {
     private static boolean previousRequirementsToggleDown;
     private static boolean previousRequirementScrollUpDown;
     private static boolean previousRequirementScrollDownDown;
+    private static boolean previousResourceScrollUpDown;
+    private static boolean previousResourceScrollDownDown;
+    private static int resourceScrollOffset;
+    private static int cachedAiResourceWrapWidth = -1;
     private static Component cachedTitle = Component.empty();
     private static Component cachedHealthText = Component.empty();
     private static int cachedHealthColor = 0xFF74E291;
     private static Component cachedAiText = Component.empty();
-    private static String cachedInterestsText = "";
+    private static List<String> cachedInterestsLines = List.of("");
     private static String cachedDailyJobText = "";
     private static String cachedBuildStatusText = "";
     private static List<String> cachedPerformanceLines = List.of("");
@@ -134,6 +141,8 @@ public class SmartNpcInspectorOverlay {
         if (inspectedEntityId != previousEntityId) {
             resetRequirementScroll();
             resetRequirementScrollInput();
+            resetResourceScroll();
+            resetResourceScrollInput();
         }
         snapshot = packet.items();
         snapshotBuildStatusText = packet.buildStatusText();
@@ -297,9 +306,10 @@ public class SmartNpcInspectorOverlay {
         int screenHeight = minecraft.getWindow().getGuiScaledHeight();
         if (inspectedEntityId == PlayerNpcInspectorPacket.OVERALL_ENTITY_ID) {
             requestRefresh(minecraft);
-            refreshOverallDisplayCache(minecraft.font);
-            int resourceX = screenWidth - RESOURCE_PANEL_WIDTH - 12;
-            renderAiResourcePanel(guiGraphics, minecraft.font, resourceX, 18);
+            int resourceWidth = Math.max(RESOURCE_PANEL_MIN_WIDTH, Math.min(RESOURCE_PANEL_WIDTH, screenWidth - 24));
+            refreshOverallDisplayCache(minecraft.font, resourceWidth - 16);
+            int resourceX = Math.max(4, screenWidth - resourceWidth - 12);
+            renderAiResourcePanel(guiGraphics, minecraft.font, resourceX, 18, resourceWidth, screenHeight);
             return;
         }
 
@@ -317,7 +327,7 @@ public class SmartNpcInspectorOverlay {
         refreshDisplayCache(minecraft.font, playerNpc);
 
         int x = screenWidth - PANEL_WIDTH - 12;
-        int y = 18;
+        int y = Math.max(4, Math.min(18, screenHeight - currentPanelHeight() - 4));
         renderPanel(guiGraphics, minecraft.font, x, y);
         if (requirementsVisible) {
             int requirementsX = Math.max(4, x - REQUIREMENTS_PANEL_WIDTH - 8);
@@ -360,7 +370,7 @@ public class SmartNpcInspectorOverlay {
                 "gui.player_npc.inspector.ai",
                 Component.translatable(playerNpc.getCurrentAiState()).withStyle(ChatFormatting.AQUA)
         );
-        cachedInterestsText = trimToWidth(
+        cachedInterestsLines = wrappedLines(
                 font,
                 Component.translatable("gui.player_npc.inspector.interests", playerNpc.getInterestsDisplayText()).getString(),
                 PANEL_WIDTH - 16
@@ -433,42 +443,49 @@ public class SmartNpcInspectorOverlay {
     }
 
     private static void renderPanel(GuiGraphics guiGraphics, Font font, int x, int y) {
-        guiGraphics.fill(x, y, x + PANEL_WIDTH, y + PANEL_HEIGHT, 0xE80F1720);
+        int panelHeight = currentPanelHeight();
+        int interestsExtraHeight = interestsExtraHeight();
+        int mainHandY = y + mainHandOffset();
+        guiGraphics.fill(x, y, x + PANEL_WIDTH, y + panelHeight, 0xE80F1720);
         guiGraphics.fill(x, y, x + PANEL_WIDTH, y + 1, 0xFF4FD1C5);
-        guiGraphics.fill(x, y + PANEL_HEIGHT - 1, x + PANEL_WIDTH, y + PANEL_HEIGHT, 0xFF243447);
-        guiGraphics.fill(x, y, x + 1, y + PANEL_HEIGHT, 0xFF243447);
-        guiGraphics.fill(x + PANEL_WIDTH - 1, y, x + PANEL_WIDTH, y + PANEL_HEIGHT, 0xFF243447);
+        guiGraphics.fill(x, y + panelHeight - 1, x + PANEL_WIDTH, y + panelHeight, 0xFF243447);
+        guiGraphics.fill(x, y, x + 1, y + panelHeight, 0xFF243447);
+        guiGraphics.fill(x + PANEL_WIDTH - 1, y, x + PANEL_WIDTH, y + panelHeight, 0xFF243447);
 
         guiGraphics.drawString(font, cachedTitle, x + 8, y + 7, 0xFFE6FFFA, false);
         guiGraphics.drawString(font, cachedHealthText, x + 8, y + 21, cachedHealthColor, false);
         guiGraphics.drawString(font, cachedAiText, x + 8, y + 35, 0xFFB7C9E2, false);
-        guiGraphics.drawString(font, cachedInterestsText, x + 8, y + 49, 0xFFB7C9E2, false);
-        guiGraphics.drawString(font, cachedDailyJobText, x + 8, y + 63, 0xFFD6E4FF, false);
-        guiGraphics.drawString(font, cachedBuildStatusText, x + 8, y + 77, 0xFFB7C9E2, false);
-        int performanceY = y + 91;
+        for (int i = 0; i < cachedInterestsLines.size(); i++) {
+            guiGraphics.drawString(font, cachedInterestsLines.get(i), x + 8, y + 49 + i * TEXT_LINE_HEIGHT, 0xFFB7C9E2, false);
+        }
+        guiGraphics.drawString(font, cachedDailyJobText, x + 8, y + 63 + interestsExtraHeight, 0xFFD6E4FF, false);
+        guiGraphics.drawString(font, cachedBuildStatusText, x + 8, y + 77 + interestsExtraHeight, 0xFFB7C9E2, false);
+        int performanceY = y + 91 + interestsExtraHeight;
         for (String line : cachedPerformanceLines) {
             guiGraphics.drawString(font, line, x + 8, performanceY, 0xFFB7C9E2, false);
-            performanceY += 11;
+            performanceY += TEXT_LINE_HEIGHT;
         }
         guiGraphics.drawString(font, cachedTraceText, x + 8, performanceY, snapshotTraceEnabled ? 0xFF74E291 : 0xFFB7C9E2, false);
 
         renderTaskDetail(guiGraphics, font, x + 8, performanceY + 15);
 
-        guiGraphics.drawString(font, cachedMainHandText, x + 8, y + 151, 0xFFD6E4FF, false);
+        guiGraphics.drawString(font, cachedMainHandText, x + 8, mainHandY, 0xFFD6E4FF, false);
 
-        renderEquipment(guiGraphics, font, x + 8, y + 181);
-        renderInventory(guiGraphics, font, x + 8, y + 215);
-        guiGraphics.drawString(font, cachedInspectatorHint, x + 8, y + PANEL_HEIGHT - 15, 0xFF94A3B8, false);
+        renderEquipment(guiGraphics, font, x + 8, mainHandY + 30);
+        renderInventory(guiGraphics, font, x + 8, mainHandY + 64);
+        guiGraphics.drawString(font, cachedInspectatorHint, x + 8, y + panelHeight - 15, 0xFF94A3B8, false);
     }
 
-    private static void refreshOverallDisplayCache(Font font) {
+    private static void refreshOverallDisplayCache(Font font, int wrapWidth) {
         long now = Util.getMillis();
         if (lastDisplayCacheMillis != Long.MIN_VALUE
-                && now - lastDisplayCacheMillis < DISPLAY_CACHE_INTERVAL_MS) {
+                && now - lastDisplayCacheMillis < DISPLAY_CACHE_INTERVAL_MS
+                && cachedAiResourceWrapWidth == wrapWidth) {
             return;
         }
         lastDisplayCacheMillis = now;
-        cachedAiResourceLines = resourceLines(font, snapshotAiResourceText, RESOURCE_PANEL_WIDTH - 16);
+        cachedAiResourceWrapWidth = wrapWidth;
+        cachedAiResourceLines = resourceLines(font, snapshotAiResourceText, wrapWidth);
     }
 
     private static void renderRequirementsPanel(GuiGraphics guiGraphics, Font font, int x, int y) {
@@ -496,14 +513,28 @@ public class SmartNpcInspectorOverlay {
         }
     }
 
-    private static void renderAiResourcePanel(GuiGraphics guiGraphics, Font font, int x, int y) {
-        int lineHeight = 11;
-        int height = Math.min(PANEL_HEIGHT, 34 + cachedAiResourceLines.size() * lineHeight);
-        guiGraphics.fill(x, y, x + RESOURCE_PANEL_WIDTH, y + height, 0xE80F1720);
-        guiGraphics.fill(x, y, x + RESOURCE_PANEL_WIDTH, y + 1, 0xFF60A5FA);
-        guiGraphics.fill(x, y + height - 1, x + RESOURCE_PANEL_WIDTH, y + height, 0xFF243447);
+    private static void renderAiResourcePanel(
+            GuiGraphics guiGraphics,
+            Font font,
+            int x,
+            int y,
+            int width,
+            int screenHeight
+    ) {
+        int availableHeight = Math.max(RESOURCE_PANEL_HEADER_HEIGHT + TEXT_LINE_HEIGHT + 5, screenHeight - y - 8);
+        int linesWithoutFooter = Math.max(1, (availableHeight - RESOURCE_PANEL_HEADER_HEIGHT - 5) / TEXT_LINE_HEIGHT);
+        boolean scrollable = cachedAiResourceLines.size() > linesWithoutFooter;
+        int footerHeight = scrollable ? RESOURCE_PANEL_FOOTER_HEIGHT : 5;
+        int visibleLines = Math.max(1, (availableHeight - RESOURCE_PANEL_HEADER_HEIGHT - footerHeight) / TEXT_LINE_HEIGHT);
+        int maxScroll = Math.max(0, cachedAiResourceLines.size() - visibleLines);
+        resourceScrollOffset = Math.max(0, Math.min(maxScroll, resourceScrollOffset));
+        int renderedLines = Math.min(visibleLines, cachedAiResourceLines.size() - resourceScrollOffset);
+        int height = Math.min(availableHeight, RESOURCE_PANEL_HEADER_HEIGHT + renderedLines * TEXT_LINE_HEIGHT + footerHeight);
+        guiGraphics.fill(x, y, x + width, y + height, 0xE80F1720);
+        guiGraphics.fill(x, y, x + width, y + 1, 0xFF60A5FA);
+        guiGraphics.fill(x, y + height - 1, x + width, y + height, 0xFF243447);
         guiGraphics.fill(x, y, x + 1, y + height, 0xFF243447);
-        guiGraphics.fill(x + RESOURCE_PANEL_WIDTH - 1, y, x + RESOURCE_PANEL_WIDTH, y + height, 0xFF243447);
+        guiGraphics.fill(x + width - 1, y, x + width, y + height, 0xFF243447);
         guiGraphics.drawString(
                 font,
                 Component.translatable("gui.player_npc.inspector.ai_resources_title"),
@@ -513,16 +544,19 @@ public class SmartNpcInspectorOverlay {
                 false
         );
 
-        int lineY = y + 23;
-        for (String line : cachedAiResourceLines) {
-            if (lineY + lineHeight > y + height - 4) {
-                break;
-            }
+        int lineY = y + RESOURCE_PANEL_HEADER_HEIGHT;
+        for (int i = 0; i < renderedLines; i++) {
+            String line = cachedAiResourceLines.get(resourceScrollOffset + i);
             int color = line.startsWith("> ") ? 0xFF74E291
                     : line.startsWith("  ") ? 0xFF94A3B8
                     : 0xFFD6E4FF;
             guiGraphics.drawString(font, line, x + 8, lineY, color, false);
-            lineY += lineHeight;
+            lineY += TEXT_LINE_HEIGHT;
+        }
+        if (scrollable) {
+            String range = (resourceScrollOffset + 1) + "-" + (resourceScrollOffset + renderedLines)
+                    + "/" + cachedAiResourceLines.size() + "  ↑/↓ scroll";
+            guiGraphics.drawString(font, range, x + 8, y + height - 12, 0xFF94A3B8, false);
         }
     }
 
@@ -631,6 +665,52 @@ public class SmartNpcInspectorOverlay {
         return font.plainSubstrByWidth(text, Math.max(0, maxWidth - font.width("..."))) + "...";
     }
 
+    private static List<String> wrappedLines(Font font, String text, int fullLineWidth) {
+        String remaining = text == null ? "" : text.strip();
+        if (remaining.isEmpty()) {
+            return List.of("");
+        }
+
+        List<String> lines = new ArrayList<>();
+        while (!remaining.isEmpty()) {
+            if (font.width(remaining) <= fullLineWidth) {
+                lines.add(remaining);
+                break;
+            }
+
+            String fitting = font.plainSubstrByWidth(remaining, fullLineWidth);
+            int commaBreak = fitting.lastIndexOf(", ");
+            int spaceBreak = fitting.lastIndexOf(' ');
+            int splitIndex = commaBreak > 0 ? commaBreak + 1 : spaceBreak;
+            if (splitIndex <= 0) {
+                splitIndex = fitting.length();
+            }
+            if (splitIndex <= 0) {
+                lines.add(remaining);
+                break;
+            }
+
+            lines.add(remaining.substring(0, splitIndex).stripTrailing());
+            remaining = remaining.substring(splitIndex).stripLeading();
+        }
+        return List.copyOf(lines);
+    }
+
+    private static int interestsExtraHeight() {
+        return Math.max(0, cachedInterestsLines.size() - 1) * TEXT_LINE_HEIGHT;
+    }
+
+    private static int mainHandOffset() {
+        int traceOffset = 91 + interestsExtraHeight() + cachedPerformanceLines.size() * TEXT_LINE_HEIGHT;
+        int taskOffset = traceOffset + 15;
+        int taskBottom = taskOffset + cachedTaskValueLines.size() * TEXT_LINE_HEIGHT;
+        return Math.max(151 + interestsExtraHeight(), taskBottom + 3);
+    }
+
+    private static int currentPanelHeight() {
+        return Math.max(PANEL_HEIGHT + interestsExtraHeight(), mainHandOffset() + 143);
+    }
+
     private static List<String> taskLines(Font font, String detail, int firstLineWidth, int fullLineWidth) {
         List<String> lines = new ArrayList<>(TASK_DETAIL_MAX_LINES);
         String[] rawLines = detail.split("\\R", -1);
@@ -663,15 +743,47 @@ public class SmartNpcInspectorOverlay {
     }
 
     private static List<String> resourceLines(Font font, String text, int fullLineWidth) {
-        List<String> lines = new ArrayList<>(RESOURCE_PANEL_MAX_LINES);
+        List<String> lines = new ArrayList<>();
         String source = text == null || text.isBlank() ? "No scheduler resource holders" : text;
         for (String rawLine : source.split("\\R", -1)) {
-            if (lines.size() >= RESOURCE_PANEL_MAX_LINES) {
-                break;
-            }
-            lines.add(trimToWidth(font, rawLine, fullLineWidth));
+            appendWrappedResourceLine(font, lines, rawLine, fullLineWidth);
         }
         return lines.isEmpty() ? List.of("") : List.copyOf(lines);
+    }
+
+    private static void appendWrappedResourceLine(Font font, List<String> lines, String rawLine, int fullLineWidth) {
+        String source = rawLine == null ? "" : rawLine;
+        int leadingSpaces = 0;
+        while (leadingSpaces < source.length() && source.charAt(leadingSpaces) == ' ') {
+            leadingSpaces++;
+        }
+        String remaining = source.substring(leadingSpaces).stripTrailing();
+        String firstPrefix = " ".repeat(leadingSpaces);
+        String continuationPrefix = firstPrefix + "  ";
+        String prefix = firstPrefix;
+        if (remaining.isEmpty()) {
+            lines.add(firstPrefix);
+            return;
+        }
+
+        while (!remaining.isEmpty()) {
+            int availableWidth = Math.max(1, fullLineWidth - font.width(prefix));
+            if (font.width(remaining) <= availableWidth) {
+                lines.add(prefix + remaining);
+                return;
+            }
+            String fitting = font.plainSubstrByWidth(remaining, availableWidth);
+            int breakAt = fitting.lastIndexOf(' ');
+            if (breakAt <= 0) {
+                breakAt = fitting.length();
+            }
+            if (breakAt <= 0) {
+                breakAt = 1;
+            }
+            lines.add(prefix + remaining.substring(0, breakAt).stripTrailing());
+            remaining = remaining.substring(breakAt).stripLeading();
+            prefix = continuationPrefix;
+        }
     }
 
     private static List<String> requirementsLines(Font font, String text, int fullLineWidth) {
@@ -881,6 +993,7 @@ public class SmartNpcInspectorOverlay {
             previousTraceToggleDown = false;
             previousRequirementsToggleDown = false;
             resetRequirementScrollInput();
+            handleResourceScrollInput(minecraft);
             return;
         }
         if (inspectedEntityId < 0 || minecraft.screen != null && !chatOpen) {
@@ -1093,6 +1206,18 @@ public class SmartNpcInspectorOverlay {
         previousRequirementScrollDownDown = scrollDownDown;
     }
 
+    private static void handleResourceScrollInput(Minecraft minecraft) {
+        boolean scrollUpDown = isPhysicalKeyDown(minecraft, GLFW.GLFW_KEY_UP);
+        boolean scrollDownDown = isPhysicalKeyDown(minecraft, GLFW.GLFW_KEY_DOWN);
+        if (scrollUpDown && !previousResourceScrollUpDown) {
+            resourceScrollOffset = Math.max(0, resourceScrollOffset - 1);
+        } else if (scrollDownDown && !previousResourceScrollDownDown) {
+            resourceScrollOffset++;
+        }
+        previousResourceScrollUpDown = scrollUpDown;
+        previousResourceScrollDownDown = scrollDownDown;
+    }
+
     private static void handleInspectatorZoomInput(Minecraft minecraft) {
         if (requirementsVisible && hasScrollableRequirementRows()) {
             inspectatorZoomRepeatTicks = 0;
@@ -1155,6 +1280,15 @@ public class SmartNpcInspectorOverlay {
         previousRequirementScrollDownDown = false;
     }
 
+    private static void resetResourceScroll() {
+        resourceScrollOffset = 0;
+    }
+
+    private static void resetResourceScrollInput() {
+        previousResourceScrollUpDown = false;
+        previousResourceScrollDownDown = false;
+    }
+
     private static boolean isPhysicalKeyDown(Minecraft minecraft, int key) {
         return InputConstants.isKeyDown(minecraft.getWindow().getWindow(), key);
     }
@@ -1179,6 +1313,8 @@ public class SmartNpcInspectorOverlay {
         snapshot = List.of();
         resetRequirementScroll();
         resetRequirementScrollInput();
+        resetResourceScroll();
+        resetResourceScrollInput();
         pendingInspectatorTargetTicks = 80;
         lastRefreshGameTime = Long.MIN_VALUE;
         lastDisplayCacheMillis = Long.MIN_VALUE;
@@ -1316,12 +1452,13 @@ public class SmartNpcInspectorOverlay {
     }
 
     private static ItemStack getHoveredItem(int panelX, int panelY, int mouseX, int mouseY) {
-        ItemStack equipment = getHoveredItemInGrid(panelX + 8, panelY + 170, 6, 1, mouseX, mouseY, 0);
+        int mainHandY = panelY + mainHandOffset();
+        ItemStack equipment = getHoveredItemInGrid(panelX + 8, mainHandY + 30, 6, 1, mouseX, mouseY, 0);
         if (!equipment.isEmpty()) {
             return equipment;
         }
 
-        return getHoveredItemInGrid(panelX + 8, panelY + 204, 9, 3, mouseX, mouseY, 6);
+        return getHoveredItemInGrid(panelX + 8, mainHandY + 64, 9, 3, mouseX, mouseY, 6);
     }
 
     private static ItemStack getHoveredItemInGrid(
@@ -1359,6 +1496,7 @@ public class SmartNpcInspectorOverlay {
         snapshot = new ArrayList<>();
         snapshotBuildStatusText = "";
         snapshotPerformanceText = "";
+        snapshotDailyJobText = "";
         snapshotRequirementsText = "";
         snapshotAiResourceText = "";
         snapshotTraceEnabled = false;
@@ -1371,10 +1509,12 @@ public class SmartNpcInspectorOverlay {
         cachedHealthText = Component.empty();
         cachedHealthColor = 0xFF74E291;
         cachedAiText = Component.empty();
-        cachedInterestsText = "";
+        cachedInterestsLines = List.of("");
+        cachedDailyJobText = "";
         cachedBuildStatusText = "";
         cachedPerformanceLines = List.of("");
         cachedAiResourceLines = List.of("");
+        cachedAiResourceWrapWidth = -1;
         cachedTraceText = "";
         cachedRequirementsTitle = Component.empty();
         cachedRequirementsLayout = Component.empty();

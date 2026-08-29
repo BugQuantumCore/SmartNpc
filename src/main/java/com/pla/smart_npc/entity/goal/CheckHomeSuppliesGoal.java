@@ -3,9 +3,11 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.ChestAi;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcBaseUtil;
-import com.pla.smart_npc.util.PlayerNpcBuildStatusUtil;
+import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -57,6 +59,7 @@ public class CheckHomeSuppliesGoal extends Goal {
     private static final int GENERAL_FUEL_RESERVE = 4;
     private static final int ARROW_RESERVE = 16;
     private static final int BLOCK_RESERVE = 24;
+    private static final float STORAGE_PATH_NODE_MULTIPLIER = 0.05F;
 
     private final PlayerNpcEntity playerNpc;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
@@ -72,6 +75,13 @@ public class CheckHomeSuppliesGoal extends Goal {
     private boolean acted;
     private boolean chestOpen;
     private SupplyNeedSnapshot supplyNeed;
+    private PlayerNpcBuildMaterialUtil.MissingBuildMaterialNeed missingBuildMaterialNeed;
+    private Path plannedStandPath;
+    private BlockPos standSearchTarget;
+    private Mode standSearchMode;
+    private List<BlockPos> standSearchCandidates = List.of();
+    private int standSearchCursor;
+    private int lastExpensiveWorkAdmissionTick = Integer.MIN_VALUE;
 
     public CheckHomeSuppliesGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -109,37 +119,79 @@ public class CheckHomeSuppliesGoal extends Goal {
                 ? PlayerNpcBaseUtil.getNonBuilderBase(this.playerNpc, serverLevel).orElse(null)
                 : PlayerNpcHomeUtil.center(this.homeArea);
         if (this.baseAnchor == null || !this.isNearHome()) {
+            this.clearStandSearch();
             return false;
         }
 
         long day = this.currentDay(serverLevel);
-        this.supplyNeed = this.createSupplyNeedSnapshot(serverLevel);
+        boolean toolChestDue = this.needsToolSupply()
+                && this.canRetryToolChestCheck(serverLevel);
+        boolean chestDue = toolChestDue || !this.checkedToday(LAST_CHEST_CHECK_DAY, day);
+        boolean furnaceDue = !this.nonBuilderBase && !this.checkedToday(LAST_FURNACE_CHECK_DAY, day);
+        if (!chestDue && !furnaceDue) {
+            this.clearStandSearch();
+            return false;
+        }
+
+        this.supplyNeed = this.createSupplyNeedSnapshot(serverLevel, furnaceDue);
+        if (PlayerNpcBuildMaterialUtil.isMissingBuildMaterialSearchPending(this.playerNpc)) {
+            this.deferCanUseForSharedWork("home supply build-material check continuing in bounded passes");
+            return false;
+        }
         if (!this.supplyNeed.hasAnyNeed()) {
+            this.clearStandSearch();
             return false;
         }
 
         boolean urgentChestNeed = this.supplyNeed.needsToolSupply();
-        if ((urgentChestNeed && this.canRetryToolChestCheck(serverLevel))
-                || (!urgentChestNeed && !this.checkedToday(LAST_CHEST_CHECK_DAY, day))) {
-            BlockPos chest = this.findHomeChest(serverLevel);
+        if (chestDue) {
+            BlockPos chest = this.retainedStandSearchTarget(serverLevel, Mode.CHEST);
+            if (chest == null) {
+                chest = this.findHomeChest(
+                        serverLevel,
+                        toolChestDue && this.checkedToday(LAST_CHEST_CHECK_DAY, day)
+                );
+            }
             if (chest != null
                     && serverLevel.getBlockEntity(chest) instanceof Container container
-                    && this.hasWithdrawCandidate(serverLevel, container)
-                    && this.plan(serverLevel, chest, Mode.CHEST)) {
-                return true;
+                    && this.hasWithdrawCandidate(serverLevel, container)) {
+                PlanResult result = this.plan(serverLevel, chest, Mode.CHEST);
+                if (result == PlanResult.FOUND) {
+                    return true;
+                }
+                if (result == PlanResult.PENDING) {
+                    this.deferCanUseForSharedWork("home chest stand selection continuing in bounded passes");
+                    return false;
+                }
             }
             if (urgentChestNeed) {
                 this.markToolChestChecked(serverLevel);
             }
             this.markChecked(LAST_CHEST_CHECK_DAY, day);
+            this.clearStandSearch();
+            // Chest discovery and stand planning own this activation batch. A due furnace is
+            // evaluated separately so the two storage modes cannot compound their path work.
+            this.canUseThrottle.retryIn(this.playerNpc, 1);
+            return false;
         }
 
-        if (!this.nonBuilderBase && !this.checkedToday(LAST_FURNACE_CHECK_DAY, day)) {
-            BlockPos furnace = this.findHomeFurnace(serverLevel);
-            if (furnace != null && this.plan(serverLevel, furnace, Mode.FURNACE)) {
-                return true;
+        if (furnaceDue) {
+            BlockPos furnace = this.retainedStandSearchTarget(serverLevel, Mode.FURNACE);
+            if (furnace == null) {
+                furnace = this.findHomeFurnace(serverLevel);
+            }
+            if (furnace != null) {
+                PlanResult result = this.plan(serverLevel, furnace, Mode.FURNACE);
+                if (result == PlanResult.FOUND) {
+                    return true;
+                }
+                if (result == PlanResult.PENDING) {
+                    this.deferCanUseForSharedWork("home furnace stand selection continuing in bounded passes");
+                    return false;
+                }
             }
             this.markChecked(LAST_FURNACE_CHECK_DAY, day);
+            this.clearStandSearch();
         }
 
         return false;
@@ -174,7 +226,12 @@ public class CheckHomeSuppliesGoal extends Goal {
             return;
         }
 
-        if (!this.ensureStand(serverLevel)) {
+        PlanResult standResult = this.ensureStand(serverLevel);
+        if (standResult == PlanResult.PENDING) {
+            this.playerNpc.setCurrentAiDetail("home storage stand recovery continuing in bounded passes");
+            return;
+        }
+        if (standResult == PlanResult.FAILED) {
             this.markModeChecked(serverLevel);
             this.finished = true;
             return;
@@ -231,17 +288,74 @@ public class CheckHomeSuppliesGoal extends Goal {
         this.resetPlan();
     }
 
-    private boolean plan(ServerLevel serverLevel, BlockPos pos, Mode mode) {
-        BlockPos stand = mode == Mode.CHEST
-                ? ChestAi.findAdjacentStand(this.playerNpc, serverLevel, pos)
-                : this.findStand(serverLevel, pos);
-        if (stand == null) {
-            return false;
+    private PlanResult plan(ServerLevel serverLevel, BlockPos pos, Mode mode) {
+        if (!pos.equals(this.standSearchTarget) || mode != this.standSearchMode) {
+            this.standSearchTarget = pos.immutable();
+            this.standSearchMode = mode;
+            this.standSearchCandidates = this.createStandCandidates(pos, mode);
+            this.standSearchCursor = 0;
         }
+
+        BlockPos center = this.playerNpc.blockPosition();
+        while (this.standSearchCursor < this.standSearchCandidates.size()) {
+            BlockPos candidate = this.standSearchCandidates.get(this.standSearchCursor);
+            boolean usable = mode == Mode.CHEST
+                    ? ChestAi.canStandAt(serverLevel, candidate)
+                    : this.canStandAt(serverLevel, candidate)
+                    && this.distanceToTargetSqr(candidate, pos) <= CONTAINER_USE_DISTANCE_SQR;
+            if (!usable) {
+                this.standSearchCursor++;
+                continue;
+            }
+            if (candidate.equals(center)) {
+                this.acceptPlan(pos, candidate, mode, null);
+                return PlanResult.FOUND;
+            }
+            if (!this.tryAcquireExpensiveWork(serverLevel)) {
+                return PlanResult.PENDING;
+            }
+
+            this.standSearchCursor++;
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    STORAGE_PATH_NODE_MULTIPLIER
+            );
+            if (path != null && path.canReach()) {
+                this.acceptPlan(pos, candidate, mode, path);
+                return PlanResult.FOUND;
+            }
+            return this.standSearchCursor < this.standSearchCandidates.size()
+                    ? PlanResult.PENDING
+                    : this.completeStandSearchMiss();
+        }
+        return this.completeStandSearchMiss();
+    }
+
+    private List<BlockPos> createStandCandidates(BlockPos pos, Mode mode) {
+        List<BlockPos> candidates = new ArrayList<>();
+        if (mode == Mode.FURNACE) {
+            candidates.add(this.playerNpc.blockPosition().immutable());
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            candidates.add(pos.relative(direction).immutable());
+        }
+        BlockPos center = this.playerNpc.blockPosition();
+        candidates.sort(Comparator.comparingDouble(center::distSqr));
+        return List.copyOf(candidates);
+    }
+
+    private void acceptPlan(BlockPos pos, BlockPos stand, Mode mode, Path path) {
         this.targetPos = pos.immutable();
         this.standPos = stand;
         this.mode = mode;
-        return true;
+        this.plannedStandPath = path;
+        this.clearStandSearch();
+    }
+
+    private PlanResult completeStandSearchMiss() {
+        this.clearStandSearch();
+        return PlanResult.FAILED;
     }
 
     private boolean withdrawFromChest(ServerLevel serverLevel) {
@@ -446,17 +560,22 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private boolean needsBuildingBlocks(ServerLevel serverLevel) {
-        return PlayerNpcBuildStatusUtil.needsCurrentBuildMaterial(serverLevel, this.playerNpc);
+        this.missingBuildMaterialNeed = PlayerNpcBuildMaterialUtil
+                .findMissingBuildMaterialNeed(serverLevel, this.playerNpc)
+                .orElse(null);
+        return this.missingBuildMaterialNeed != null;
     }
 
     private SupplyNeedSnapshot currentSupplyNeed(ServerLevel serverLevel) {
         if (this.supplyNeed == null) {
-            this.supplyNeed = this.createSupplyNeedSnapshot(serverLevel);
+            boolean furnaceDue = !this.nonBuilderBase
+                    && !this.checkedToday(LAST_FURNACE_CHECK_DAY, this.currentDay(serverLevel));
+            this.supplyNeed = this.createSupplyNeedSnapshot(serverLevel, furnaceDue);
         }
         return this.supplyNeed;
     }
 
-    private SupplyNeedSnapshot createSupplyNeedSnapshot(ServerLevel serverLevel) {
+    private SupplyNeedSnapshot createSupplyNeedSnapshot(ServerLevel serverLevel, boolean includeFurnaceOutput) {
         boolean axe = this.needsTool(AxeItem.class);
         boolean pickaxe = this.needsTool(PickaxeItem.class);
         boolean shovel = this.needsTool(ShovelItem.class);
@@ -467,7 +586,7 @@ public class CheckHomeSuppliesGoal extends Goal {
         boolean fuel = this.needsFuel();
         boolean arrows = this.needsArrows();
         boolean buildingBlocks = this.needsBuildingBlocks(serverLevel);
-        boolean furnaceOutput = this.hasHomeFurnaceOutput(serverLevel);
+        boolean furnaceOutput = includeFurnaceOutput && this.hasHomeFurnaceOutput(serverLevel);
         return new SupplyNeedSnapshot(
                 axe,
                 pickaxe,
@@ -546,7 +665,11 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private boolean isCurrentBuildSupply(ServerLevel serverLevel, ItemStack stack) {
-        return PlayerNpcBuildStatusUtil.shouldKeepForCurrentBuild(serverLevel, this.playerNpc, stack);
+        return this.missingBuildMaterialNeed != null
+                && PlayerNpcBuildMaterialUtil.isCurrentBuildInputForTarget(
+                stack,
+                this.missingBuildMaterialNeed.targetState()
+        );
     }
 
     private boolean isAlwaysUsefulSupply(ItemStack stack) {
@@ -565,8 +688,14 @@ public class CheckHomeSuppliesGoal extends Goal {
                 || stack.is(Items.RAW_COPPER);
     }
 
-    private BlockPos findHomeChest(ServerLevel serverLevel) {
+    private BlockPos findHomeChest(ServerLevel serverLevel, boolean preferKnownOwnedChest) {
         if (!this.nonBuilderBase) {
+            if (preferKnownOwnedChest) {
+                BlockPos ownedChest = ChestAi.findOwnedSupplyChest(this.playerNpc, serverLevel);
+                if (ownedChest != null) {
+                    return ownedChest;
+                }
+            }
             return ChestAi.findHomeSupplyChest(this.playerNpc, serverLevel, this.homeArea);
         }
         BlockPos ownedChest = ChestAi.findOwnedSupplyChest(this.playerNpc, serverLevel);
@@ -584,57 +713,48 @@ public class CheckHomeSuppliesGoal extends Goal {
         return this.findBlock(serverLevel, Blocks.FURNACE);
     }
 
+    private BlockPos retainedStandSearchTarget(ServerLevel serverLevel, Mode expectedMode) {
+        if (this.standSearchMode != expectedMode
+                || this.standSearchTarget == null
+                || !serverLevel.hasChunkAt(this.standSearchTarget)) {
+            return null;
+        }
+        boolean stillValid = expectedMode == Mode.CHEST
+                ? serverLevel.getBlockEntity(this.standSearchTarget) instanceof Container
+                : serverLevel.getBlockState(this.standSearchTarget).is(Blocks.FURNACE);
+        if (!stillValid) {
+            this.clearStandSearch();
+            return null;
+        }
+        return this.standSearchTarget;
+    }
+
     private BlockPos findBlock(ServerLevel serverLevel, net.minecraft.world.level.block.Block block) {
         for (BlockPos pos : BlockPos.betweenClosed(
                 this.homeArea.origin(),
                 this.homeArea.origin().offset(this.homeArea.width() - 1, 3, this.homeArea.depth() - 1))) {
-            if (serverLevel.getBlockState(pos).is(block)) {
+            if (serverLevel.hasChunkAt(pos) && serverLevel.getBlockState(pos).is(block)) {
                 return pos.immutable();
             }
         }
         return null;
     }
 
-    private boolean ensureStand(ServerLevel serverLevel) {
+    private PlanResult ensureStand(ServerLevel serverLevel) {
         if (this.standPos != null && this.canStandAt(serverLevel, this.standPos)) {
-            return true;
+            return PlanResult.FOUND;
         }
-
-        this.standPos = this.mode == Mode.CHEST
-                ? ChestAi.findAdjacentStand(this.playerNpc, serverLevel, this.targetPos)
-                : this.findStand(serverLevel, this.targetPos);
-        return this.standPos != null;
-    }
-
-    private BlockPos findStand(ServerLevel serverLevel, BlockPos pos) {
-        List<BlockPos> candidates = new ArrayList<>();
-        candidates.add(this.playerNpc.blockPosition());
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            candidates.add(pos.relative(direction));
-        }
-
-        BlockPos center = this.playerNpc.blockPosition();
-        candidates.sort(Comparator.comparingDouble(center::distSqr));
-        for (BlockPos candidate : candidates) {
-            BlockPos immutable = candidate.immutable();
-            if (!this.canStandAt(serverLevel, immutable)
-                    || this.distanceToTargetSqr(immutable, pos) > CONTAINER_USE_DISTANCE_SQR) {
-                continue;
-            }
-            if (immutable.equals(center)) {
-                return immutable;
-            }
-            Path path = this.playerNpc.getNavigation().createPath(immutable, 0);
-            if (path != null && path.canReach()) {
-                return immutable;
-            }
-        }
-        return null;
+        this.standPos = null;
+        this.plannedStandPath = null;
+        return this.targetPos == null || this.mode == null
+                ? PlanResult.FAILED
+                : this.plan(serverLevel, this.targetPos, this.mode);
     }
 
     private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
         return serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
+                && serverLevel.hasChunkAt(pos)
                 && serverLevel.getBlockState(pos).isAir()
                 && serverLevel.getBlockState(pos.above()).isAir()
                 && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
@@ -657,7 +777,21 @@ public class CheckHomeSuppliesGoal extends Goal {
             return true;
         }
         this.repathTicks = STORAGE_REPATH_INTERVAL_TICKS;
-        Path path = this.playerNpc.getNavigation().createPath(this.standPos, 0);
+        Path path = this.plannedStandPath;
+        this.plannedStandPath = null;
+        if (path == null || !path.canReach()) {
+            if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                    || !this.tryAcquireExpensiveWork(serverLevel)) {
+                this.repathTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+                this.playerNpc.setCurrentAiDetail("home storage path queued for shared expensive-work slice");
+                return true;
+            }
+            path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    this.standPos,
+                    STORAGE_PATH_NODE_MULTIPLIER
+            );
+        }
         if (path == null || !path.canReach()) {
             return false;
         }
@@ -743,6 +877,7 @@ public class CheckHomeSuppliesGoal extends Goal {
         this.nonBuilderBase = false;
         this.targetPos = null;
         this.standPos = null;
+        this.plannedStandPath = null;
         this.mode = null;
         this.actionDelayTicks = 0;
         this.repathTicks = 0;
@@ -750,6 +885,36 @@ public class CheckHomeSuppliesGoal extends Goal {
         this.acted = false;
         this.chestOpen = false;
         this.supplyNeed = null;
+        this.missingBuildMaterialNeed = null;
+    }
+
+    private boolean tryAcquireExpensiveWork(ServerLevel serverLevel) {
+        if (this.lastExpensiveWorkAdmissionTick == this.playerNpc.tickCount) {
+            return true;
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            return false;
+        }
+        this.lastExpensiveWorkAdmissionTick = this.playerNpc.tickCount;
+        return true;
+    }
+
+    private void deferCanUseForSharedWork(String detail) {
+        this.canUseThrottle.retryIn(this.playerNpc, 1 + this.playerNpc.getRandom().nextInt(4));
+        this.playerNpc.setIdleTraceDetail(detail, 20 * 4);
+    }
+
+    private void clearStandSearch() {
+        this.standSearchTarget = null;
+        this.standSearchMode = null;
+        this.standSearchCandidates = List.of();
+        this.standSearchCursor = 0;
+    }
+
+    private enum PlanResult {
+        FOUND,
+        PENDING,
+        FAILED
     }
 
     private enum Mode {

@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
@@ -11,6 +12,7 @@ import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ProjectileWeaponItem;
 import net.minecraft.world.item.ShieldItem;
+import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.EnumSet;
 
@@ -21,6 +23,7 @@ public class ShieldGuardGoal extends Goal {
     private static final int MAX_GUARD_TICKS = 56;
     private static final int COOLDOWN_TICKS = 80;
     private static final int MOVEMENT_REPATH_TICKS = 10;
+    private static final float PATH_NODE_MULTIPLIER = 0.15F;
 
     private final PlayerNpcEntity playerNpc;
     private LivingEntity target;
@@ -130,7 +133,14 @@ public class ShieldGuardGoal extends Goal {
         this.playerNpc.getLookControl().setLookAt(this.target, 70.0F, 70.0F);
         if (this.playerNpc.distanceToSqr(this.target) > APPROACH_DISTANCE_SQR) {
             if (this.movementRepathTicks-- <= 0) {
-                this.playerNpc.getNavigation().moveTo(this.target, GUARD_MOVE_SPEED);
+                Path path = PathNavigationAi.createBoundedPath(
+                        this.playerNpc,
+                        this.target.blockPosition(),
+                        PATH_NODE_MULTIPLIER
+                );
+                if (path != null && path.getNodeCount() > 0) {
+                    this.playerNpc.getNavigation().moveTo(path, GUARD_MOVE_SPEED);
+                }
                 this.movementRepathTicks = MOVEMENT_REPATH_TICKS;
             }
         } else {

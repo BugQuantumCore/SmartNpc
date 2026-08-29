@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -41,6 +42,7 @@ public class BreakTargetObstructionGoal extends Goal {
     private static final double HIGH_TARGET_PILLAR_HORIZONTAL_DISTANCE_SQR = 12.0D * 12.0D;
     private static final int HIGH_TARGET_PILLAR_REQUEST_TICKS = 20 * 8;
     private static final int CAN_USE_CHECK_INTERVAL_TICKS = 10;
+    private static final float COMBAT_PATH_NODE_MULTIPLIER = 0.15F;
 
     private final PlayerNpcEntity playerNpc;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle(CAN_USE_CHECK_INTERVAL_TICKS);
@@ -52,6 +54,7 @@ public class BreakTargetObstructionGoal extends Goal {
     private int goalTicks;
     private boolean usingTemporaryTool;
     private boolean finished;
+    private int standSearchCursor;
 
     public BreakTargetObstructionGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -73,12 +76,19 @@ public class BreakTargetObstructionGoal extends Goal {
                 || this.playerNpc.distanceToSqr(currentTarget) > MAX_TARGET_DISTANCE_SQR) {
             return false;
         }
-        if (!this.canUseThrottle.canCheck(this.playerNpc)
-                || this.playerNpc.hasLineOfSight(currentTarget) && this.canReachTarget(currentTarget)) {
+        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
-        if (this.shouldRequestPillarToTarget(currentTarget)) {
+        boolean hasLineOfSight = this.playerNpc.hasLineOfSight(currentTarget);
+        boolean highTarget = this.isHighTargetPillarCandidate(currentTarget);
+        Path targetPath = hasLineOfSight || highTarget
+                ? this.createBoundedPath(currentTarget.blockPosition())
+                : null;
+        if (hasLineOfSight && isReachablePath(targetPath)) {
+            return false;
+        }
+        if (highTarget && !isReachablePath(targetPath)) {
             this.playerNpc.requestUpwardEscapeTo(currentTarget.blockPosition(), HIGH_TARGET_PILLAR_REQUEST_TICKS);
             return false;
         }
@@ -90,6 +100,7 @@ public class BreakTargetObstructionGoal extends Goal {
 
         this.target = currentTarget;
         this.obstructionPos = obstruction;
+        this.standSearchCursor = 0;
         return true;
     }
 
@@ -112,6 +123,7 @@ public class BreakTargetObstructionGoal extends Goal {
         this.previousMainHand = ItemStack.EMPTY;
         this.usingTemporaryTool = false;
         this.finished = false;
+        this.standSearchCursor = 0;
         this.playerNpc.markCombatProgress();
         this.playerNpc.setCurrentAiState("ai.player_npc.breaking_target_obstruction");
         this.updateTaskDetail();
@@ -129,8 +141,10 @@ public class BreakTargetObstructionGoal extends Goal {
                 || !this.isCombatObstruction(serverLevel, this.obstructionPos, serverLevel.getBlockState(this.obstructionPos))) {
             this.playerNpc.clearBlockBreakProgress(this.obstructionPos);
             this.obstructionPos = this.findTargetObstruction(serverLevel, this.target);
+            this.standSearchCursor = 0;
             this.mineTicks = 0;
-            if (this.obstructionPos == null || this.playerNpc.hasLineOfSight(this.target) && this.canReachTarget(this.target)) {
+            if (this.obstructionPos == null || this.playerNpc.hasLineOfSight(this.target)
+                    && isReachablePath(this.createBoundedPath(this.target.blockPosition()))) {
                 this.finished = true;
                 return;
             }
@@ -186,6 +200,7 @@ public class BreakTargetObstructionGoal extends Goal {
         }
         this.playerNpc.clearBlockBreakProgress(brokenPos);
         this.obstructionPos = this.findTargetObstruction(serverLevel, this.target);
+        this.standSearchCursor = 0;
         this.mineTicks = 0;
         this.repathTicks = 0;
         if (this.obstructionPos == null) {
@@ -203,6 +218,7 @@ public class BreakTargetObstructionGoal extends Goal {
         this.repathTicks = 0;
         this.goalTicks = 0;
         this.finished = false;
+        this.standSearchCursor = 0;
         this.playerNpc.setCurrentAiDetail("");
         this.playerNpc.setCurrentAiState(this.playerNpc.getTarget() == null ? PlayerNpcEntity.AI_IDLE : "ai.player_npc.engaging");
     }
@@ -214,20 +230,11 @@ public class BreakTargetObstructionGoal extends Goal {
                 && !this.playerNpc.isAlliedTo(candidate);
     }
 
-    private boolean canReachTarget(LivingEntity target) {
-        Path path = this.playerNpc.getNavigation().createPath(target.blockPosition(), 0);
-        return path != null && path.canReach();
-    }
-
-    private boolean shouldRequestPillarToTarget(LivingEntity target) {
+    private boolean isHighTargetPillarCandidate(LivingEntity target) {
         BlockPos feet = this.playerNpc.blockPosition();
         BlockPos targetPos = target.blockPosition();
-        if (targetPos.getY() <= feet.getY() + 2 || this.horizontalDistanceSqr(feet, targetPos) > HIGH_TARGET_PILLAR_HORIZONTAL_DISTANCE_SQR) {
-            return false;
-        }
-
-        Path path = this.playerNpc.getNavigation().createPath(targetPos, 0);
-        return path == null || !path.canReach();
+        return targetPos.getY() > feet.getY() + 2
+                && this.horizontalDistanceSqr(feet, targetPos) <= HIGH_TARGET_PILLAR_HORIZONTAL_DISTANCE_SQR;
     }
 
     private double horizontalDistanceSqr(BlockPos from, BlockPos to) {
@@ -431,21 +438,23 @@ public class BreakTargetObstructionGoal extends Goal {
     }
 
     private void moveNearObstruction(ServerLevel serverLevel) {
-        BlockPos stand = this.findStandNear(serverLevel, this.obstructionPos);
-        if (stand != null) {
-            this.playerNpc.getNavigation().moveTo(stand.getX() + 0.5D, stand.getY(), stand.getZ() + 0.5D, 1.0D);
+        StandMovePlan plan = this.findStandNear(serverLevel, this.obstructionPos);
+        if (plan == null) {
             return;
         }
-
-        this.playerNpc.getNavigation().moveTo(
-                this.obstructionPos.getX() + 0.5D,
-                this.obstructionPos.getY(),
-                this.obstructionPos.getZ() + 0.5D,
-                1.0D
-        );
+        if (plan.path() != null) {
+            this.playerNpc.getNavigation().moveTo(plan.path(), 1.0D);
+        } else {
+            this.playerNpc.getMoveControl().setWantedPosition(
+                    plan.stand().getX() + 0.5D,
+                    plan.stand().getY(),
+                    plan.stand().getZ() + 0.5D,
+                    1.0D
+            );
+        }
     }
 
-    private BlockPos findStandNear(ServerLevel serverLevel, BlockPos blockPos) {
+    private StandMovePlan findStandNear(ServerLevel serverLevel, BlockPos blockPos) {
         if (blockPos == null) {
             return null;
         }
@@ -459,20 +468,42 @@ public class BreakTargetObstructionGoal extends Goal {
 
         BlockPos center = this.playerNpc.blockPosition();
         candidates.sort(Comparator.comparingDouble(center::distSqr));
-        for (BlockPos candidate : candidates) {
+        int candidateCount = candidates.size();
+        for (int offset = 0; offset < candidateCount; offset++) {
+            int candidateIndex = Math.floorMod(this.standSearchCursor + offset, candidateCount);
+            BlockPos candidate = candidates.get(candidateIndex);
             BlockPos immutable = candidate.immutable();
-            if (!this.canStandAt(serverLevel, immutable)) {
+            if (!this.canStandAt(serverLevel, immutable)
+                    || this.distanceToBlockCenterSqrFrom(immutable, blockPos) > BREAK_DISTANCE_SQR) {
                 continue;
             }
             if (this.playerNpc.distanceToSqr(immutable.getX() + 0.5D, immutable.getY(), immutable.getZ() + 0.5D) <= 1.5D * 1.5D) {
-                return immutable;
+                this.standSearchCursor = 0;
+                return new StandMovePlan(immutable, null);
             }
-            Path path = this.playerNpc.getNavigation().createPath(immutable, 0);
-            if (path != null && path.canReach()) {
-                return immutable;
+            // One synchronous path per repath interval. A miss advances to another stand on the
+            // next interval instead of batching every adjacent stand plus a final moveTo path.
+            this.standSearchCursor = (candidateIndex + 1) % candidateCount;
+            Path path = this.createBoundedPath(immutable);
+            if (isReachablePath(path)) {
+                return new StandMovePlan(immutable, path);
             }
+            return null;
         }
+        this.standSearchCursor = 0;
         return null;
+    }
+
+    private Path createBoundedPath(BlockPos targetPos) {
+        return PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                targetPos,
+                COMBAT_PATH_NODE_MULTIPLIER
+        );
+    }
+
+    private static boolean isReachablePath(Path path) {
+        return path != null && path.canReach();
     }
 
     private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
@@ -530,5 +561,15 @@ public class BreakTargetObstructionGoal extends Goal {
 
     private double distanceToBlockCenterSqr(BlockPos pos) {
         return this.playerNpc.distanceToSqr(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D);
+    }
+
+    private double distanceToBlockCenterSqrFrom(BlockPos stand, BlockPos target) {
+        double dx = stand.getX() + 0.5D - (target.getX() + 0.5D);
+        double dy = stand.getY() - (target.getY() + 0.5D);
+        double dz = stand.getZ() + 0.5D - (target.getZ() + 0.5D);
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private record StandMovePlan(BlockPos stand, Path path) {
     }
 }

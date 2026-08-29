@@ -1,11 +1,14 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.InventoryUtils;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.ai.util.DefaultRandomPos;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.EnumSet;
 
@@ -21,6 +24,7 @@ public class LowHealthFleeGoal extends Goal {
     private static final int MIN_JUMP_COOLDOWN_TICKS = 12;
     private static final int MAX_JUMP_COOLDOWN_TICKS = 28;
     private static final int POST_FLEE_ESCAPE_COOLDOWN_TICKS = 20 * 5;
+    private static final float PATH_NODE_MULTIPLIER = 0.15F;
 
     private final PlayerNpcEntity playerNpc;
     private LivingEntity threat;
@@ -78,7 +82,7 @@ public class LowHealthFleeGoal extends Goal {
     @Override
     public void start() {
         this.fleeTicks = MIN_FLEE_TICKS + this.playerNpc.getRandom().nextInt(MAX_FLEE_TICKS - MIN_FLEE_TICKS + 1);
-        this.pathRecalculateTicks = 0;
+        this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
         this.jumpCooldownTicks = this.nextJumpCooldown();
         this.playerNpc.clearUpwardEscapeTarget();
         this.playerNpc.setHoleEscapeCooldown(POST_FLEE_ESCAPE_COOLDOWN_TICKS);
@@ -171,7 +175,14 @@ public class LowHealthFleeGoal extends Goal {
 
     private void moveToFleePos() {
         if (this.fleePos != null) {
-            this.playerNpc.getNavigation().moveTo(this.fleePos.x, this.fleePos.y, this.fleePos.z, RUN_SPEED);
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    BlockPos.containing(this.fleePos.x, this.fleePos.y, this.fleePos.z),
+                    PATH_NODE_MULTIPLIER
+            );
+            if (path != null && path.getNodeCount() > 0) {
+                this.playerNpc.getNavigation().moveTo(path, RUN_SPEED);
+            }
         }
     }
 

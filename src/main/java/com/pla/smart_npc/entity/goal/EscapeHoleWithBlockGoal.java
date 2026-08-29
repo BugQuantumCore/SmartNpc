@@ -6,6 +6,7 @@ import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
@@ -95,7 +96,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int ROUTE_NAV_VERTICAL_DOWN = 3;
     private static final int ROUTE_NAV_VERTICAL_UP = 12;
     private static final int ROUTE_NAV_MIN_UPWARD_GAIN = 2;
-    private static final int ROUTE_NAV_MAX_PATH_CHECKS = 10;
+    private static final int ROUTE_NAV_MAX_PATH_CHECKS = 2;
+    private static final float ESCAPE_DIAGNOSTIC_PATH_NODE_MULTIPLIER = 0.01F;
     private static final double ROUTE_NAV_REACHED_SQR = 2.0D * 2.0D;
     private static final int EXPLORATION_CLIMB_CLEAR_TICKS = 24;
     private static final int EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS = 20 * 20;
@@ -821,7 +823,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 .filter(pos -> !pos.equals(feet))
                 .filter(pos -> pos.distSqr(desiredWaypoint) + FARM_EGRESS_PROGRESS_EPSILON_SQR < currentDistance)
                 .sorted(Comparator.comparingDouble(pos -> pos.distSqr(desiredWaypoint)))
-                .limit(10)
+                .limit(2)
                 .filter(this::startFarmEgressNavigation)
                 .findFirst()
                 .orElse(null);
@@ -832,7 +834,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (target == null) {
             return false;
         }
-        Path path = this.playerNpc.getNavigation().createPath(target, 0);
+        Path path = this.createBoundedDiagnosticPath(target);
         boolean started = path != null
                 && path.canReach()
                 && path.getEndNode() != null
@@ -3213,7 +3215,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             if (!seen.add(candidate) || candidate.distSqr(feet) <= ROUTE_NAV_REACHED_SQR) {
                 continue;
             }
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = this.createBoundedDiagnosticPath(candidate);
             checked++;
             if (path != null && path.canReach()) {
                 return candidate;
@@ -3280,7 +3282,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
 
-        Path path = this.playerNpc.getNavigation().createPath(routeTarget, 0);
+        Path path = this.createBoundedDiagnosticPath(routeTarget);
         if (requestedSurfaceRoute && (path == null || !path.canReach())) {
             return true;
         }
@@ -3332,8 +3334,17 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return null;
         }
 
-        Path path = this.playerNpc.getNavigation().createPath(targetPos, 0);
+        Path path = this.createBoundedDiagnosticPath(targetPos);
         return path == null || !path.canReach() ? targetPos.immutable() : null;
+    }
+
+    /** Bounds speculative route/reachability probes without changing normal navigation. */
+    private Path createBoundedDiagnosticPath(BlockPos target) {
+        return PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                target,
+                ESCAPE_DIAGNOSTIC_PATH_NODE_MULTIPLIER
+        );
     }
 
     private double horizontalDistanceSqr(BlockPos from, BlockPos to) {
@@ -3804,18 +3815,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean isActuallyTrapped(ServerLevel serverLevel, BlockPos feet) {
-        if (this.hasLocalWalkingEscape(serverLevel, feet)) {
-            return false;
-        }
-
-        int blockedSides = 0;
         for (Direction direction : Direction.Plane.HORIZONTAL) {
-            if (this.hasBlockingCollision(serverLevel, feet.relative(direction))) {
-                blockedSides++;
+            if (!this.hasBlockingCollision(serverLevel, feet.relative(direction))) {
+                // Four blocked horizontal sides are required regardless of the local walking
+                // search result. Reject ordinary terrain before entering the bounded flood scan.
+                return false;
             }
         }
-
-        return blockedSides >= 4;
+        return !this.hasLocalWalkingEscape(serverLevel, feet);
     }
 
     private boolean hasLocalWalkingEscape(ServerLevel serverLevel, BlockPos feet) {

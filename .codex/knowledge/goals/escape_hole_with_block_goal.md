@@ -17,6 +17,8 @@ The same goal also handles the cave return-home case where the navigation/home t
 
 One-block obstacles or flat ground with an open adjacent exit must not trigger this goal because Player NPC can jump those normally. Do not re-add a simple "two-block block ahead" trigger unless it is also tied to reliable stuck/path intent.
 
+The ordinary activation predicate must reject any open horizontal side before running `hasLocalWalkingEscape`. Being genuinely trapped ultimately requires all four lower horizontal sides to have collision; the older equivalent ordering ran the bounded 9x9x4 walking flood first even on open terrain. Since this safety goal is deliberately unwrapped and checked without a routine worker resource, that ordering multiplied collision reads across every idle NPC selector pass. Keep explicit upward/farm escape requests immediate and keep the goal outside routine scheduling; the cheap-side-first ordering changes only evaluation cost, not the trapped result.
+
 The delayed placement prevents the block from being placed inside the NPC's bounding box before the jump lifts it clear.
 
 Utility blocks such as crafting tables, chests, furnaces, beds, and torches are not used as pillar material for this escape.
@@ -40,3 +42,5 @@ Exploration may request this pillar mode only toward a genuine local surface sta
 Completed exploration supports remain marked temporarily for placement safety, but that memory must not delay `DescendHighColumnGoal`. Once the upward request has ended, the hole cooldown has elapsed, and the existing narrow-column, lower-terrain, home, farm, fluid, block-entity, and breakability checks pass, descent may remove the remembered support immediately instead of waiting for the 45-second support-memory expiry.
 
 Cooldown uses `PlayerNpcEntity.holeEscapeCooldown`, decremented from the entity tick.
+
+Route discovery and reachability checks are speculative safety diagnostics, not normal movement paths. They use a scoped 0.01 visited-node multiplier, test at most two route candidates per pass, and test at most two monotonic farm-egress intermediates. A live 209.5 ms NPC tick while this unwrapped goal was actively mining/pillaring showed that its former batches of raw `createPath` calls could bypass routine-worker bounds. Keep emergency escape available without a routine resource; bound its atomic path work instead.

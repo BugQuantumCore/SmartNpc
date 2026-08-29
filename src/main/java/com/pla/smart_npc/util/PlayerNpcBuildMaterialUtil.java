@@ -537,6 +537,11 @@ public final class PlayerNpcBuildMaterialUtil {
         return Optional.empty();
     }
 
+    /** True while the loaded-layout missing-material query has more cursor slices to inspect. */
+    public static boolean isMissingBuildMaterialSearchPending(PlayerNpcEntity playerNpc) {
+        return playerNpc != null && MISSING_NEED_SEARCHES.containsKey(playerNpc);
+    }
+
     private static int missingNeedInventoryHash(PlayerNpcEntity playerNpc) {
         int hash = 1;
         hash = 31 * hash + missingNeedStackHash(playerNpc.getMainHandItem());

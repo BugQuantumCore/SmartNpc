@@ -2,7 +2,7 @@
 
 ## Source
 
-- `src/main/java/com/pla/player_npc/entity/goal/LootNearbyChestGoal.java`
+- `src/main/java/com/pla/smart_npc/entity/goal/LootNearbyChestGoal.java`
 - Registered from `PlayerNpcEntity.registerGoals()`.
 
 ## Purpose
@@ -22,3 +22,9 @@ The NPC must be standing beside the chest to interact, so it should not loot thr
 After moving gear into inventory, the goal asks `PlayerNpcEntity.equipBetterGearFromInventory()` to equip better weapons/tools or armor.
 
 Cooldown uses `PlayerNpcEntity.lootChestCooldown`.
+
+## Performance Contract
+
+LOOTING is an opportunistic characteristic and remains registered outside the routine-worker wrapper. Its 21x7x21 search volume therefore must never be traversed in one selector activation: the search retains its origin/cursor/best candidate and reads at most 128 loaded positions per pass, retrying partial passes with a short jitter. The origin is kept through ordinary walking and resets only after the NPC moves more than four blocks away, so sliced searches still finish while the NPC strolls. Unloaded positions are skipped rather than synchronously loading chunks.
+
+Initial movement and 20-tick repaths use `PathNavigationAi.createBoundedPath(..., 0.15F)`. This characteristic stays available without a routine job resource, while each synchronous path has a deterministic visited-node ceiling.

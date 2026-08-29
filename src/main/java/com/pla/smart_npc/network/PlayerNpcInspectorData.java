@@ -3,6 +3,7 @@ package com.pla.smart_npc.network;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcBuildStatusUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
+import com.pla.smart_npc.util.PlayerNpcNaturalSpawnCap;
 import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -67,6 +68,7 @@ public final class PlayerNpcInspectorData {
 
     public static String createAiResourceText(MinecraftServer server, PlayerNpcEntity selectedNpc) {
         PlayerNpcAiWorkBudget.ResourceSnapshot snapshot = PlayerNpcAiWorkBudget.resourceSnapshot(server);
+        PlayerNpcNaturalSpawnCap.SpawnCapSnapshot spawnCap = PlayerNpcNaturalSpawnCap.snapshot(server);
         List<PlayerNpcAiWorkBudget.ResourceHolder> holders = snapshot.holders();
         StringBuilder text = new StringBuilder(512);
         if (selectedNpc != null) {
@@ -82,6 +84,29 @@ public final class PlayerNpcInspectorData {
                 .append(" | active ").append(snapshot.activeWorkerCount())
                 .append(" | waiting ").append(snapshot.waitingNpcCount())
                 .append(" | limit ").append(snapshot.effectiveWorkerLimit());
+        String automaticWorkerStatus = PlayerNpcAiWorkBudget.automaticWorkerLimitStatus(server);
+        if (!automaticWorkerStatus.isBlank()) {
+            text.append('\n').append("  Worker auto: ").append(automaticWorkerStatus);
+        }
+        text.append('\n').append("NPC population ").append(spawnCap.livingCount())
+                .append(" | natural max ").append(spawnCap.effectiveLimit())
+                .append(spawnCap.automatic() ? " (auto)" : " (fixed)")
+                .append(" | loaded ").append(spawnCap.loadedCount())
+                .append(" | pending ").append(spawnCap.pendingCount());
+        if (spawnCap.automatic()) {
+            text.append('\n').append("  Auto: baseline ")
+                    .append(String.format(java.util.Locale.ROOT, "%.1fms", spawnCap.baselineMspt()))
+                    .append(" | probe ").append(spawnCap.probeMode().replace('_', ' '))
+                    .append(' ').append(spawnCap.healthyEvaluationCount())
+                    .append('/').append(spawnCap.healthyEvaluationsRequired())
+                    .append(" | ").append(spawnCap.reason().replace('_', ' '));
+            text.append('\n').append("  Limits: advisory forecast ")
+                    .append(spawnCap.advisoryForecastLimit() > 0
+                            ? Integer.toString(spawnCap.advisoryForecastLimit())
+                            : "warming")
+                    .append(" | learned safe ").append(spawnCap.learnedSafeLimit())
+                    .append(" | exploration max ").append(spawnCap.explorationLimit());
+        }
         text.append('\n').append(PlayerNpcPerformanceMonitor.createInspectorText());
 
         int shown = Math.min(MAX_RESOURCE_HOLDERS, holders.size());

@@ -27,6 +27,14 @@ public final class PlayerNpcAiWorkBudget {
     private static final int EXPENSIVE_REQUEST_STALE_TICKS = 40;
     private static final int DENIAL_VISIBLE_TICKS = 20 * 2;
     private static final double AUTO_TARGET_MSPT = 40.0D;
+    private static final int AUTO_EVALUATION_INTERVAL_TICKS = 20 * 5;
+    private static final int AUTO_HEALTHY_GROWTH_CHECKS = 2;
+    private static final int AUTO_CAUTION_GROWTH_CHECKS = 5;
+    private static final int AUTO_HIGH_HEALTHY_GROWTH_CHECKS = 3;
+    private static final int AUTO_HIGH_CAUTION_GROWTH_CHECKS = 6;
+    private static final int AUTO_OVERLOAD_REDUCTION_CHECKS = 2;
+    private static final double AUTO_CAUTION_PROBE_MAX_MSPT = 49.0D;
+    private static final double AUTO_REDUCTION_MSPT = 52.0D;
     private static final Map<MinecraftServer, SchedulerState> SERVER_SCHEDULERS = new WeakHashMap<>();
 
     private PlayerNpcAiWorkBudget() {
@@ -42,12 +50,14 @@ public final class PlayerNpcAiWorkBudget {
      * Gives one NPC a one-tick probe turn. A slot is occupied beyond this tick only if a delegate
      * actually starts, so prerequisite-blocked NPCs cannot reserve the worker window.
      */
-    public static boolean canStartWork(PlayerNpcEntity playerNpc) {
+    public static boolean canStartWork(PlayerNpcEntity playerNpc, int predicateSlice, int sliceCount) {
         if (!(playerNpc.level() instanceof ServerLevel serverLevel)) {
             return false;
         }
         long tick = serverLevel.getServer().getTickCount();
-        return scheduler(serverLevel).canProbe(playerNpc, tick, resolveWorkerLimit());
+        SchedulerState scheduler = scheduler(serverLevel);
+        return scheduler.canProbe(playerNpc, tick, resolveWorkerLimit(serverLevel.getServer()))
+                && scheduler.canEvaluatePredicateSlice(playerNpc.getUUID(), tick, predicateSlice, sliceCount);
     }
 
     public static boolean canContinueWork(PlayerNpcEntity playerNpc) {
@@ -55,18 +65,18 @@ public final class PlayerNpcAiWorkBudget {
             return false;
         }
         long tick = serverLevel.getServer().getTickCount();
-        return scheduler(serverLevel).canContinue(playerNpc, tick, resolveWorkerLimit());
+        return scheduler(serverLevel).canContinue(playerNpc, tick, resolveWorkerLimit(serverLevel.getServer()));
     }
 
     public static void onWorkStarted(PlayerNpcEntity playerNpc) {
         if (playerNpc.level() instanceof ServerLevel serverLevel) {
-            scheduler(serverLevel).workStarted(playerNpc, serverLevel.getServer().getTickCount(), resolveWorkerLimit());
+            scheduler(serverLevel).workStarted(playerNpc, serverLevel.getServer().getTickCount(), resolveWorkerLimit(serverLevel.getServer()));
         }
     }
 
     public static void onWorkStopped(PlayerNpcEntity playerNpc) {
         if (playerNpc.level() instanceof ServerLevel serverLevel) {
-            scheduler(serverLevel).workStopped(playerNpc, serverLevel.getServer().getTickCount(), resolveWorkerLimit());
+            scheduler(serverLevel).workStopped(playerNpc, serverLevel.getServer().getTickCount(), resolveWorkerLimit(serverLevel.getServer()));
         }
     }
 
@@ -75,7 +85,19 @@ public final class PlayerNpcAiWorkBudget {
             return false;
         }
         long tick = serverLevel.getServer().getTickCount();
-        return scheduler(serverLevel).isWaiting(playerNpc.getUUID(), tick, resolveWorkerLimit());
+        return scheduler(serverLevel).isWaiting(playerNpc.getUUID(), tick, resolveWorkerLimit(serverLevel.getServer()));
+    }
+
+    /**
+     * Caps optional waiting-stroll path starts separately from routine worker ownership. Vanilla
+     * target selection has already succeeded when this is requested. A denied NPC remains a
+     * non-worker; this only prevents multiple visual fallback paths from being created in one tick.
+     */
+    public static boolean tryAcquireWaitingStrollPathStart(PlayerNpcEntity playerNpc) {
+        if (!(playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        return scheduler(serverLevel).tryAcquireWaitingStrollPathStart(serverLevel.getServer().getTickCount());
     }
 
     /**
@@ -91,13 +113,13 @@ public final class PlayerNpcAiWorkBudget {
             return false;
         }
         long tick = serverLevel.getServer().getTickCount();
-        return scheduler.hasResource(playerNpc.getUUID(), tick, resolveWorkerLimit());
+        return scheduler.hasResource(playerNpc.getUUID(), tick, resolveWorkerLimit(serverLevel.getServer()));
     }
 
     /** Read-only, bounded view used by commands and diagnostics on the server thread. */
     public static ResourceSnapshot resourceSnapshot(MinecraftServer server) {
         int configuredLimit = SmartNpcConfig.AI_PROCESSING_NPC_LIMIT.get();
-        int effectiveLimit = resolveWorkerLimit();
+        int effectiveLimit = resolveWorkerLimit(server);
         if (server == null) {
             return new ResourceSnapshot(0L, configuredLimit, effectiveLimit, 0, 0, List.of());
         }
@@ -117,7 +139,7 @@ public final class PlayerNpcAiWorkBudget {
 
         long tick = serverLevel.getServer().getTickCount();
         SchedulerState scheduler = scheduler(serverLevel);
-        boolean admitted = scheduler.tryAcquire(playerNpc, tick, resolveWorkerLimit());
+        boolean admitted = scheduler.tryAcquire(playerNpc, tick, resolveWorkerLimit(serverLevel.getServer()));
         if (admitted) {
             scheduler.clearDenied(playerNpc.getUUID());
         } else if (!scheduler.wasExpensiveAdmittedThisTick(playerNpc.getUUID(), tick)) {
@@ -130,47 +152,140 @@ public final class PlayerNpcAiWorkBudget {
         return SERVER_SCHEDULERS.computeIfAbsent(serverLevel.getServer(), ignored -> new SchedulerState());
     }
 
-    private static int resolveWorkerLimit() {
+    private static int resolveWorkerLimit(MinecraftServer server) {
         int configured = SmartNpcConfig.AI_PROCESSING_NPC_LIMIT.get();
         if (configured >= 0) {
             return configured;
         }
+        return server == null ? 1 : scheduler(server).resolveAutomaticWorkerLimit(server.getTickCount());
+    }
 
-        int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
-        long maxHeapBytes = Math.max(1L, Runtime.getRuntime().maxMemory());
-        int heapGiB = (int) Math.max(1L, maxHeapBytes / (1024L * 1024L * 1024L));
-        int capabilityLimit = Math.max(1, Math.min(4,
-                Math.min(Math.max(1, processors / 2), Math.max(1, heapGiB / 2))));
+    public static String automaticWorkerLimitStatus(MinecraftServer server) {
+        if (SmartNpcConfig.AI_PROCESSING_NPC_LIMIT.get() >= 0 || server == null) {
+            return "";
+        }
+        return scheduler(server).automaticWorkerLimitStatus();
+    }
 
-        if (!PlayerNpcPerformanceMonitor.hasStableRollingSample()) {
-            return 1;
-        }
-        double configuredTarget = SmartNpcConfig.AI_TARGET_SERVER_MSPT.get();
-        double targetMspt = configuredTarget > 0.0D ? configuredTarget : AUTO_TARGET_MSPT;
-        double averageMspt = PlayerNpcPerformanceMonitor.getRollingAverageMspt();
-        if (averageMspt <= targetMspt * 0.8D) {
-            return capabilityLimit;
-        }
-        if (averageMspt <= targetMspt) {
-            return Math.min(capabilityLimit, 3);
-        }
-        if (averageMspt <= targetMspt * 1.125D) {
-            return Math.min(capabilityLimit, 2);
-        }
-        return 1;
+    private static SchedulerState scheduler(MinecraftServer server) {
+        return SERVER_SCHEDULERS.computeIfAbsent(server, ignored -> new SchedulerState());
     }
 
     private static final class SchedulerState {
         private final Map<UUID, ActiveWorker> activeWorkers = new LinkedHashMap<>();
         private final Map<UUID, Request> waiting = new LinkedHashMap<>();
         private final Set<UUID> probeOwners = new LinkedHashSet<>();
+        private final Map<UUID, Boolean> probeDecisions = new LinkedHashMap<>();
+        private final Map<UUID, Integer> predicateSlices = new LinkedHashMap<>();
+        private final Map<UUID, Long> predicateSliceTicks = new LinkedHashMap<>();
         private final Map<UUID, Long> deniedAtTick = new LinkedHashMap<>();
         private final Map<UUID, Long> expensiveRequestedAtTick = new LinkedHashMap<>();
         private final Map<UUID, Long> expensiveAdmittedAtTick = new LinkedHashMap<>();
         private final Deque<UUID> expensiveQueue = new ArrayDeque<>();
         private long schedulerTick = Long.MIN_VALUE;
         private long admissionTick = Long.MIN_VALUE;
+        private long waitingStrollAdmissionTick = Long.MIN_VALUE;
         private int admissionsThisTick;
+        private int automaticWorkerLimit = 1;
+        private long lastAutomaticEvaluationTick = Long.MIN_VALUE;
+        private int healthyWorkerEvaluations;
+        private int overloadedWorkerEvaluations;
+        private int automaticCapabilityLimit = 1;
+        private int healthyWorkerEvaluationsRequired = AUTO_HEALTHY_GROWTH_CHECKS;
+        private double automaticBaselineMspt;
+        private String automaticWorkerReason = "warming_up";
+
+        private int resolveAutomaticWorkerLimit(long tick) {
+            int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
+            long maxHeapBytes = Math.max(1L, Runtime.getRuntime().maxMemory());
+            int heapGiB = (int) Math.max(1L, maxHeapBytes / (1024L * 1024L * 1024L));
+            // Logical workers still execute on the server thread, so this is an exploration
+            // ceiling rather than claimed parallelism. Heap limits retained goal state/searches;
+            // CPU count prevents a small host from advertising a large worker catalog.
+            long cpuExplorationLimit = (long) processors * 2L;
+            long heapExplorationLimit = (long) heapGiB * 3L;
+            int capabilityLimit = (int) Math.max(1L, Math.min(12L,
+                    Math.min(cpuExplorationLimit, heapExplorationLimit)));
+            this.automaticCapabilityLimit = capabilityLimit;
+            this.automaticWorkerLimit = Math.min(this.automaticWorkerLimit, capabilityLimit);
+            if (!PlayerNpcPerformanceMonitor.hasStableRollingSample()) {
+                this.automaticWorkerReason = "warming_up";
+                return this.automaticWorkerLimit;
+            }
+            if (this.lastAutomaticEvaluationTick != Long.MIN_VALUE
+                    && tick - this.lastAutomaticEvaluationTick < AUTO_EVALUATION_INTERVAL_TICKS) {
+                return this.automaticWorkerLimit;
+            }
+            this.lastAutomaticEvaluationTick = tick;
+            this.automaticBaselineMspt = PlayerNpcPerformanceMonitor.getRollingBaselineMspt();
+            double configuredTarget = SmartNpcConfig.AI_TARGET_SERVER_MSPT.get();
+            double healthyTarget = configuredTarget > 0.0D ? configuredTarget : AUTO_TARGET_MSPT;
+            double cautionProbeMaxMspt = Math.min(AUTO_CAUTION_PROBE_MAX_MSPT, healthyTarget + 9.0D);
+            double reductionMspt = Math.min(AUTO_REDUCTION_MSPT, healthyTarget + 12.0D);
+            if (this.automaticBaselineMspt >= reductionMspt) {
+                this.healthyWorkerEvaluations = 0;
+                if (++this.overloadedWorkerEvaluations >= AUTO_OVERLOAD_REDUCTION_CHECKS) {
+                    this.automaticWorkerLimit = Math.max(1, this.automaticWorkerLimit - 1);
+                    this.overloadedWorkerEvaluations = 0;
+                    this.automaticWorkerReason = "sustained_overload_reduced";
+                } else {
+                    this.automaticWorkerReason = "overload_pending";
+                }
+                return this.automaticWorkerLimit;
+            }
+            this.overloadedWorkerEvaluations = 0;
+            if (this.automaticWorkerLimit >= capabilityLimit) {
+                this.healthyWorkerEvaluations = 0;
+                this.automaticWorkerReason = "capability_ceiling";
+                return this.automaticWorkerLimit;
+            }
+            if (this.activeWorkers.size() < this.automaticWorkerLimit || this.waiting.isEmpty()) {
+                this.healthyWorkerEvaluations = 0;
+                this.automaticWorkerReason = this.activeWorkers.size() < this.automaticWorkerLimit
+                        ? "awaiting_worker_occupancy"
+                        : "awaiting_queued_demand";
+                return this.automaticWorkerLimit;
+            }
+            int requiredChecks;
+            if (this.automaticBaselineMspt <= healthyTarget) {
+                requiredChecks = this.automaticWorkerLimit < 3
+                        ? AUTO_HEALTHY_GROWTH_CHECKS
+                        : AUTO_HIGH_HEALTHY_GROWTH_CHECKS;
+                this.automaticWorkerReason = "healthy_growth_pending";
+            } else if (this.automaticBaselineMspt <= cautionProbeMaxMspt) {
+                requiredChecks = this.automaticWorkerLimit < 3
+                        ? AUTO_CAUTION_GROWTH_CHECKS
+                        : AUTO_HIGH_CAUTION_GROWTH_CHECKS;
+                this.automaticWorkerReason = "cautious_growth_pending";
+            } else {
+                this.healthyWorkerEvaluations = 0;
+                this.automaticWorkerReason = "hysteresis_hold";
+                return this.automaticWorkerLimit;
+            }
+            this.healthyWorkerEvaluationsRequired = requiredChecks;
+            if (++this.healthyWorkerEvaluations >= requiredChecks) {
+                this.automaticWorkerLimit++;
+                this.healthyWorkerEvaluations = 0;
+                this.automaticWorkerReason = "stable_headroom_growth";
+            }
+            return this.automaticWorkerLimit;
+        }
+
+        private String automaticWorkerLimitStatus() {
+            return "limit " + this.automaticWorkerLimit + " | exploration max " + this.automaticCapabilityLimit
+                    + " | baseline " + String.format(java.util.Locale.ROOT, "%.1f", this.automaticBaselineMspt)
+                    + "ms | " + this.automaticWorkerReason.replace('_', ' ')
+                    + " | growth " + this.healthyWorkerEvaluations + "/" + this.healthyWorkerEvaluationsRequired
+                    + " | overload " + this.overloadedWorkerEvaluations + "/" + AUTO_OVERLOAD_REDUCTION_CHECKS;
+        }
+
+        private boolean tryAcquireWaitingStrollPathStart(long tick) {
+            if (this.waitingStrollAdmissionTick == tick) {
+                return false;
+            }
+            this.waitingStrollAdmissionTick = tick;
+            return true;
+        }
 
         private boolean canProbe(PlayerNpcEntity playerNpc, long tick, int workerLimit) {
             this.beginTick(tick, workerLimit);
@@ -186,22 +301,40 @@ public final class PlayerNpcAiWorkBudget {
                 return true;
             }
 
+            Boolean cachedDecision = this.probeDecisions.get(id);
+            if (cachedDecision != null) {
+                return cachedDecision;
+            }
+
             this.updateWaiting(playerNpc, tick);
             int availableProbes = Math.max(0, workerLimit - this.activeWorkers.size());
             if (this.probeOwners.size() >= availableProbes || this.waiting.isEmpty()) {
                 this.markDenied(id, tick);
+                this.probeDecisions.put(id, false);
                 return false;
             }
 
             UUID nextId = this.waiting.keySet().iterator().next();
             if (!id.equals(nextId)) {
                 this.markDenied(id, tick);
+                this.probeDecisions.put(id, false);
                 return false;
             }
             this.waiting.remove(id);
             this.probeOwners.add(id);
+            this.probeDecisions.put(id, true);
             this.clearDenied(id);
             return true;
+        }
+
+        private boolean canEvaluatePredicateSlice(UUID id, long tick, int requestedSlice, int sliceCount) {
+            int boundedSliceCount = Math.max(1, sliceCount);
+            if (this.predicateSliceTicks.getOrDefault(id, Long.MIN_VALUE) != tick) {
+                int nextSlice = Math.floorMod(this.predicateSlices.getOrDefault(id, -1) + 1, boundedSliceCount);
+                this.predicateSlices.put(id, nextSlice);
+                this.predicateSliceTicks.put(id, tick);
+            }
+            return this.predicateSlices.getOrDefault(id, 0) == Math.floorMod(requestedSlice, boundedSliceCount);
         }
 
         private boolean canContinue(PlayerNpcEntity playerNpc, long tick, int workerLimit) {
@@ -340,10 +473,11 @@ public final class PlayerNpcAiWorkBudget {
             if (this.schedulerTick != tick) {
                 this.schedulerTick = tick;
                 this.probeOwners.clear();
-            }
-            this.prune(tick);
-            if (workerLimit <= 0) {
-                this.probeOwners.clear();
+                this.probeDecisions.clear();
+                this.prune(tick);
+                if (workerLimit <= 0) {
+                    this.probeOwners.clear();
+                }
             }
         }
 
@@ -382,6 +516,10 @@ public final class PlayerNpcAiWorkBudget {
             this.activeWorkers.entrySet().removeIf(entry -> !isUsable(entry.getValue().playerNpc));
             this.deniedAtTick.entrySet().removeIf(entry -> tick - entry.getValue() > DENIAL_VISIBLE_TICKS);
             this.expensiveAdmittedAtTick.entrySet().removeIf(entry -> tick - entry.getValue() > 1);
+            this.predicateSliceTicks.entrySet().removeIf(entry -> tick - entry.getValue() > DENIAL_VISIBLE_TICKS
+                    && !this.activeWorkers.containsKey(entry.getKey())
+                    && !this.waiting.containsKey(entry.getKey()));
+            this.predicateSlices.keySet().removeIf(id -> !this.predicateSliceTicks.containsKey(id));
             this.pruneExpensiveQueue(tick);
         }
 

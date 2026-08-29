@@ -16,6 +16,7 @@ import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.fml.common.Mod;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -29,13 +30,18 @@ public final class PlayerNpcPerformanceMonitor {
     private static final int STARTUP_WARMUP_TICKS = 20 * 10;
     private static final int PLAYER_JOIN_WARMUP_TICKS = 20 * 8;
     private static final int PLAYER_NPC_JOIN_WARMUP_TICKS = 20 * 5;
-    private static final int POST_STALL_WARMUP_TICKS = 20 * 8;
     private static final double NANOS_PER_MILLISECOND = 1_000_000.0D;
     private static final double MAX_TPS = 20.0D;
     private static final double PAUSE_OR_LOAD_TICK_MSPT = 1000.0D;
     private static final double ROLLING_WARNING_CURRENT_TICK_MSPT_FLOOR = 50.0D;
     private static final double HEALTHY_AVERAGE_SPIKE_SUPPRESSION_MSPT = 50.0D;
     private static final double SEVERE_SINGLE_TICK_SPIKE_MSPT = 1000.0D;
+    private static final double AVERAGE_WARNING_MSPT = 60.0D;
+    private static final double SPIKE_WARNING_MSPT = 200.0D;
+    private static final double OPTIONAL_AI_MAX_AVERAGE_MSPT = 50.0D;
+    private static final double NPC_DOMINATED_WARNING_MIN_MSPT = 25.0D;
+    private static final int WARNING_COOLDOWN_TICKS = 200;
+    private static final int MAX_WARNING_TRACE_LINES = 8;
     private static final String PASSIVE_HOME_STATE = "ai.player_npc.being_at_home";
 
     private static final double[] rollingMspt = new double[ROLLING_WINDOW_TICKS];
@@ -50,11 +56,22 @@ public final class PlayerNpcPerformanceMonitor {
     private static long lastWarningServerTick = Long.MIN_VALUE;
     private static long lastSuppressedWarningServerTick = Long.MIN_VALUE;
     private static long measuredNpcTickNanos;
+    private static long measuredNpcSuperTickNanos;
+    private static long measuredNpcCustomTickNanos;
     private static long hottestNpcTickNanos;
+    private static long hottestNpcSuperTickNanos;
+    private static long hottestNpcCustomTickNanos;
     private static String hottestNpcTickName = "none";
     private static String hottestNpcTickState = PlayerNpcEntity.AI_IDLE;
+    private static String hottestNpcTickDetail = "none";
     private static long measuredForceManagerNanos;
     private static long measuredTraceLoggerNanos;
+    private static long measuredWaitingStrollNanos;
+    private static long hottestGoalWorkNanos;
+    private static long totalGoalWorkNanos;
+    private static int goalWorkInvocationCount;
+    private static String hottestGoalWorkName = "none";
+    private static String hottestGoalWorkNpc = "none";
 
     private PlayerNpcPerformanceMonitor() {
     }
@@ -70,11 +87,22 @@ public final class PlayerNpcPerformanceMonitor {
         }
 
         measuredNpcTickNanos = 0L;
+        measuredNpcSuperTickNanos = 0L;
+        measuredNpcCustomTickNanos = 0L;
         hottestNpcTickNanos = 0L;
+        hottestNpcSuperTickNanos = 0L;
+        hottestNpcCustomTickNanos = 0L;
         hottestNpcTickName = "none";
         hottestNpcTickState = PlayerNpcEntity.AI_IDLE;
+        hottestNpcTickDetail = "none";
         measuredForceManagerNanos = 0L;
         measuredTraceLoggerNanos = 0L;
+        measuredWaitingStrollNanos = 0L;
+        hottestGoalWorkNanos = 0L;
+        totalGoalWorkNanos = 0L;
+        goalWorkInvocationCount = 0;
+        hottestGoalWorkName = "none";
+        hottestGoalWorkNpc = "none";
         tickStartNanos = System.nanoTime();
     }
 
@@ -92,9 +120,17 @@ public final class PlayerNpcPerformanceMonitor {
         tickStartNanos = -1L;
 
         latestMspt = elapsedNanos / NANOS_PER_MILLISECOND;
-        if (shouldIgnoreSample(event.getServer(), latestMspt)) {
+        if (isWarmupSample(event.getServer())) {
             resetSamples();
             latestMspt = 0.0D;
+            return;
+        }
+        // Startup/player joins own explicit warmups. A later extreme pause/load tick is omitted
+        // from the rolling window without erasing stable evidence from the surrounding slow run.
+        // Still evaluate it against the existing stable window so the severe-spike diagnostic is
+        // reachable and an actual 1000+ ms NPC stall is not silently discarded.
+        if (latestMspt >= PAUSE_OR_LOAD_TICK_MSPT) {
+            maybeLogWarning(event.getServer(), latestMspt);
             return;
         }
 
@@ -126,9 +162,19 @@ public final class PlayerNpcPerformanceMonitor {
         lastWarningServerTick = Long.MIN_VALUE;
         lastSuppressedWarningServerTick = Long.MIN_VALUE;
         measuredNpcTickNanos = 0L;
+        measuredNpcSuperTickNanos = 0L;
+        measuredNpcCustomTickNanos = 0L;
         hottestNpcTickNanos = 0L;
+        hottestNpcSuperTickNanos = 0L;
+        hottestNpcCustomTickNanos = 0L;
         measuredForceManagerNanos = 0L;
         measuredTraceLoggerNanos = 0L;
+        measuredWaitingStrollNanos = 0L;
+        hottestGoalWorkNanos = 0L;
+        totalGoalWorkNanos = 0L;
+        goalWorkInvocationCount = 0;
+        hottestGoalWorkName = "none";
+        hottestGoalWorkNpc = "none";
         resetSamples();
     }
 
@@ -158,6 +204,33 @@ public final class PlayerNpcPerformanceMonitor {
         return SmartNpcConfig.PERFORMANCE_MONITOR_ENABLED.get() ? getAverageMspt() : 0.0D;
     }
 
+    /** Rolling measured Player NPC entity time used by the automatic natural-spawn cap. */
+    public static double getRollingAverageNpcMs() {
+        return SmartNpcConfig.PERFORMANCE_MONITOR_ENABLED.get() && rollingCount > 0
+                ? rollingTotalNpcMs / rollingCount
+                : 0.0D;
+    }
+
+    /**
+     * Rolling baseline used by population probing. The highest five percent of samples are
+     * omitted so an isolated admitted path/search spike cannot masquerade as sustained passive
+     * population cost. Sustained overload remains in the other ninety-five percent.
+     */
+    public static double getRollingBaselineMspt() {
+        if (!SmartNpcConfig.PERFORMANCE_MONITOR_ENABLED.get() || rollingCount <= 0) {
+            return 0.0D;
+        }
+        double[] ordered = Arrays.copyOf(rollingMspt, rollingCount);
+        Arrays.sort(ordered);
+        int excludedHighSamples = Math.max(1, rollingCount / 20);
+        int includedSamples = Math.max(1, rollingCount - excludedHighSamples);
+        double total = 0.0D;
+        for (int index = 0; index < includedSamples; index++) {
+            total += ordered[index];
+        }
+        return total / includedSamples;
+    }
+
     public static boolean hasStableRollingSample() {
         return SmartNpcConfig.PERFORMANCE_MONITOR_ENABLED.get()
                 && rollingCount >= MIN_AVERAGE_WARNING_SAMPLES;
@@ -179,19 +252,60 @@ public final class PlayerNpcPerformanceMonitor {
         }
     }
 
+    public static void recordWaitingStrollWork(long startNanos) {
+        if (startNanos > 0L) {
+            measuredWaitingStrollNanos += Math.max(0L, System.nanoTime() - startNanos);
+        }
+    }
+
+    /** Optional visual AI yields when the rolling server tick is already missing 20 TPS. */
+    public static boolean isOptionalAiWorkAllowed() {
+        return !hasStableRollingSample() || getAverageMspt() < OPTIONAL_AI_MAX_AVERAGE_MSPT;
+    }
+
     /** Records executed Player NPC time, unlike post-tick active-state correlation. */
-    public static void recordNpcEntityTick(PlayerNpcEntity playerNpc, long elapsedNanos) {
+    public static void recordNpcEntityTick(
+            PlayerNpcEntity playerNpc,
+            long elapsedNanos,
+            long superTickNanos
+    ) {
         if (!SmartNpcConfig.PERFORMANCE_MONITOR_ENABLED.get()
                 || playerNpc == null
                 || elapsedNanos <= 0L) {
             return;
         }
+        long boundedSuperTickNanos = Math.max(0L, Math.min(elapsedNanos, superTickNanos));
+        long customTickNanos = Math.max(0L, elapsedNanos - boundedSuperTickNanos);
         measuredNpcTickNanos += elapsedNanos;
+        measuredNpcSuperTickNanos += boundedSuperTickNanos;
+        measuredNpcCustomTickNanos += customTickNanos;
         if (elapsedNanos > hottestNpcTickNanos) {
             hottestNpcTickNanos = elapsedNanos;
+            hottestNpcSuperTickNanos = boundedSuperTickNanos;
+            hottestNpcCustomTickNanos = customTickNanos;
             hottestNpcTickName = sanitize(playerNpc.getDisplayName().getString()) + "#" + playerNpc.getId();
             hottestNpcTickState = sanitize(playerNpc.getCurrentAiState());
+            hottestNpcTickDetail = sanitize(playerNpc.getCurrentAiDetail());
+            if (hottestNpcTickDetail.isBlank()) {
+                hottestNpcTickDetail = "none";
+            }
         }
+    }
+
+    /** Records the slowest wrapped goal phase so idle final states can be narrowed on the next warning. */
+    public static void recordGoalWork(PlayerNpcEntity playerNpc, String phase, long startNanos) {
+        if (startNanos <= 0L || playerNpc == null) {
+            return;
+        }
+        long elapsedNanos = Math.max(0L, System.nanoTime() - startNanos);
+        totalGoalWorkNanos += elapsedNanos;
+        goalWorkInvocationCount++;
+        if (elapsedNanos <= hottestGoalWorkNanos) {
+            return;
+        }
+        hottestGoalWorkNanos = elapsedNanos;
+        hottestGoalWorkName = sanitize(phase);
+        hottestGoalWorkNpc = sanitize(playerNpc.getDisplayName().getString()) + "#" + playerNpc.getId();
     }
 
     private static void addSample(double mspt) {
@@ -209,16 +323,9 @@ public final class PlayerNpcPerformanceMonitor {
         rollingIndex = (rollingIndex + 1) % rollingMspt.length;
     }
 
-    private static boolean shouldIgnoreSample(MinecraftServer server, double mspt) {
-        if (server.getTickCount() < STARTUP_WARMUP_TICKS
-                || server.getTickCount() < ignoreSamplesUntilServerTick) {
-            return true;
-        }
-        if (mspt >= PAUSE_OR_LOAD_TICK_MSPT) {
-            startWarmup(server, POST_STALL_WARMUP_TICKS);
-            return true;
-        }
-        return false;
+    private static boolean isWarmupSample(MinecraftServer server) {
+        return server.getTickCount() < STARTUP_WARMUP_TICKS
+                || server.getTickCount() < ignoreSamplesUntilServerTick;
     }
 
     private static void startWarmup(MinecraftServer server, int ticks) {
@@ -252,12 +359,11 @@ public final class PlayerNpcPerformanceMonitor {
 
     private static void maybeLogWarning(MinecraftServer server, double currentMspt) {
         double averageMspt = getAverageMspt();
-        double averageWarningThreshold = SmartNpcConfig.PERFORMANCE_WARNING_AVERAGE_MSPT.get();
         boolean slowAverage = rollingCount >= MIN_AVERAGE_WARNING_SAMPLES
-                && averageMspt >= averageWarningThreshold
-                && currentMspt >= Math.min(averageWarningThreshold, ROLLING_WARNING_CURRENT_TICK_MSPT_FLOOR);
+                && averageMspt >= AVERAGE_WARNING_MSPT
+                && currentMspt >= Math.min(AVERAGE_WARNING_MSPT, ROLLING_WARNING_CURRENT_TICK_MSPT_FLOOR);
         boolean tickSpike = rollingCount >= MIN_AVERAGE_WARNING_SAMPLES
-                && currentMspt >= SmartNpcConfig.PERFORMANCE_WARNING_SPIKE_MSPT.get()
+                && currentMspt >= SPIKE_WARNING_MSPT
                 && (averageMspt >= HEALTHY_AVERAGE_SPIKE_SUPPRESSION_MSPT
                 || currentMspt >= SEVERE_SINGLE_TICK_SPIKE_MSPT);
         if (!slowAverage && !tickSpike) {
@@ -265,18 +371,20 @@ public final class PlayerNpcPerformanceMonitor {
         }
 
         long serverTick = server.getTickCount();
-        int cooldownTicks = SmartNpcConfig.PERFORMANCE_WARNING_COOLDOWN_TICKS.get();
         if (lastWarningServerTick != Long.MIN_VALUE
-                && serverTick - lastWarningServerTick < cooldownTicks) {
+                && serverTick - lastWarningServerTick < WARNING_COOLDOWN_TICKS) {
             return;
         }
         if (lastSuppressedWarningServerTick != Long.MIN_VALUE
-                && serverTick - lastSuppressedWarningServerTick < Math.min(20, cooldownTicks)) {
+                && serverTick - lastSuppressedWarningServerTick < Math.min(20, WARNING_COOLDOWN_TICKS)) {
             return;
         }
 
-        NpcTraceSummary summary = collectNpcTrace(server, SmartNpcConfig.PERFORMANCE_WARNING_NPC_TRACE_LIMIT.get());
-        if (summary.activeNpcCount() <= 0) {
+        NpcTraceSummary summary = collectNpcTrace(server);
+        double measuredNpcMs = measuredNpcTickNanos / NANOS_PER_MILLISECOND;
+        boolean npcDominatedIdleTick = measuredNpcMs >= NPC_DOMINATED_WARNING_MIN_MSPT
+                && measuredNpcMs >= currentMspt * 0.5D;
+        if (summary.activeNpcCount() <= 0 && !npcDominatedIdleTick) {
             lastSuppressedWarningServerTick = serverTick;
             return;
         }
@@ -294,15 +402,25 @@ public final class PlayerNpcPerformanceMonitor {
         );
 
         SmartNpc.LOGGER.warn("Smart NPC TPS trace states: {}", summary.stateCountsText());
-        double measuredNpcMs = measuredNpcTickNanos / NANOS_PER_MILLISECOND;
         double averageNpcMs = rollingCount <= 0 ? 0.0D : rollingTotalNpcMs / rollingCount;
         SmartNpc.LOGGER.warn(
-                "Smart NPC measured work: latestNpcMs={}, averageNpcMs={}, hottestNpcMs={}, hottestNpc={} state={}, forceManagerMs={}, traceLoggerMs={}; latestUnmeasuredServerMs={} (chunks, block entities, other entities/mods and server tasks)",
+                "Smart NPC measured work: latestNpcMs={} (super={} custom={}), averageNpcMs={}, hottestNpcMs={} (super={} custom={}), hottestNpc={} state={} detail=\"{}\", wrappedGoalTotalMs={} calls={}, hottestWrappedGoalMs={} goal={} npc={}, waitingStrollMs={}, forceManagerMs={}, traceLoggerMs={}; latestUnmeasuredServerMs={} (chunks, block entities, other entities/mods and server tasks)",
                 format(measuredNpcMs),
+                format(measuredNpcSuperTickNanos / NANOS_PER_MILLISECOND),
+                format(measuredNpcCustomTickNanos / NANOS_PER_MILLISECOND),
                 format(averageNpcMs),
                 format(hottestNpcTickNanos / NANOS_PER_MILLISECOND),
+                format(hottestNpcSuperTickNanos / NANOS_PER_MILLISECOND),
+                format(hottestNpcCustomTickNanos / NANOS_PER_MILLISECOND),
                 hottestNpcTickName,
                 hottestNpcTickState,
+                hottestNpcTickDetail,
+                format(totalGoalWorkNanos / NANOS_PER_MILLISECOND),
+                goalWorkInvocationCount,
+                format(hottestGoalWorkNanos / NANOS_PER_MILLISECOND),
+                hottestGoalWorkName,
+                hottestGoalWorkNpc,
+                format(measuredWaitingStrollNanos / NANOS_PER_MILLISECOND),
                 format(measuredForceManagerNanos / NANOS_PER_MILLISECOND),
                 format(measuredTraceLoggerNanos / NANOS_PER_MILLISECOND),
                 format(Math.max(0.0D, currentMspt - measuredNpcMs
@@ -314,10 +432,9 @@ public final class PlayerNpcPerformanceMonitor {
         }
     }
 
-    private static NpcTraceSummary collectNpcTrace(MinecraftServer server, int traceLimit) {
+    private static NpcTraceSummary collectNpcTrace(MinecraftServer server) {
         int totalNpcCount = 0;
         int activeNpcCount = 0;
-        int normalizedTraceLimit = Math.max(0, traceLimit);
         Map<String, Integer> stateCounts = new LinkedHashMap<>();
         List<String> traceLines = new ArrayList<>();
 
@@ -338,7 +455,7 @@ public final class PlayerNpcPerformanceMonitor {
 
                 activeNpcCount++;
                 stateCounts.merge(state, 1, Integer::sum);
-                if (traceLines.size() < normalizedTraceLimit) {
+                if (traceLines.size() < MAX_WARNING_TRACE_LINES) {
                     traceLines.add(createTraceLine(level, playerNpc, state));
                 }
             }

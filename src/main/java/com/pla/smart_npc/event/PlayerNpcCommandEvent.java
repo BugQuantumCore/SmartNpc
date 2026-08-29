@@ -11,6 +11,7 @@ import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcForceTickManager;
 import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
+import com.pla.smart_npc.util.PlayerNpcNaturalSpawnCap;
 import com.pla.smart_npc.util.ProgressionUtil;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -165,6 +166,7 @@ public final class PlayerNpcCommandEvent {
 
     private static int getAiResources(CommandSourceStack source) {
         PlayerNpcAiWorkBudget.ResourceSnapshot snapshot = PlayerNpcAiWorkBudget.resourceSnapshot(source.getServer());
+        PlayerNpcNaturalSpawnCap.SpawnCapSnapshot spawnCap = PlayerNpcNaturalSpawnCap.snapshot(source.getServer());
         String mode = snapshot.automatic() ? "auto" : "configured";
         source.sendSuccess(() -> Component.literal("Player NPC AI resources: mode="
                 + mode
@@ -178,6 +180,40 @@ public final class PlayerNpcCommandEvent {
                 + snapshot.expensiveCount()
                 + ", waiting="
                 + snapshot.waitingNpcCount()), false);
+        String spawnCapLine = "Player NPC natural spawn cap: mode="
+                + (spawnCap.automatic() ? "auto" : "configured")
+                + ", effectiveMax="
+                + spawnCap.effectiveLimit()
+                + ", living="
+                + spawnCap.livingCount()
+                + ", loaded="
+                + spawnCap.loadedCount()
+                + ", pending="
+                + spawnCap.pendingCount();
+        if (spawnCap.automatic()) {
+            spawnCapLine += ", explorationCeiling="
+                    + spawnCap.explorationLimit()
+                    + ", advisoryForecast="
+                    + spawnCap.advisoryForecastLimit()
+                    + ", probeWindowsAtOrBelow45Mspt="
+                    + spawnCap.healthyEvaluationCount()
+                    + "/"
+                    + spawnCap.healthyEvaluationsRequired()
+                    + ", probeMode="
+                    + spawnCap.probeMode()
+                    + ", learnedSafeMax="
+                    + spawnCap.learnedSafeLimit()
+                    + ", baselineMspt="
+                    + String.format(java.util.Locale.ROOT, "%.1f", spawnCap.baselineMspt())
+                    + ", avgMspt="
+                    + String.format(java.util.Locale.ROOT, "%.1f", spawnCap.averageMspt())
+                    + ", avgNpcMs="
+                    + String.format(java.util.Locale.ROOT, "%.1f", spawnCap.averageNpcMs())
+                    + ", reason="
+                    + spawnCap.reason();
+        }
+        String finalSpawnCapLine = spawnCapLine;
+        source.sendSuccess(() -> Component.literal(finalSpawnCapLine), false);
 
         if (snapshot.holders().isEmpty()) {
             source.sendSuccess(() -> Component.literal("No Player NPC currently holds an AI scheduler resource"), false);

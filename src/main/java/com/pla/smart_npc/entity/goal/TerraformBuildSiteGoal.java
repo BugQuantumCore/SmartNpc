@@ -69,8 +69,8 @@ public class TerraformBuildSiteGoal extends Goal {
     private static final int SUPPORT_FILL_ESCAPE_HANDOFF_TICKS = 20 * 30;
     private static final int TARGET_SEARCH_RETRY_COOLDOWN_TICKS = 10;
     private static final int ACTIONABLE_PREP_CACHE_TICKS = 20;
-    private static final int MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE = 64;
-    private static final int MAX_TERRAFORM_SUPPORT_COLUMNS_PER_SLICE = 16;
+    private static final int MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE = 16;
+    private static final int MAX_TERRAFORM_SUPPORT_COLUMNS_PER_SLICE = 4;
     private static final int MAX_TERRAFORM_LOCAL_PATH_CHECKS = 1;
     private static final int DIRECT_CLEAR_FAILURE_RETRY_TICKS = 20 * 10;
     private static final double SCAFFOLD_PLACE_CLEARANCE_Y = 0.65D;

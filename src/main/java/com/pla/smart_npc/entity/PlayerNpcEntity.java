@@ -7,7 +7,6 @@ import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
-import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.ResourceAi;
@@ -276,6 +275,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int activeLogSupplyTarget;
     private int activeStoneSupplyTarget;
     private long lastSupplyGoalRerollDay = -1L;
+    private int workGoalRegistrationIndex;
     @Nullable
     private PlayerNpcInterest selectedDailyJobInterest;
     private long selectedDailyJobDay = -1L;
@@ -1596,6 +1596,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     protected void registerGoals() {
+        this.workGoalRegistrationIndex = 0;
         GatherLogsGoal gatherLogsGoal = new GatherLogsGoal(this, 1.0D);
         GatherMissingBuildMaterialGoal gatherMissingBuildMaterialGoal = new GatherMissingBuildMaterialGoal(this, 1.0D);
         TerraformBuildSiteGoal terraformBuildSiteGoal = new TerraformBuildSiteGoal(this, 1.0D);
@@ -1623,10 +1624,13 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.addWorkGoal(5, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
         this.addWorkGoal(5, this.gated(new CraftCropFoodGoal(this), PlayerNpcInterest.FARMING));
         this.addWorkGoal(5, this.gated(new PlayerNpcFishingGoal(this), PlayerNpcInterest.FISHING));
-        this.addWorkGoal(5, this.gated(new LootNearbyChestGoal(this, 1.0D), PlayerNpcInterest.LOOTING));
-        this.addWorkGoal(5, this.gated(new JukeboxDanceGoal(this, 1.0D), PlayerNpcInterest.TROLL_HIT));
-        this.addWorkGoal(5, this.gated(new TrollHitGoal(this), PlayerNpcInterest.TROLL_HIT));
-        this.addWorkGoal(5, this.gated(new IronGolemTrollGoal(this), PlayerNpcInterest.TROLL_HIT));
+        // Characteristics are opportunistic personality behavior, not daily/routine worker jobs.
+        // Keep the same priority and delegate flags, but do not make their availability depend on
+        // a StartupWorkGatedGoal resource turn.
+        this.goalSelector.addGoal(5, this.gated(new LootNearbyChestGoal(this, 1.0D), PlayerNpcInterest.LOOTING));
+        this.goalSelector.addGoal(5, this.gated(new JukeboxDanceGoal(this, 1.0D), PlayerNpcInterest.TROLL_HIT));
+        this.goalSelector.addGoal(5, this.gated(new TrollHitGoal(this), PlayerNpcInterest.TROLL_HIT));
+        this.goalSelector.addGoal(5, this.gated(new IronGolemTrollGoal(this), PlayerNpcInterest.TROLL_HIT));
         this.addWorkGoal(5, new ManageHomeBaseGoal(this));
         this.addWorkGoal(5, new CheckHomeSuppliesGoal(this));
         this.addWorkGoal(5, new CraftBasicGearGoal(this));
@@ -1773,7 +1777,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     private void addWorkGoal(int priority, Goal goal) {
-        this.goalSelector.addGoal(priority, new StartupWorkGatedGoal(this, goal));
+        this.goalSelector.addGoal(priority, new StartupWorkGatedGoal(this, goal, this.workGoalRegistrationIndex++));
     }
 
     private boolean shouldStayHomeForWeather(ServerLevel serverLevel) {
@@ -2481,6 +2485,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 && PlayerNpcPerformanceMonitor.shouldMeasureNpcEntityTick();
         long performanceStartNanos = measurePerformance ? System.nanoTime() : 0L;
         super.tick();
+        long performanceAfterSuperNanos = measurePerformance ? System.nanoTime() : 0L;
 
         int mainHandAttackAnimationTicks = this.getMainHandAttackAnimationTicks();
         if (mainHandAttackAnimationTicks > 0) {
@@ -2512,7 +2517,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (measurePerformance) {
             PlayerNpcPerformanceMonitor.recordNpcEntityTick(
                     this,
-                    Math.max(0L, System.nanoTime() - performanceStartNanos)
+                    Math.max(0L, System.nanoTime() - performanceStartNanos),
+                    Math.max(0L, performanceAfterSuperNanos - performanceStartNanos)
             );
         }
     }
@@ -3606,6 +3612,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         ServerLevel serverLevel = serverLevelAccessor.getLevel();
 
+        if (PlayerNpcNaturalSpawnCap.isNaturalSpawnType(mobSpawnType)) {
+            PlayerNpcNaturalSpawnCap.onNaturalSpawnFinalized(this);
+        }
+
         this.setCurrentAiState(AI_IDLE);
 
         List<String> commands = EquipmentDataLoader.getEquipCommands(0.85f, this);
@@ -3802,15 +3812,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     public static boolean canSpawn(EntityType<PlayerNpcEntity> entityType, ServerLevelAccessor level,
                                    MobSpawnType spawnType, BlockPos position, RandomSource random) {
         ServerLevel serverLevel = level.getLevel();
-        if (spawnType != MobSpawnType.SPAWN_EGG
-                && spawnType != MobSpawnType.COMMAND && spawnType != MobSpawnType.STRUCTURE
-                && SmartNpcConfig.isForceTickManageEnabled()) {
-            int maxNaturalPlayerNpcs = SmartNpcConfig.getMaxNaturalPlayerNpcs();
-            if (maxNaturalPlayerNpcs == 0
-                    || (maxNaturalPlayerNpcs > 0
-                    && PlayerNpcForceTickManager.livingNpcCount(serverLevel.getServer()) >= maxNaturalPlayerNpcs)) {
-                return false;
-            }
+        boolean naturalSpawn = PlayerNpcNaturalSpawnCap.isNaturalSpawnType(spawnType);
+        if (naturalSpawn && !PlayerNpcNaturalSpawnCap.mayAttemptNaturalSpawn(serverLevel.getServer())) {
+            return false;
         }
         if (!hasAvailableConfiguredName(serverLevel.getServer())) {
             return false;
@@ -3818,7 +3822,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (serverLevel.isNight()) {
             return false;
         }
-        return PathfinderMob.checkMobSpawnRules(entityType, level, spawnType, position, random);
+        if (!PathfinderMob.checkMobSpawnRules(entityType, level, spawnType, position, random)) {
+            return false;
+        }
+        return !naturalSpawn
+                || PlayerNpcNaturalSpawnCap.tryReserveNaturalSpawn(serverLevel.getServer());
     }
 
     public static AttributeSupplier.Builder createAttributes() {

@@ -2,6 +2,7 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.world.entity.ai.goal.Goal;
 
 import java.util.Arrays;
@@ -23,14 +24,35 @@ public class InterestGatedGoal extends Goal {
         return this.delegate;
     }
 
+    /** Cheap eligibility preflight used before requesting a routine-worker probe. */
+    public boolean isInterestGateActive() {
+        return this.playerNpc.isInterestGateActive(this.interests);
+    }
+
     @Override
     public boolean canUse() {
-        return this.playerNpc.isInterestGateActive(this.interests) && this.delegate.canUse();
+        if (!this.isInterestGateActive()) {
+            return false;
+        }
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            return this.delegate.canUse();
+        } finally {
+            this.recordGoalWork("canUse", timing);
+        }
     }
 
     @Override
     public boolean canContinueToUse() {
-        return this.playerNpc.isInterestGateActive(this.interests) && this.delegate.canContinueToUse();
+        if (!this.isInterestGateActive()) {
+            return false;
+        }
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            return this.delegate.canContinueToUse();
+        } finally {
+            this.recordGoalWork("canContinue", timing);
+        }
     }
 
     @Override
@@ -45,16 +67,39 @@ public class InterestGatedGoal extends Goal {
 
     @Override
     public void start() {
-        this.delegate.start();
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            this.delegate.start();
+        } finally {
+            this.recordGoalWork("start", timing);
+        }
     }
 
     @Override
     public void stop() {
-        this.delegate.stop();
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            this.delegate.stop();
+        } finally {
+            this.recordGoalWork("stop", timing);
+        }
     }
 
     @Override
     public void tick() {
-        this.delegate.tick();
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            this.delegate.tick();
+        } finally {
+            this.recordGoalWork("tick", timing);
+        }
+    }
+
+    private void recordGoalWork(String operation, long timing) {
+        PlayerNpcPerformanceMonitor.recordGoalWork(
+                this.playerNpc,
+                this.delegate.getClass().getSimpleName() + "." + operation,
+                timing
+        );
     }
 }

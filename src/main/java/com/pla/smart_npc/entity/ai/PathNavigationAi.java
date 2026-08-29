@@ -33,7 +33,83 @@ public final class PathNavigationAi {
         this.waterEscapeAi = new WaterEscapeAi(playerNpc);
     }
 
+    /**
+     * Creates a diagnostic/selection path with a caller-owned node ceiling. Minecraft path
+     * creation is synchronous, so even one admitted probe can otherwise spend hundreds of
+     * milliseconds exploring a pathological local route. Always restore the navigation default;
+     * the retained Path may be followed normally after this method returns.
+     */
+    public static Path createBoundedPath(
+            PlayerNpcEntity playerNpc,
+            BlockPos target,
+            float maxVisitedNodesMultiplier
+    ) {
+        if (playerNpc == null || target == null) {
+            return null;
+        }
+        if (!(playerNpc.level() instanceof ServerLevel serverLevel)
+                || !hasLoadedChunkCorridor(serverLevel, playerNpc.blockPosition(), target, 1)) {
+            return null;
+        }
+
+        var navigation = playerNpc.getNavigation();
+        navigation.setMaxVisitedNodesMultiplier(Math.max(0.001F, Math.min(1.0F, maxVisitedNodesMultiplier)));
+        try {
+            int dx = target.getX() - playerNpc.getBlockX();
+            int dz = target.getZ() - playerNpc.getBlockZ();
+            int horizontalDistance = (int) Math.ceil(Math.sqrt((double) dx * dx + (double) dz * dz));
+            // PlayerNpc FOLLOW_RANGE is 48, which makes vanilla allocate a 56-block region for
+            // every createPath even when the candidate is local. Keep diagnostic routes local;
+            // callers retry/reselect a farther target instead of constructing that huge region.
+            int localFollowRange = Math.max(8, Math.min(32, horizontalDistance + 6));
+            return navigation.createPath(target, 0, localFollowRange);
+        } finally {
+            navigation.resetMaxVisitedNodesMultiplier();
+        }
+    }
+
+    /**
+     * PathNavigation constructs a region wider than the route itself. Reject speculative paths
+     * whose route corridor touches an unloaded chunk so EmptyLevelChunk fringes cannot turn a
+     * futile activation probe into a large synchronous region/path build.
+     */
+    private static boolean hasLoadedChunkCorridor(
+            ServerLevel serverLevel,
+            BlockPos from,
+            BlockPos to,
+            int marginChunks
+    ) {
+        int fromX = from.getX() >> 4;
+        int fromZ = from.getZ() >> 4;
+        int toX = to.getX() >> 4;
+        int toZ = to.getZ() >> 4;
+        int steps = Math.max(Math.abs(toX - fromX), Math.abs(toZ - fromZ));
+        for (int step = 0; step <= steps; step++) {
+            double progress = steps == 0 ? 0.0D : (double) step / (double) steps;
+            int chunkX = (int) Math.round(fromX + (toX - fromX) * progress);
+            int chunkZ = (int) Math.round(fromZ + (toZ - fromZ) * progress);
+            for (int dx = -marginChunks; dx <= marginChunks; dx++) {
+                for (int dz = -marginChunks; dz <= marginChunks; dz++) {
+                    if (!serverLevel.hasChunk(chunkX + dx, chunkZ + dz)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     public boolean moveTo(ServerLevel serverLevel, BlockPos target, double speed, int maxSafeDrop) {
+        return this.moveTo(serverLevel, target, speed, maxSafeDrop, 1.0F);
+    }
+
+    public boolean moveTo(
+            ServerLevel serverLevel,
+            BlockPos target,
+            double speed,
+            int maxSafeDrop,
+            float maxVisitedNodesMultiplier
+    ) {
         if (this.escapeWaterIfNeeded(serverLevel, target, speed)) {
             return true;
         }
@@ -50,7 +126,7 @@ public final class PathNavigationAi {
             return true;
         }
 
-        Path path = this.playerNpc.getNavigation().createPath(target, 0);
+        Path path = createBoundedPath(this.playerNpc, target, maxVisitedNodesMultiplier);
         if (this.isValidPathTo(target, path)) {
             this.lastMoveFailureDetail = "";
             return this.playerNpc.getNavigation().moveTo(path, speed);
@@ -67,6 +143,16 @@ public final class PathNavigationAi {
     }
 
     public boolean moveToExact(ServerLevel serverLevel, BlockPos target, double speed, int maxSafeDrop) {
+        return this.moveToExact(serverLevel, target, speed, maxSafeDrop, 1.0F);
+    }
+
+    public boolean moveToExact(
+            ServerLevel serverLevel,
+            BlockPos target,
+            double speed,
+            int maxSafeDrop,
+            float maxVisitedNodesMultiplier
+    ) {
         if (this.escapeWaterIfNeeded(serverLevel, target, speed)) {
             return true;
         }
@@ -83,7 +169,7 @@ public final class PathNavigationAi {
             return true;
         }
 
-        Path path = this.playerNpc.getNavigation().createPath(target, 0);
+        Path path = createBoundedPath(this.playerNpc, target, maxVisitedNodesMultiplier);
         if (this.isExactPathTo(target, path)) {
             this.lastMoveFailureDetail = "";
             return this.playerNpc.getNavigation().moveTo(path, speed);
@@ -217,10 +303,19 @@ public final class PathNavigationAi {
     }
 
     public boolean canReachOrSafelyDropTo(ServerLevel serverLevel, BlockPos target, int maxSafeDrop) {
+        return this.canReachOrSafelyDropTo(serverLevel, target, maxSafeDrop, 1.0F);
+    }
+
+    public boolean canReachOrSafelyDropTo(
+            ServerLevel serverLevel,
+            BlockPos target,
+            int maxSafeDrop,
+            float maxVisitedNodesMultiplier
+    ) {
         if (!serverLevel.hasChunkAt(target)) {
             return false;
         }
-        Path path = this.playerNpc.getNavigation().createPath(target, 0);
+        Path path = createBoundedPath(this.playerNpc, target, maxVisitedNodesMultiplier);
         return this.isValidPathTo(target, path)
                 || this.canSafelyDropTo(serverLevel, target, maxSafeDrop);
     }
@@ -293,6 +388,22 @@ public final class PathNavigationAi {
             int preferredPoolSize,
             int maxChecks
     ) {
+        return this.findReachablePathCandidate(
+                serverLevel,
+                candidates,
+                preferredPoolSize,
+                maxChecks,
+                1.0F
+        );
+    }
+
+    public Optional<ReachablePathCandidate> findReachablePathCandidate(
+            ServerLevel serverLevel,
+            List<BlockPos> candidates,
+            int preferredPoolSize,
+            int maxChecks,
+            float maxVisitedNodesMultiplier
+    ) {
         if (candidates.isEmpty()) {
             return Optional.empty();
         }
@@ -315,7 +426,7 @@ public final class PathNavigationAi {
             if (!canStandAt(serverLevel, candidate)) {
                 continue;
             }
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = createBoundedPath(this.playerNpc, candidate, maxVisitedNodesMultiplier);
             if (this.isValidPathTo(candidate, path)) {
                 return Optional.of(new ReachablePathCandidate(candidate.immutable(), path));
             }
@@ -351,7 +462,7 @@ public final class PathNavigationAi {
                 && blockDistanceSqr(endPos, target) <= PATH_END_DISTANCE_SQR;
     }
 
-    private boolean isExactPathTo(BlockPos target, Path path) {
+    public boolean isExactPathTo(BlockPos target, Path path) {
         if (path == null || !path.canReach()) {
             return false;
         }

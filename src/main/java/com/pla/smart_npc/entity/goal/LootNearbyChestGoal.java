@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -15,6 +16,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.EnumSet;
 import java.util.Optional;
@@ -22,6 +24,10 @@ import java.util.Optional;
 public class LootNearbyChestGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 35;
     private static final int SEARCH_RADIUS = 10;
+    private static final int SEARCH_VERTICAL_RADIUS = 3;
+    private static final int MAX_SEARCH_BLOCKS_PER_PASS = 128;
+    private static final double SEARCH_RESET_DISTANCE_SQR = 4.0D * 4.0D;
+    private static final float PATH_NODE_MULTIPLIER = 0.15F;
     private static final double STAND_DISTANCE_SQR = 1.5D * 1.5D;
     private static final int TAKE_INTERVAL_TICKS = 6;
     private static final int REPATH_INTERVAL_TICKS = 20;
@@ -36,6 +42,11 @@ public class LootNearbyChestGoal extends Goal {
     private int nextLootSlot;
     private int takeDelayTicks;
     private int repathTicks;
+    private BlockPos searchOrigin;
+    private int searchCursor;
+    private BlockPos searchBestChest;
+    private BlockPos searchBestStand;
+    private double searchBestDistance = Double.MAX_VALUE;
 
     public LootNearbyChestGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -58,7 +69,14 @@ public class LootNearbyChestGoal extends Goal {
             return false;
         }
 
-        this.chestPos = this.findChest(serverLevel);
+        ChestSearchResult search = this.findChestPass(serverLevel);
+        if (!search.complete()) {
+            this.canUseThrottle.retryIn(this.playerNpc, 1 + this.playerNpc.getRandom().nextInt(4));
+            return false;
+        }
+
+        this.chestPos = search.chest();
+        this.standPos = search.stand();
         return this.chestPos != null;
     }
 
@@ -168,15 +186,26 @@ public class LootNearbyChestGoal extends Goal {
         );
     }
 
-    private BlockPos findChest(ServerLevel serverLevel) {
+    private ChestSearchResult findChestPass(ServerLevel serverLevel) {
         BlockPos center = this.playerNpc.blockPosition();
+        if (this.searchOrigin == null || this.searchOrigin.distSqr(center) > SEARCH_RESET_DISTANCE_SQR) {
+            this.resetChestSearch(center);
+        }
+
         Optional<PlayerNpcHomeUtil.HomeArea> homeArea = PlayerNpcHomeUtil.getHome(this.playerNpc);
-        BlockPos bestChest = null;
-        BlockPos bestStand = null;
-        double bestDistance = Double.MAX_VALUE;
-        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-SEARCH_RADIUS, -3, -SEARCH_RADIUS), center.offset(SEARCH_RADIUS, 3, SEARCH_RADIUS))) {
-            BlockPos immutable = pos.immutable();
-            if (this.playerNpc.isOwnedChest(immutable)
+        int horizontalDiameter = SEARCH_RADIUS * 2 + 1;
+        int horizontalArea = horizontalDiameter * horizontalDiameter;
+        int totalPositions = horizontalArea * (SEARCH_VERTICAL_RADIUS * 2 + 1);
+        int endCursor = Math.min(totalPositions, this.searchCursor + MAX_SEARCH_BLOCKS_PER_PASS);
+        for (int index = this.searchCursor; index < endCursor; index++) {
+            int yIndex = index / horizontalArea;
+            int horizontalIndex = index % horizontalArea;
+            int dx = horizontalIndex / horizontalDiameter - SEARCH_RADIUS;
+            int dz = horizontalIndex % horizontalDiameter - SEARCH_RADIUS;
+            int dy = yIndex - SEARCH_VERTICAL_RADIUS;
+            BlockPos immutable = this.searchOrigin.offset(dx, dy, dz).immutable();
+            if (!serverLevel.hasChunkAt(immutable)
+                    || this.playerNpc.isOwnedChest(immutable)
                     || (homeArea.isPresent() && PlayerNpcHomeUtil.isInside(homeArea.get(), immutable))) {
                 continue;
             }
@@ -188,15 +217,29 @@ public class LootNearbyChestGoal extends Goal {
                     continue;
                 }
                 double distance = this.playerNpc.distanceToSqr(stand.getX() + 0.5D, stand.getY(), stand.getZ() + 0.5D);
-                if (distance < bestDistance) {
-                    bestDistance = distance;
-                    bestChest = immutable;
-                    bestStand = stand;
+                if (distance < this.searchBestDistance) {
+                    this.searchBestDistance = distance;
+                    this.searchBestChest = immutable;
+                    this.searchBestStand = stand;
                 }
             }
         }
-        this.standPos = bestStand;
-        return bestChest;
+        this.searchCursor = endCursor;
+        if (this.searchCursor < totalPositions) {
+            return new ChestSearchResult(false, null, null);
+        }
+
+        ChestSearchResult result = new ChestSearchResult(true, this.searchBestChest, this.searchBestStand);
+        this.resetChestSearch(null);
+        return result;
+    }
+
+    private void resetChestSearch(BlockPos origin) {
+        this.searchOrigin = origin == null ? null : origin.immutable();
+        this.searchCursor = 0;
+        this.searchBestChest = null;
+        this.searchBestStand = null;
+        this.searchBestDistance = Double.MAX_VALUE;
     }
 
     private int lootNextStack(Container chest) {
@@ -303,7 +346,14 @@ public class LootNearbyChestGoal extends Goal {
 
     private void moveToStandPos() {
         if (this.standPos != null) {
-            this.playerNpc.getNavigation().moveTo(this.standPos.getX() + 0.5D, this.standPos.getY(), this.standPos.getZ() + 0.5D, this.speed);
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    this.standPos,
+                    PATH_NODE_MULTIPLIER
+            );
+            if (path != null && path.canReach()) {
+                this.playerNpc.getNavigation().moveTo(path, this.speed);
+            }
         }
     }
 
@@ -336,6 +386,9 @@ public class LootNearbyChestGoal extends Goal {
         return serverLevel.getBlockState(pos).isAir()
                 && serverLevel.getBlockState(pos.above()).isAir()
                 && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+    }
+
+    private record ChestSearchResult(boolean complete, BlockPos chest, BlockPos stand) {
     }
 
 }

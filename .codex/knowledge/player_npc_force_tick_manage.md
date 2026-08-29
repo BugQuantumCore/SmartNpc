@@ -1,13 +1,16 @@
 # Player NPC Force Tick Manage
 
 Natural-spawn population cap:
-- `maxNaturalPlayerNpcs` defaults to `8`. `0` disables natural Player NPC spawning and `-1` is an explicit opt-in to an unlimited numeric population. Never use `-1` as the generated default: Player NPCs are persistent (`removeWhenFarAway(...)` is false), and a force-loaded unlimited population accumulates instead of despawning.
-- The spawn predicate uses `PlayerNpcForceTickManager.livingNpcCount(...)` across tracked dimensions and rejects non-egg/non-command/non-structure spawning at the cap. It currently applies only while `forceTickManage=true`, because this manager is authoritative across dimensions only in that mode. Decoupling it requires a separate lifecycle-maintained population registry; do not scan every level's entities from the frequently called spawn predicate.
+- `maxNaturalPlayerNpcs` defaults to `-1`, which now selects the conservative hardware/MSPT automatic policy documented in `.codex/knowledge/player_npc_natural_spawn_cap.md`. `0` disables natural spawning and a positive value is a fixed cap.
+- `PlayerNpcNaturalSpawnCap` and its persisted UUID registry own population admission. The spawn predicate no longer reads or initializes `MANAGED_NPCS`, and the cap remains active with `forceTickManage=false` without scanning every level for each spawn attempt.
+- Force management still affects runtime cost: enabled NPCs remain loaded/ticking, while disabled remote NPCs may unload. The automatic formula accounts for that through measured total/non-NPC MSPT, but force-ticket enablement does not change the cap's configured semantics.
 - Runtime evidence from the 2026-08-27 CurseForge report: Forge corrected a missing key to the regressed default `maxNaturalPlayerNpcs=-1` at 23:38:46, and the performance warning reported `totalPlayerNpcs=41` at 23:42:29. Twelve NPC finalizations ran on `Worker-Main` threads during 1-99% spawn-area preparation before the player joined; another 32 worker-thread finalizations followed while the fresh world loaded a 16-chunk view/12-chunk simulation area. This distinguishes fresh-chunk generation from the already-generated dev-world observation. With `forceTickManage=true`, counting worked for registered entities; the unlimited value and asynchronous chunk-generation path prevented a useful bound.
 
 Feature flag:
 - `SmartNpcConfig.forceTickManage` is a common config value and defaults to `true`.
 - When disabled, Player NPC force-tick tickets are released, NPC tab-list rows are removed, `/smart_npc tp` is hidden, and inspectator left/right falls back to the old nearby-client scan.
+- `forceTickManage` does not control `PlayerNpcAiWorkBudget`. The scheduler is called by `StartupWorkGatedGoal` from each entity's ordinary goal-selector tick, so every normally loaded/ticking Player NPC still requests and releases routine worker turns while force-ticket management is disabled. A distant NPC whose chunk unloads no longer ticks, consumes no AI CPU, and therefore owns no scheduler resource until it is loaded again.
+- Scheduler and performance diagnostics remain valid for loaded entities when force-ticket management is disabled. Trace-all explicitly falls back to enumerating loaded Player NPCs per level, the inspector resource view reads scheduler holders directly, and performance warnings enumerate loaded entities. What is lost is remote coverage: unloaded NPCs, the managed cross-dimension registry, tab rows, teleport lookup, and server-driven remote inspectator cycling are unavailable.
 
 Core owner:
 - `src/main/java/com/pla/smart_npc/util/PlayerNpcForceTickManager.java`
@@ -50,3 +53,5 @@ Inspectator cycling:
 
 Verification:
 - `./gradlew.bat compileJava` passed after the implementation.
+
+Force-manager attribution must be read alongside loaded-NPC and entity-tick timing. If every known NPC remains in `totalPlayerNpcs`/the loaded trace and `forceManagerMs` is near zero, a remote idle slowdown is not evidence that its center ticket failed. Teleporting can warm client/server terrain and navigation caches without being what made the NPC tick. A real restoration failure instead presents as a persisted NPC that is absent from loaded timing/trace until its chunk is loaded by another source.

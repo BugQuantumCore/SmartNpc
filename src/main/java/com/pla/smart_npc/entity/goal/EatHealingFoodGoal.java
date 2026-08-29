@@ -1,7 +1,9 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.InventoryUtils;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
@@ -23,6 +25,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.item.ProjectileWeaponItem;
 import net.minecraft.world.item.SwordItem;
 import net.minecraft.world.item.TridentItem;
+import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.EnumSet;
@@ -36,6 +39,7 @@ public class EatHealingFoodGoal extends Goal {
     private static final double CHASE_DISTANCE_SQR = 7.0D * 7.0D;
     private static final double CHASE_POWER_MARGIN = 4.0D;
     private static final float REGULAR_FOOD_HEAL_AMOUNT = 4.0F;
+    private static final float PATH_NODE_MULTIPLIER = 0.15F;
 
     private final PlayerNpcEntity playerNpc;
     private ItemStack foodStack = ItemStack.EMPTY;
@@ -100,7 +104,7 @@ public class EatHealingFoodGoal extends Goal {
         this.foodStack.setCount(1);
         this.usingTemporaryFood = true;
         this.finishedEating = false;
-        this.pathRecalculateTicks = 0;
+        this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
         this.wasSprinting = this.playerNpc.isSprinting();
         this.playerNpc.setHealing(true);
         this.playerNpc.setSprinting(false);
@@ -224,12 +228,17 @@ public class EatHealingFoodGoal extends Goal {
         }
 
         this.playerNpc.setSprinting(false);
-        this.playerNpc.getNavigation().moveTo(
-                movePos.x,
-                movePos.y,
-                movePos.z,
-                hasThreat ? EATING_COMBAT_SPEED : EATING_WANDER_SPEED
+        Path path = PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                BlockPos.containing(movePos.x, movePos.y, movePos.z),
+                PATH_NODE_MULTIPLIER
         );
+        if (path != null && path.getNodeCount() > 0) {
+            this.playerNpc.getNavigation().moveTo(
+                    path,
+                    hasThreat ? EATING_COMBAT_SPEED : EATING_WANDER_SPEED
+            );
+        }
 
         if (hasThreat) {
             this.playerNpc.getLookControl().setLookAt(threat, 60.0F, 60.0F);

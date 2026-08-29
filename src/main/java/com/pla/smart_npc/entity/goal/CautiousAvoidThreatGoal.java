@@ -2,6 +2,7 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.CautiousThreatAi;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.AvoidEntityGoal;
@@ -19,6 +20,7 @@ public class CautiousAvoidThreatGoal extends AvoidEntityGoal<LivingEntity> {
     private static final double SPRINT_SPEED = 1.35D;
     private static final int PATH_HORIZONTAL_RANGE = 16;
     private static final int PATH_VERTICAL_RANGE = 7;
+    private static final float PATH_NODE_MULTIPLIER = 0.15F;
 
     private final PlayerNpcEntity playerNpc;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
@@ -124,7 +126,11 @@ public class CautiousAvoidThreatGoal extends AvoidEntityGoal<LivingEntity> {
 
         // Vanilla AvoidEntityGoal creates one path for its one selected away position. Avoid
         // turning one cautious activation into a batch of four server-thread path searches.
-        return this.playerNpc.getNavigation().createPath(BlockPos.containing(escapePos), 0);
+        return PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                BlockPos.containing(escapePos),
+                PATH_NODE_MULTIPLIER
+        );
     }
 
     private void updateAiDetail() {

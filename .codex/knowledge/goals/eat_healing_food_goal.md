@@ -2,7 +2,7 @@
 
 ## Source
 
-- `src/main/java/com/pla/player_npc/entity/goal/EatHealingFoodGoal.java`
+- `src/main/java/com/pla/smart_npc/entity/goal/EatHealingFoodGoal.java`
 - Registered from `PlayerNpcEntity.registerVanillaCombatReplacementGoals()`.
 
 ## Purpose
@@ -29,5 +29,7 @@ While eating, the NPC keeps moving but does not sprint. If it has a combat targe
 - It keeps chasing when the target is weaker and already moving away or outside close melee distance.
 - Combat eating movement uses a slower `0.65D` speed.
 - Non-combat eating wander uses `0.55D`.
+
+Initial eating movement creates one scoped `0.15F` path, then recalculates on the existing eight-tick cadence. Starting initializes that cadence after the initial path, avoiding a duplicate path on the first active tick. Healing remains an unwrapped safety goal.
 
 Stopping after food was equipped calls `PlayerNpcEntity.setGapCooldown()`, which uses the entity's tick-down `gapCooldown` API. `PlayerNpcEntity.tick()` decrements that field every server tick.

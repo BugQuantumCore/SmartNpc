@@ -1,7 +1,9 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
@@ -12,6 +14,7 @@ import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.*;
+import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.EnumSet;
 import java.util.List;
@@ -33,6 +36,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
 
     private static final int MAX_LOCK_TICKS = 60;
     private static final int REPATH_INTERVAL_TICKS = 10;
+    private static final float PATH_NODE_MULTIPLIER = 0.15F;
 
     public RecoverWeaponInCombatGoal(Mob mob, double speed, double searchRadius) {
         this.mob = mob;
@@ -140,7 +144,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
         if (targetItem != null) {
             mob.setTarget(null);
             mob.getNavigation().stop();
-            mob.getNavigation().moveTo(targetItem, speed);
+            this.moveToTargetItem();
             this.repathCooldown = REPATH_INTERVAL_TICKS;
         }
     }
@@ -270,13 +274,26 @@ public class RecoverWeaponInCombatGoal extends Goal {
         if (repathCooldown-- <= 0) {
             repathCooldown = REPATH_INTERVAL_TICKS;
 
-            mob.getNavigation().moveTo(
-                    targetItem.getX(),
-                    targetItem.getY(),
-                    targetItem.getZ(),
-                    speed
-            );
+            this.moveToTargetItem();
         }
+    }
+
+    private void moveToTargetItem() {
+        if (this.targetItem == null) {
+            return;
+        }
+        if (this.mob instanceof PlayerNpcEntity playerNpc) {
+            Path path = PathNavigationAi.createBoundedPath(
+                    playerNpc,
+                    BlockPos.containing(this.targetItem.getX(), this.targetItem.getY(), this.targetItem.getZ()),
+                    PATH_NODE_MULTIPLIER
+            );
+            if (path != null && path.getNodeCount() > 0) {
+                this.mob.getNavigation().moveTo(path, this.speed);
+            }
+            return;
+        }
+        this.mob.getNavigation().moveTo(this.targetItem, this.speed);
     }
 
     private boolean forceEquipWeaponFromItemEntity(ItemEntity itemEntity) {
