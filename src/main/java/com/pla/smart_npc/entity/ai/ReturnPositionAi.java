@@ -456,7 +456,7 @@ public final class ReturnPositionAi {
             boolean forceAfterFailedRoute) {
         BlockPos feet = this.playerNpc.blockPosition();
         boolean targetAbove = target.getY() > feet.getY() + 1;
-        if (!targetAbove && !forceAfterFailedRoute) {
+        if (!targetAbove) {
             this.lastPillarDebug = "pillar skipped targetY=" + target.getY() + " feetY=" + feet.getY();
             return false;
         }

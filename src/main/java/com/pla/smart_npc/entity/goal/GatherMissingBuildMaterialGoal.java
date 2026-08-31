@@ -8,6 +8,7 @@ import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.entity.ai.WeaponAi;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
+import com.pla.smart_npc.util.PlayerNpcAdaptiveSearchScope;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil.MissingBuildMaterialKind;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil.MissingBuildMaterialNeed;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
@@ -39,6 +40,7 @@ import java.util.function.Predicate;
 
 public class GatherMissingBuildMaterialGoal extends Goal {
     private static final int SEARCH_RADIUS = 32;
+    private static final int MAX_TARGET_SCAN_COLUMNS_PER_SLICE = 8;
     private static final int TARGET_SCAN_CACHE_TICKS = 20;
     private static final int MAX_GATHER_TICKS = 20 * 45;
     private static final int REPATH_INTERVAL_TICKS = 20;
@@ -54,11 +56,15 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     private static final int SHEEP_LOCAL_ROUTE_HORIZONTAL_RADIUS = 8;
     private static final int SHEEP_LOCAL_ROUTE_VERTICAL_DOWN = 5;
     private static final int SHEEP_LOCAL_ROUTE_VERTICAL_UP = 6;
-    private static final double BREAK_DISTANCE_SQR = 4.5D * 4.5D;
+    // Walk to the cardinal stand selected beside each source block. The old 4.5-block reach let
+    // a builder remain in one spot and excavate several nearby terrain blocks before following
+    // their drops, which looked unnatural and could dig a broad pit around the work site.
+    private static final double BREAK_DISTANCE_SQR = 1.8D * 1.8D;
     private static final double STAND_REACHED_DISTANCE_SQR = 1.4D * 1.4D;
     private static final double SHEEP_ATTACK_DISTANCE_SQR = 2.4D * 2.4D;
     private static final double SHEEP_ROUTE_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
     private static final Map<PlayerNpcEntity, TargetScanCache> TARGET_SCAN_CACHE = new WeakHashMap<>();
+    private static final Map<Integer, List<BlockPos>> TARGET_COLUMN_OFFSETS = new HashMap<>();
     private static final Map<PlayerNpcEntity, Map<Integer, Integer>> UNREACHABLE_SHEEP_CACHE = new WeakHashMap<>();
 
     private final PlayerNpcEntity playerNpc;
@@ -108,7 +114,10 @@ public class GatherMissingBuildMaterialGoal extends Goal {
                 && findNearestSheep(this.playerNpc, serverLevel).isPresent()) {
             return true;
         }
-        return this.findActionableBlockTarget(serverLevel, need.get()).isPresent();
+        boolean actionable = this.findActionableBlockTarget(serverLevel, need.get()).isPresent();
+        // Pending means the nearest-first loaded search has not proved absence yet. Yield the
+        // exploration fallback until the retained cursor either finds a source or completes.
+        return actionable || isTargetScanPending(this.playerNpc, need.get());
     }
 
     @Override
@@ -153,7 +162,12 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         }
         if (this.need.kind() == MissingBuildMaterialKind.BED) {
             this.sheepTarget = findNearestSheep(this.playerNpc, serverLevel).orElse(null);
-            return this.sheepTarget != null;
+            if (this.sheepTarget != null) {
+                return true;
+            }
+        }
+        if (isTargetScanPending(this.playerNpc, this.need)) {
+            this.canUseThrottle.retryIn(this.playerNpc, 1);
         }
         return false;
     }
@@ -516,29 +530,8 @@ public class GatherMissingBuildMaterialGoal extends Goal {
             ServerLevel serverLevel,
             MissingBuildMaterialNeed materialNeed
     ) {
-        BlockPos center = this.playerNpc.blockPosition();
-        Set<BlockPos> candidates = new HashSet<>();
-        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
-        for (int x = center.getX() - SEARCH_RADIUS; x <= center.getX() + SEARCH_RADIUS; x++) {
-            for (int y = center.getY() - 8; y <= center.getY() + 8; y++) {
-                for (int z = center.getZ() - SEARCH_RADIUS; z <= center.getZ() + SEARCH_RADIUS; z++) {
-                    cursor.set(x, y, z);
-                    BlockPos target = matchingTargetPos(serverLevel, cursor, materialNeed);
-                    if (target != null && !isProtectedHomeBlock(this.playerNpc, target)) {
-                        candidates.add(target.immutable());
-                    }
-                }
-            }
-        }
-
-        return candidates.stream()
-                .sorted(Comparator.comparingDouble(pos -> this.playerNpc.distanceToSqr(
-                        pos.getX() + 0.5D,
-                        pos.getY() + 0.5D,
-                        pos.getZ() + 0.5D)))
-                .map(pos -> this.resolveActionableBlockTarget(serverLevel, pos))
-                .flatMap(Optional::stream)
-                .findFirst();
+        return findTargetBlock(this.playerNpc, serverLevel, materialNeed)
+                .flatMap(pos -> this.resolveActionableBlockTarget(serverLevel, pos));
     }
 
     private Optional<ActionableBlockTarget> resolveActionableBlockTarget(ServerLevel serverLevel, BlockPos target) {
@@ -613,53 +606,98 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         BlockPos center = playerNpc.blockPosition();
         TargetScanCache cache = TARGET_SCAN_CACHE.get(playerNpc);
         if (cache != null && cache.matches(playerNpc.tickCount, center, need)) {
-            Optional<BlockPos> cached = cache.target();
-            if (cached.isEmpty() || isValidTargetBlock(playerNpc, serverLevel, cached.get(), need)) {
-                return cached;
+            if (cache.complete()) {
+                Optional<BlockPos> cached = cache.target();
+                if (cached.isEmpty() || isValidTargetBlock(playerNpc, serverLevel, cached.get(), need)) {
+                    return cached;
+                }
             }
+        } else {
+            cache = null;
         }
 
-        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        int radius = cache == null
+                ? PlayerNpcAdaptiveSearchScope.buildMaterialCoverageRadius(serverLevel)
+                : cache.searchRadius();
+        List<BlockPos> columnOffsets = targetColumnOffsets(radius);
+        int startColumnIndex = cache == null ? 0 : cache.nextColumnIndex();
+        int endColumnIndex = Math.min(
+                columnOffsets.size(),
+                startColumnIndex + MAX_TARGET_SCAN_COLUMNS_PER_SLICE
+        );
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
-        BlockPos bestPos = null;
-        double bestDistance = Double.MAX_VALUE;
-        int minX = center.getX() - SEARCH_RADIUS;
-        int maxX = center.getX() + SEARCH_RADIUS;
+        BlockPos bestPos = cache == null ? null : cache.target().orElse(null);
+        double bestDistance = bestPos == null ? Double.MAX_VALUE : center.distSqr(bestPos);
         int minY = center.getY() - 8;
         int maxY = center.getY() + 8;
-        int minZ = center.getZ() - SEARCH_RADIUS;
-        int maxZ = center.getZ() + SEARCH_RADIUS;
-
-        for (int x = minX; x <= maxX; x++) {
+        for (int columnIndex = startColumnIndex; columnIndex < endColumnIndex; columnIndex++) {
+            BlockPos offset = columnOffsets.get(columnIndex);
+            int x = center.getX() + offset.getX();
+            int z = center.getZ() + offset.getZ();
+            BlockPos column = new BlockPos(x, center.getY(), z);
+            if (!serverLevel.hasChunkAt(column)) {
+                continue;
+            }
             for (int y = minY; y <= maxY; y++) {
-                for (int z = minZ; z <= maxZ; z++) {
-                    cursor.set(x, y, z);
-                    BlockPos target = matchingTargetPos(serverLevel, cursor, need);
-                    if (target == null) {
-                        continue;
-                    }
-                    if (home.isPresent() && PlayerNpcHomeUtil.isInside(home.get(), target)) {
-                        continue;
-                    }
-
-                    double distance = playerNpc.distanceToSqr(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D);
-                    if (distance < bestDistance) {
-                        bestDistance = distance;
-                        bestPos = target.immutable();
-                    }
+                cursor.set(x, y, z);
+                BlockPos target = matchingTargetPos(serverLevel, cursor, need);
+                if (target == null || isProtectedHomeBlock(playerNpc, target)) {
+                    continue;
+                }
+                double distance = playerNpc.distanceToSqr(
+                        target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D
+                );
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestPos = target.immutable();
                 }
             }
         }
 
+        // Columns are nearest-first. A valid source in the current slice is immediately
+        // actionable; only negative absence requires the complete retained pass.
+        boolean complete = bestPos != null || endColumnIndex >= columnOffsets.size();
         Optional<BlockPos> result = Optional.ofNullable(bestPos);
         TARGET_SCAN_CACHE.put(playerNpc, new TargetScanCache(
                 playerNpc.tickCount,
                 center.immutable(),
                 need.kind(),
                 need.targetState(),
-                result
+                result,
+                radius,
+                complete ? 0 : endColumnIndex,
+                complete
         ));
-        return result;
+        return complete ? result : Optional.empty();
+    }
+
+    private static boolean isTargetScanPending(
+            PlayerNpcEntity playerNpc,
+            MissingBuildMaterialNeed need
+    ) {
+        TargetScanCache cache = TARGET_SCAN_CACHE.get(playerNpc);
+        return cache != null
+                && !cache.complete()
+                && cache.kind() == need.kind()
+                && cache.targetState().equals(need.targetState());
+    }
+
+    private static List<BlockPos> targetColumnOffsets(int radius) {
+        synchronized (TARGET_COLUMN_OFFSETS) {
+            return TARGET_COLUMN_OFFSETS.computeIfAbsent(radius, value -> {
+                List<BlockPos> offsets = new ArrayList<>((value * 2 + 1) * (value * 2 + 1));
+                for (int dx = -value; dx <= value; dx++) {
+                    for (int dz = -value; dz <= value; dz++) {
+                        offsets.add(new BlockPos(dx, 0, dz));
+                    }
+                }
+                offsets.sort(Comparator
+                        .comparingInt((BlockPos pos) -> pos.getX() * pos.getX() + pos.getZ() * pos.getZ())
+                        .thenComparingInt(BlockPos::getX)
+                        .thenComparingInt(BlockPos::getZ));
+                return List.copyOf(offsets);
+            });
+        }
     }
 
     private static boolean matchesNeed(BlockState state, MissingBuildMaterialNeed need) {
@@ -706,8 +744,8 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     }
 
     private static boolean isProtectedHomeBlock(PlayerNpcEntity playerNpc, BlockPos pos) {
-        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
-        return home.isPresent() && PlayerNpcHomeUtil.isInside(home.get(), pos);
+        return PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos)
+                || pos.equals(playerNpc.blockPosition().below());
     }
 
     private static boolean shouldStayHomeForWeather(ServerLevel serverLevel) {
@@ -737,6 +775,9 @@ public class GatherMissingBuildMaterialGoal extends Goal {
 
         Direction facing = state.getValue(BedBlock.FACING);
         BlockPos foot = pos.relative(facing.getOpposite());
+        if (!serverLevel.hasChunkAt(foot)) {
+            return pos.immutable();
+        }
         BlockState footState = serverLevel.getBlockState(foot);
         if (footState.getBlock() instanceof BedBlock
                 && footState.hasProperty(BedBlock.PART)
@@ -763,9 +804,12 @@ public class GatherMissingBuildMaterialGoal extends Goal {
             BlockPos scanCenter,
             MissingBuildMaterialKind kind,
             BlockState targetState,
-            Optional<BlockPos> target) {
+            Optional<BlockPos> target,
+            int searchRadius,
+            int nextColumnIndex,
+            boolean complete) {
         private boolean matches(int currentTick, BlockPos currentCenter, MissingBuildMaterialNeed need) {
-            return currentTick - this.tick <= TARGET_SCAN_CACHE_TICKS
+            return (!this.complete || currentTick - this.tick <= TARGET_SCAN_CACHE_TICKS)
                     && blockDistanceSqr(this.scanCenter, currentCenter) <= 4.0D
                     && this.kind == need.kind()
                     && this.targetState.equals(need.targetState());

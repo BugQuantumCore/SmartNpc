@@ -2,6 +2,7 @@ package com.pla.smart_npc.util;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.FarmAi;
+import com.pla.smart_npc.event.PlayerNpcChestProtectEvent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.item.ItemStack;
@@ -34,14 +35,22 @@ public final class PlayerNpcBlockBreakUtil {
             return false;
         }
         ItemStack heldStack = playerNpc.getMainHandItem();
+        boolean ownedChestOffense = state.is(net.minecraft.world.level.block.Blocks.CHEST);
         if (!shouldDropResources(state, heldStack)) {
-            return serverLevel.destroyBlock(pos, false, playerNpc);
+            boolean destroyed = serverLevel.destroyBlock(pos, false, playerNpc);
+            if (destroyed && ownedChestOffense) {
+                PlayerNpcChestProtectEvent.reportOffense(serverLevel, pos, playerNpc, "broke");
+            }
+            return destroyed;
         }
 
         BlockEntity blockEntity = serverLevel.getBlockEntity(pos);
         List<ItemStack> drops = Block.getDrops(state, serverLevel, pos, blockEntity, playerNpc, heldStack);
         if (!serverLevel.destroyBlock(pos, false, playerNpc)) {
             return false;
+        }
+        if (ownedChestOffense) {
+            PlayerNpcChestProtectEvent.reportOffense(serverLevel, pos, playerNpc, "broke");
         }
 
         awardExperienceDrop(serverLevel, pos, state, playerNpc, heldStack);

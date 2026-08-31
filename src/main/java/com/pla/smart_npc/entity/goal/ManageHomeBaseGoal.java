@@ -434,7 +434,13 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private boolean needsChest(ServerLevel serverLevel) {
-        int logReserve = this.nonBuilderBase ? 0 : this.playerNpc.getRawLogReserveTarget();
+        // Builder blueprints own their chest placement.  A separate utility chest here
+        // consumes materials and modifies the footprint before terraforming/construction.
+        // Non-builders still bootstrap their normal shared base chest.
+        if (!this.nonBuilderBase) {
+            return false;
+        }
+        int logReserve = 0;
         return this.findHomeChest(serverLevel) == null
                 && (InventoryUtils.hasItem(this.playerNpc, Items.CHEST)
                 || PlayerNpcCraftingUtil.canCraftChest(this.playerNpc.getInventory(), logReserve));
@@ -663,7 +669,7 @@ public class ManageHomeBaseGoal extends Goal {
 
         this.playerNpc.getNavigation().stop();
         if (!this.depositChestOpen) {
-            ChestAi.openChest(serverLevel, this.depositChestPos);
+            ChestAi.openChest(serverLevel, this.depositChestPos, this.playerNpc);
             this.depositChestOpen = true;
             this.depositDelayTicks = DEPOSIT_INTERVAL_TICKS;
             this.updateDepositDetail();
@@ -799,6 +805,8 @@ public class ManageHomeBaseGoal extends Goal {
                 || stack.getItem() instanceof ArmorItem
                 || stack.getItem() instanceof BowItem
                 || stack.getItem() instanceof ShieldItem
+                || (this.playerNpc.hasInterest(PlayerNpcInterest.FISHING)
+                && (stack.getItem() instanceof FishingRodItem || stack.is(Items.STRING)))
                 || stack.isEdible()
                 || stack.is(Items.ARROW)
                 || stack.is(Items.ENDER_PEARL)

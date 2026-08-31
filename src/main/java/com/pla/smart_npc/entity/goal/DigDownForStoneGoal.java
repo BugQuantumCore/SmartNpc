@@ -49,7 +49,10 @@ public class DigDownForStoneGoal extends Goal {
     private static final int FISHING_SUPPORT_RETRY_COOLDOWN_TICKS = 20;
     private static final int ORE_SEARCH_INTERVAL_TICKS = 20 * 2;
     private static final int CONTINUE_ELIGIBILITY_INTERVAL_TICKS = 20;
-    private static final int MAX_DIG_SITE_COLUMNS_PER_SLICE = 64;
+    // Heightmap reads can initialize/inspect substantial chunk data even when the chunk is
+    // already loaded. Keep each admitted activation probe genuinely small; the retained cursor
+    // eventually covers the same radius without a 64-column server-thread burst.
+    private static final int MAX_DIG_SITE_COLUMNS_PER_SLICE = 4;
     // Origin discovery is a speculative activation check. A single 0.05 path still
     // measured above 100 ms in live worlds, so keep it substantially below movement
     // paths and let later admitted checks try another candidate.

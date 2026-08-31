@@ -118,12 +118,14 @@ public class BeingAtHomeGoal extends Goal {
                 || ReturnHomeGoal.needsHomeSurfaceRecovery(this.playerNpc, serverLevel)) {
             return false;
         }
+        // Night/thunder is now the builder's placement window. Shelter activity may only claim
+        // MOVE after both Terraform and BuildHouse have resolved that no runnable work exists.
+        if (this.hasReadyHomeWork(serverLevel, true)) {
+            return false;
+        }
         if (!this.sheltering
                 && (this.playerNpc.shouldPrioritizeLogGathering()
                 || this.playerNpc.shouldPrioritizeCobblestoneGathering())) {
-            return false;
-        }
-        if (!this.sheltering && this.hasReadyHomeWork(serverLevel, false)) {
             return false;
         }
         if (!this.sheltering && !this.isFinishedHouse(serverLevel, this.homeArea)) {
@@ -162,7 +164,7 @@ public class BeingAtHomeGoal extends Goal {
                 && (this.sheltering
                 || !this.playerNpc.shouldPrioritizeLogGathering()
                 && !this.playerNpc.shouldPrioritizeCobblestoneGathering())
-                && (this.sheltering || !this.hasReadyHomeWork())
+                && !this.hasReadyHomeWork()
                 && (!this.sheltering || this.shouldShelterNow());
     }
 
@@ -575,7 +577,8 @@ public class BeingAtHomeGoal extends Goal {
 
         this.buildWorkCheckCooldown = BUILD_WORK_CHECK_INTERVAL_TICKS + this.playerNpc.getRandom().nextInt(6);
         this.cachedReadyBuildWork = TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
-                || BuildHouseGoal.hasContinuableHomeBuildWork(this.playerNpc, serverLevel);
+                || BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel)
+                || BuildHouseGoal.isHomeBuildWorkSearchPending(this.playerNpc, serverLevel);
         return this.cachedReadyBuildWork;
     }
 

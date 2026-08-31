@@ -1,5 +1,13 @@
 # Farming Interest Flow
 
+Pickup work keeps generic owned-farm destruction protection intact. When an owner is inside its farm,
+an item is outside, and the normal route cannot reach it, `PickupNearbyItemGoal` requests the existing
+farm-gate egress flow. That flow opens a valid gate or may clear a breakable fence/gate only at the
+plan's designated `gatePos`; it cannot authorize another NPC or an unrelated goal to break farm
+boundaries. Farm geometry is not mutated, so `FarmSetupGoal` later sees and repairs a removed boundary.
+
+An admitted farming worker with a READY but partially empty plot must not remain remote and idle merely because it has no seeds. `FarmStrollGoal` may act as a low-priority return-to-farm route while planting supplies are missing and the NPC is outside the farm ring; once nearby, `FarmCropGoal` gives grass/fern forage priority over external mature-crop probes, plants available seeds across empty farmland through its repeated quick actions, harvests mature owned crops first, and only uses ordinary planted-farm strolling when no actionable owned crop work remains.
+
 `FARMING` is a daily job backed by one persisted `PlayerNpcFarmPlan`. The flow is:
 
 1. Satisfy the normal starter-log target.
@@ -88,3 +96,4 @@ Every climb request created by `ExploreAroundGoal` records the issuing explorati
 An upward route request whose destination is outside the claimed farm is intercepted before ordinary pillar planning. The request is the authorization to leave: merely standing inside an intentional fence enclosure is never treated as a hole and cannot start gate egress. The escape goal retains a bounded gate-egress episode across preemption, opens the saved gate, preserves the original forced/exploration request kind for fallback, and keeps the interior/exterior destination separate from any temporary navigation waypoint. If an exact route cannot be created or an accepted route makes no progress for one second, it scans a bounded three-wide, two-block-high corridor from the current feet to the desired waypoint and uses `ClearBlockAi` on the actual reachable obstruction before considering a strictly closer intermediate farm-path cell. Requested and ray-retargeted blocks are checked before and after every clear tick, while failed clear targets receive a bounded cooldown; farm ground/support, current feet/support, farmland, water, crops, expected perimeter, home/build blocks, block entities, and temporary infrastructure stay protected. Three failed episodes restore the original climb once through an anti-reentry bypass; generic pillar bases and route clearing still reject the farm, preventing the old farmland-clear loop and interior/exterior waypoint flip-flop.
 
 Crop operations use strict readiness rather than the saved `READY` phase alone. Irrigation, fence/gate, healthy path support, and farmland under every exposed crop cell must all be valid. A crop already occupying a cell is preserved until its normal harvest; once that cell is exposed, dirt/grass or repaired support rewinds the persisted phase to `TILL`. FarmCrop start, continuation, and supply exploration all yield while this setup work is pending, so FarmSetup crafts/equips the hoe, reaches the exact stand, tills once, and only then releases planting.
+Farm setup target selection is activation-bounded but live across retries: the TILL phase retains rotating cursors for both owned crop-ground cells and interaction stands. A failed exact path therefore advances to another stand/cell on the next admitted `canUse()` pass instead of retrying one unreachable nearest pair forever; the one-navigation-path-per-activation bound is unchanged.

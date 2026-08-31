@@ -19,11 +19,11 @@ import java.util.function.Predicate;
 public final class StoneAi {
     // This is one admitted time slice, not a complete ore survey. Keep the synchronous slice small;
     // a failed nearest-first pass is retried after the goal throttle or from a changed search center.
-    private static final int MAX_CLUSTER_BLOCKS = 48;
+    private static final int MAX_CLUSTER_BLOCKS = 8;
     private static final int SEARCH_VERTICAL_DOWN = 6;
     private static final int SEARCH_VERTICAL_UP = 6;
     private static final int MAX_SEARCH_CLUSTERS = 2;
-    private static final int MAX_SEARCH_POSITIONS = 384;
+    private static final int MAX_SEARCH_POSITIONS = 16;
 
     private StoneAi() {
     }

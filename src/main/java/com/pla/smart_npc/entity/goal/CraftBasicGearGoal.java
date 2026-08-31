@@ -3,8 +3,12 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.FarmAi;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
@@ -16,6 +20,7 @@ import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
@@ -37,6 +42,8 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.HashSet;
+import java.util.Set;
 
 public class CraftBasicGearGoal extends Goal {
     public static final String TEMP_TABLE_X = "PlayerNpcTemporaryCraftingTableX";
@@ -52,8 +59,16 @@ public class CraftBasicGearGoal extends Goal {
     private static final double CRAFTING_TABLE_USE_DISTANCE_SQR = 2.25D * 2.25D;
     private static final int CRAFT_ACTION_DELAY_TICKS = 12;
     private static final int CRAFTING_REPATH_INTERVAL_TICKS = 20;
-    private static final int MAX_ACTIVATION_STAND_PATH_CHECKS = 6;
+    private static final int CRAFTING_NO_PROGRESS_TICKS_BEFORE_RECOVERY = 20 * 4;
+    private static final double CRAFTING_PROGRESS_DISTANCE_SQR = 0.25D * 0.25D;
+    private static final int CRAFTING_ROUTE_FAILURES_BEFORE_RECOVERY = 3;
+    private static final int CRAFTING_UPWARD_ESCAPE_TICKS = 20 * 30;
+    private static final int MAX_ACTIVATION_STAND_PATH_CHECKS = 1;
+    private static final int MAX_PLACEMENT_CANDIDATES_PER_ACTIVATION = 16;
+    private static final float CRAFTING_PATH_NODE_MULTIPLIER = 0.01F;
     private static final double DIRECT_CRAFTING_STEP_DISTANCE_SQR = 8.0D * 8.0D;
+    private static final int CRAFTING_ROUTE_CLEAR_TICKS = 24;
+    private static final double CRAFTING_ROUTE_CLEAR_DISTANCE_SQR = 4.5D * 4.5D;
 
     public static boolean hasTemporaryCraftingTable(PlayerNpcEntity playerNpc) {
         return getTemporaryCraftingTablePos(playerNpc) != null;
@@ -115,10 +130,15 @@ public class CraftBasicGearGoal extends Goal {
         // This predicate is consulted by several lower-priority goals. Keep it inventory/exact-
         // ownership based; the actual higher-priority CraftBasicGearGoal performs the admitted
         // nearby-table and placement/path plan once during canUse().
-        return probe.canCraftTool()
-                && (hasValidTemporaryCraftingTable(playerNpc, serverLevel)
-                || probe.hasCarriedCraftingTable()
-                || PlayerNpcCraftingUtil.canCraftCraftingTable(playerNpc.getInventory()));
+        if (hasValidTemporaryCraftingTable(playerNpc, serverLevel)
+                || probe.hasCarriedCraftingTable()) {
+            return probe.canCraftTool();
+        }
+        // Do not count the same planks once for a tool and again for the table needed to
+        // craft it.  The real activation reserves four planks before testing the recipe;
+        // lower-priority work must yield only when that same plan can actually start.
+        return PlayerNpcCraftingUtil.canCraftCraftingTable(playerNpc.getInventory())
+                && probe.canCraftToolAfterPlacedTable();
     }
 
     public static boolean needsFishingRodCraftingLogs(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -168,6 +188,11 @@ public class CraftBasicGearGoal extends Goal {
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
+    private final PathStuckFallbackAi pathStuckFallbackAi;
+    private final ToolAi routeToolAi;
+    private final BreakingBlockAi routeBreakingBlockAi;
+    private final ClearBlockAi routeClearBlockAi;
+    private final Set<BlockPos> skippedRouteClearTargets = new HashSet<>();
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     private BlockPos craftingTablePos;
     private BlockPos craftingStandPos;
@@ -178,13 +203,22 @@ public class CraftBasicGearGoal extends Goal {
     private boolean craftingTableInteracted;
     private int failedCraftRetryAfterTick;
     private int nextCraftingPathAttemptTick;
+    private int craftingRouteFailures;
+    private int craftingNoProgressTicks;
+    private double bestCraftingStandDistanceSqr;
     private int activationStandPathChecksRemaining;
     private boolean activationPlanning;
     private BlockPos plannedPlacementStand;
+    private int placementCandidateCursor;
+    private int craftingEscapeHandoffUntilTick;
 
     public CraftBasicGearGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
+        this.pathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
+        this.routeToolAi = new ToolAi(playerNpc);
+        this.routeBreakingBlockAi = new BreakingBlockAi(playerNpc, this.routeToolAi);
+        this.routeClearBlockAi = new ClearBlockAi(playerNpc, this.routeBreakingBlockAi);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
@@ -197,6 +231,8 @@ public class CraftBasicGearGoal extends Goal {
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
                 || this.playerNpc.tickCount < this.failedCraftRetryAfterTick
+                || this.playerNpc.tickCount < this.craftingEscapeHandoffUntilTick
+                    && this.playerNpc.getUpwardEscapeTarget() != null
                 || "ai.player_npc.gathering_materials".equals(this.playerNpc.getCurrentAiState())) {
             return false;
         }
@@ -307,6 +343,12 @@ public class CraftBasicGearGoal extends Goal {
         this.craftedTool = false;
         this.craftingTableInteracted = false;
         this.nextCraftingPathAttemptTick = this.playerNpc.tickCount;
+        this.craftingRouteFailures = 0;
+        this.resetCraftingProgressWatchdog();
+        this.pathStuckFallbackAi.stop();
+        this.routeClearBlockAi.stop();
+        this.routeToolAi.restoreMainHand();
+        this.skippedRouteClearTargets.clear();
         this.playerNpc.setCurrentAiState("ai.player_npc.crafting_gear");
         this.playerNpc.setCurrentAiDetail("moving to crafting table");
     }
@@ -315,6 +357,15 @@ public class CraftBasicGearGoal extends Goal {
     public void tick() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || this.craftingTablePos == null) {
             this.finished = true;
+            return;
+        }
+
+        if (this.tickCraftingRouteClear(serverLevel)) {
+            return;
+        }
+
+        if (this.pathStuckFallbackAi.tick(serverLevel, "crafting table recovery")) {
+            this.playerNpc.setCurrentAiDetail(this.pathStuckFallbackAi.detail("crafting table recovery"));
             return;
         }
 
@@ -342,7 +393,14 @@ public class CraftBasicGearGoal extends Goal {
 
         if (!this.isAtCraftingStand()) {
             this.playerNpc.setCurrentAiDetail("walking to crafting table");
-            this.moveToCraftingStandOnCadence();
+            if (this.hasCraftingRouteStalled()) {
+                this.recoverFailedCraftingRoute(serverLevel);
+                return;
+            }
+            if (this.playerNpc.tickCount >= this.nextCraftingPathAttemptTick
+                    && !this.moveToCraftingStandOnCadence()) {
+                this.recoverFailedCraftingRoute(serverLevel);
+            }
             return;
         }
 
@@ -357,10 +415,18 @@ public class CraftBasicGearGoal extends Goal {
 
     @Override
     public void stop() {
+        this.routeClearBlockAi.stop();
+        this.routeToolAi.restoreMainHand();
+        this.skippedRouteClearTargets.clear();
         if (!this.playerNpc.level().isClientSide) {
             boolean canStillCraftUsefulGear = this.playerNpc.level() instanceof ServerLevel serverLevel
                     && this.canCraftUsefulGear(serverLevel);
-            boolean failedCraftAttempt = this.finished && !this.craftedTool && canStillCraftUsefulGear;
+            boolean escapeHandoff = this.playerNpc.tickCount < this.craftingEscapeHandoffUntilTick
+                    && this.playerNpc.getUpwardEscapeTarget() != null;
+            boolean failedCraftAttempt = this.finished
+                    && !this.craftedTool
+                    && canStillCraftUsefulGear
+                    && !escapeHandoff;
             int cooldown = failedCraftAttempt
                     ? FAILED_CRAFT_RETRY_TICKS + this.playerNpc.getRandom().nextInt(20 * 10)
                     : this.craftedTool && this.needsCriticalStarterTool() && canStillCraftUsefulGear
@@ -378,6 +444,10 @@ public class CraftBasicGearGoal extends Goal {
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
         this.nextCraftingPathAttemptTick = 0;
+        this.craftingRouteFailures = 0;
+        this.craftingNoProgressTicks = 0;
+        this.bestCraftingStandDistanceSqr = Double.MAX_VALUE;
+        this.pathStuckFallbackAi.stop();
         this.resetPlan();
     }
 
@@ -401,6 +471,10 @@ public class CraftBasicGearGoal extends Goal {
         if (!this.isAtCraftingStand()) {
             this.actionDelayTicks = 0;
             this.playerNpc.setCurrentAiDetail("walking to crafting table placement");
+            if (this.hasCraftingRouteStalled()) {
+                this.recoverFailedCraftingRoute(serverLevel);
+                return;
+            }
             if (this.playerNpc.tickCount >= this.nextCraftingPathAttemptTick
                     && !this.moveToCraftingStandOnCadence()) {
                 this.finished = true;
@@ -959,16 +1033,10 @@ public class CraftBasicGearGoal extends Goal {
             if (immutable.equals(center)) {
                 return immutable;
             }
-            if (this.activationPlanning && this.activationStandPathChecksRemaining <= 0) {
-                continue;
-            }
-            if (this.activationPlanning) {
-                this.activationStandPathChecksRemaining--;
-            }
-            Path path = this.playerNpc.getNavigation().createPath(immutable, 0);
-            if (path != null && path.canReach()) {
-                return immutable;
-            }
+            // Activation is geometric only. The running tick performs one bounded route attempt;
+            // failed movement then uses the existing retry/cooldown rather than making canUse pay
+            // for a navigation region while examining crafting-table stands.
+            return immutable;
         }
         return null;
     }
@@ -992,12 +1060,19 @@ public class CraftBasicGearGoal extends Goal {
         if (this.craftingStandPos == null) {
             return false;
         }
-        Path path = this.playerNpc.getNavigation().createPath(this.craftingStandPos, 0);
+        Path path = PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                this.craftingStandPos,
+                CRAFTING_PATH_NODE_MULTIPLIER
+        );
         if (path == null || !path.canReach()) {
+            int verticalDelta = this.craftingStandPos.getY() - this.playerNpc.blockPosition().getY();
             if (this.playerNpc.distanceToSqr(
                     this.craftingStandPos.getX() + 0.5D,
                     this.playerNpc.getY(),
-                    this.craftingStandPos.getZ() + 0.5D) <= DIRECT_CRAFTING_STEP_DISTANCE_SQR) {
+                    this.craftingStandPos.getZ() + 0.5D) <= DIRECT_CRAFTING_STEP_DISTANCE_SQR
+                    && verticalDelta >= -1
+                    && verticalDelta <= 1) {
                 this.playerNpc.getNavigation().stop();
                 this.playerNpc.getMoveControl().setWantedPosition(
                         this.craftingStandPos.getX() + 0.5D,
@@ -1018,6 +1093,181 @@ public class CraftBasicGearGoal extends Goal {
         }
         this.nextCraftingPathAttemptTick = this.playerNpc.tickCount + CRAFTING_REPATH_INTERVAL_TICKS;
         return this.moveToCraftingStand();
+    }
+
+    private void resetCraftingProgressWatchdog() {
+        this.craftingNoProgressTicks = 0;
+        this.bestCraftingStandDistanceSqr = this.distanceToCraftingStandSqr();
+    }
+
+    private boolean hasCraftingRouteStalled() {
+        double distanceSqr = this.distanceToCraftingStandSqr();
+        if (distanceSqr + CRAFTING_PROGRESS_DISTANCE_SQR < this.bestCraftingStandDistanceSqr) {
+            this.bestCraftingStandDistanceSqr = distanceSqr;
+            this.craftingNoProgressTicks = 0;
+            return false;
+        }
+        return ++this.craftingNoProgressTicks >= CRAFTING_NO_PROGRESS_TICKS_BEFORE_RECOVERY;
+    }
+
+    private double distanceToCraftingStandSqr() {
+        if (this.craftingStandPos == null) {
+            return Double.MAX_VALUE;
+        }
+        return this.playerNpc.distanceToSqr(
+                this.craftingStandPos.getX() + 0.5D,
+                this.craftingStandPos.getY(),
+                this.craftingStandPos.getZ() + 0.5D
+        );
+    }
+
+    private void recoverFailedCraftingRoute(ServerLevel serverLevel) {
+        this.resetCraftingProgressWatchdog();
+        if (this.craftingStandPos == null || ++this.craftingRouteFailures < CRAFTING_ROUTE_FAILURES_BEFORE_RECOVERY) {
+            return;
+        }
+        this.craftingRouteFailures = 0;
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.startCraftingRouteClear(serverLevel)) {
+            return;
+        }
+
+        if (this.craftingStandPos.getY() > feet.getY()) {
+            boolean wetForLandEscape = this.playerNpc.isInWaterOrBubble()
+                    || serverLevel.getFluidState(feet).is(FluidTags.WATER)
+                    || serverLevel.getFluidState(feet.above()).is(FluidTags.WATER);
+            if (!wetForLandEscape) {
+                // Hand off to the vertical-recovery goal at the NPC's local column. The old
+                // implementation requested the remote crafting stand itself. A one-block-high
+                // destination did not satisfy EscapeHoleWithBlockGoal's forced-climb contract,
+                // so the request was discarded and this MOVE goal immediately repeated it.
+                BlockPos localEscapeTarget = feet.above(2);
+                this.playerNpc.getNavigation().stop();
+                this.playerNpc.requestForcedUpwardEscapeTo(
+                        localEscapeTarget,
+                        CRAFTING_UPWARD_ESCAPE_TICKS,
+                        2
+                );
+                this.craftingEscapeHandoffUntilTick = this.playerNpc.tickCount + CRAFTING_UPWARD_ESCAPE_TICKS;
+                this.playerNpc.setCurrentAiDetail("crafting route blocked below rim; handing off safe climb");
+                this.finished = true;
+                return;
+            }
+        }
+
+        BlockPos directionTarget = this.craftingTablePos == null ? this.craftingStandPos : this.craftingTablePos;
+        if (this.pathStuckFallbackAi.start(
+                serverLevel,
+                directionTarget,
+                "crafting table recovery",
+                pos -> PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                        || FarmAi.isProtectedFarmBlock(this.playerNpc, pos))) {
+            this.playerNpc.setCurrentAiDetail(this.pathStuckFallbackAi.detail("crafting table recovery"));
+            this.craftingStandPos = null;
+            return;
+        }
+
+        // Do not hold MOVE forever when neither a route, climb, nor safe reposition exists.
+        // The normal failed-craft cooldown allows other full worker routines to run before retry.
+        this.finished = true;
+    }
+
+    private boolean tickCraftingRouteClear(ServerLevel serverLevel) {
+        if (!this.routeClearBlockAi.isRunning()) {
+            return false;
+        }
+        BlockPos target = this.routeClearBlockAi.targetPos();
+        if (!this.isSafeCraftingRouteClearTarget(serverLevel, target)) {
+            this.rejectCraftingRouteClearTarget(target);
+            return false;
+        }
+
+        ClearBlockAi.TickResult result = this.routeClearBlockAi.tick(serverLevel);
+        if (result == ClearBlockAi.TickResult.RUNNING) {
+            BlockPos resolved = this.routeClearBlockAi.targetPos();
+            if (!this.isSafeCraftingRouteClearTarget(serverLevel, resolved)) {
+                this.rejectCraftingRouteClearTarget(resolved);
+                return false;
+            }
+            this.playerNpc.setCurrentAiDetail(this.routeClearBlockAi.detail());
+            return true;
+        }
+
+        this.routeToolAi.restoreMainHand();
+        if (result == ClearBlockAi.TickResult.FAILED && target != null) {
+            this.skippedRouteClearTargets.add(target.immutable());
+        }
+        if (result == ClearBlockAi.TickResult.DONE) {
+            this.skippedRouteClearTargets.clear();
+        }
+        this.nextCraftingPathAttemptTick = this.playerNpc.tickCount;
+        this.resetCraftingProgressWatchdog();
+        this.playerNpc.setCurrentAiDetail(result == ClearBlockAi.TickResult.DONE
+                ? "cleared crafting table route; retrying"
+                : "crafting route clear failed; retrying");
+        return true;
+    }
+
+    private boolean startCraftingRouteClear(ServerLevel serverLevel) {
+        if (this.craftingStandPos == null || this.craftingTablePos == null) {
+            return false;
+        }
+        BlockPos feet = this.playerNpc.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>(ClearBlockAi.gatherObstructionCandidates(
+                feet,
+                this.craftingStandPos,
+                this.craftingTablePos
+        ));
+        candidates.removeIf(pos -> !this.isSafeCraftingRouteClearTarget(serverLevel, pos));
+        candidates.sort(Comparator.comparingDouble(feet::distSqr));
+        for (BlockPos candidate : candidates) {
+            if (this.routeClearBlockAi.start(
+                    serverLevel,
+                    candidate,
+                    state -> this.isSafeCraftingRouteObstruction(serverLevel, candidate, state),
+                    "clearing crafting table route",
+                    CRAFTING_ROUTE_CLEAR_TICKS,
+                    CRAFTING_ROUTE_CLEAR_DISTANCE_SQR,
+                    true
+            )) {
+                this.playerNpc.getNavigation().stop();
+                this.playerNpc.setCurrentAiDetail(this.routeClearBlockAi.detail());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isSafeCraftingRouteClearTarget(ServerLevel serverLevel, BlockPos pos) {
+        if (pos == null
+                || !serverLevel.hasChunkAt(pos)
+                || pos.equals(this.craftingTablePos)
+                || pos.equals(this.craftingTablePos.below())
+                || pos.equals(this.playerNpc.blockPosition().below())
+                || this.playerNpc.isTemporaryPillarSupport(pos)
+                || this.skippedRouteClearTargets.contains(pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                || FarmAi.isProtectedFarmBlock(this.playerNpc, pos)
+                || serverLevel.getBlockEntity(pos) != null) {
+            return false;
+        }
+        return this.isSafeCraftingRouteObstruction(serverLevel, pos, serverLevel.getBlockState(pos));
+    }
+
+    private boolean isSafeCraftingRouteObstruction(ServerLevel serverLevel, BlockPos pos, BlockState state) {
+        return state != null
+                && !state.isAir()
+                && !state.getCollisionShape(serverLevel, pos).isEmpty()
+                && state.getDestroySpeed(serverLevel, pos) >= 0.0F;
+    }
+
+    private void rejectCraftingRouteClearTarget(BlockPos target) {
+        if (target != null) {
+            this.skippedRouteClearTargets.add(target.immutable());
+        }
+        this.routeClearBlockAi.stop();
+        this.routeToolAi.restoreMainHand();
     }
 
     private double distanceToTableSqr(BlockPos standPos, BlockPos tablePos) {
@@ -1123,7 +1373,11 @@ public class CraftBasicGearGoal extends Goal {
 
         candidates.sort(Comparator.comparingDouble(origin::distSqr));
         this.plannedPlacementStand = null;
-        for (BlockPos candidate : candidates) {
+        int start = candidates.isEmpty() ? 0 : Math.floorMod(this.placementCandidateCursor, candidates.size());
+        int checked = 0;
+        for (int offset = 0; offset < candidates.size()
+                && checked < MAX_PLACEMENT_CANDIDATES_PER_ACTIVATION; offset++, checked++) {
+            BlockPos candidate = candidates.get((start + offset) % candidates.size());
             BlockPos immutable = candidate.immutable();
             if (!this.canPlaceCraftingTableAt(serverLevel, immutable)) {
                 continue;
@@ -1131,8 +1385,12 @@ public class CraftBasicGearGoal extends Goal {
             BlockPos stand = this.findCraftingStand(serverLevel, immutable);
             if (stand != null) {
                 this.plannedPlacementStand = stand.immutable();
+                this.placementCandidateCursor = 0;
                 return immutable;
             }
+        }
+        if (!candidates.isEmpty()) {
+            this.placementCandidateCursor = (start + checked) % candidates.size();
         }
         return null;
     }

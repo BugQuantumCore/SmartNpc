@@ -1,5 +1,12 @@
 # Player NPC Natural Spawn Cap
 
+Biome `CREATURE` spawning alone is not a liveness guarantee in an established world because the
+ordinary passive-creature mob cap can remain full; this made Player NPCs appear mainly during chunk
+generation. While population admission has room, the server now makes at most one reservation-safe
+spawn attempt every 20 seconds, 24-48 blocks from an overworld player, using only an already-loaded
+surface column. It neither loads/generates chunks nor bypasses names, daylight, placement, collision,
+or automatic/fixed population-cap checks.
+
 ## Sources
 
 - `src/main/java/com/pla/smart_npc/util/PlayerNpcNaturalSpawnCap.java`

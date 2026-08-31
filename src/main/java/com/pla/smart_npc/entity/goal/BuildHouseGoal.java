@@ -161,12 +161,39 @@ public class BuildHouseGoal extends Goal {
     public static boolean hasReadyHomeBuildWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         if (!playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
                 || !playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
-                || playerNpc.getBuildHouseCooldown() > 0) {
+                || !shouldBuildDuringShelter(serverLevel)
+                || playerNpc.getBuildHouseCooldown() > 0
+                || !playerNpc.hasMetBuildSupplyGoals() && !isBuildBatchActive(playerNpc)) {
             return false;
         }
 
-        return hasContinuableHomeBuildWork(playerNpc, serverLevel)
-                && (playerNpc.hasMetBuildSupplyGoals() || isBuildBatchActive(playerNpc));
+        return hasContinuableHomeBuildWork(playerNpc, serverLevel);
+    }
+
+    /** True while the admitted existing-home readiness scan still has blueprint slices to inspect. */
+    public static boolean isHomeBuildWorkSearchPending(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null
+                || serverLevel == null
+                || !playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || !playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
+                || !shouldBuildDuringShelter(serverLevel)
+                || playerNpc.getBuildHouseCooldown() > 0
+                || !playerNpc.hasMetBuildSupplyGoals() && !isBuildBatchActive(playerNpc)) {
+            return false;
+        }
+
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        if (home.isEmpty()) {
+            return false;
+        }
+        String layoutId = PlayerNpcHomeUtil.getHomeLayoutId(playerNpc).orElse("");
+        HomeBuildWorkSearch search = HOME_BUILD_WORK_SEARCHES.get(playerNpc);
+        return search != null && search.matches(
+                serverLevel.dimension().location(),
+                home.get(),
+                layoutId,
+                buildWorkInventoryHash(playerNpc)
+        );
     }
 
     public static boolean hasContinuableHomeBuildWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -413,10 +440,14 @@ public class BuildHouseGoal extends Goal {
         }
         boolean shelterBuild = shouldBuildDuringShelter(serverLevel);
         boolean existingHome = PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent();
-        if (shelterBuild && existingHome) {
+        if (!shelterBuild && existingHome) {
+            // Building-interest daytime is reserved for site preparation and supply work once a
+            // home exists. A first site still has to be selected during daytime: stone gathering
+            // deliberately waits for that site to be prepared, so postponing selection until
+            // night leaves a new builder with its log reserve unable to enter either phase.
             return false;
         }
-        if (!shelterBuild && this.playerNpc.getBuildHouseCooldown() > 0) {
+        if (this.playerNpc.getBuildHouseCooldown() > 0) {
             return false;
         }
         if (existingHome) {
@@ -426,7 +457,7 @@ public class BuildHouseGoal extends Goal {
             if (TerraformBuildSiteGoal.hasPrepWork(this.playerNpc, serverLevel)) {
                 return false;
             }
-            return this.loadReadyExistingHomeBuild(serverLevel, shelterBuild);
+            return this.loadReadyExistingHomeBuild(serverLevel);
         }
         if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
             this.canUseThrottle.retryIn(this.playerNpc, 1 + this.playerNpc.getRandom().nextInt(4));
@@ -446,10 +477,12 @@ public class BuildHouseGoal extends Goal {
         if (TerraformBuildSiteGoal.hasPrepWork(this.playerNpc, serverLevel)) {
             return false;
         }
-        return this.playerNpc.hasMetBuildSupplyGoals();
+        // Site selection/preparation may begin during the day, but actual blueprint placement
+        // remains restricted to the night/thunder construction window.
+        return shelterBuild && this.playerNpc.hasMetBuildSupplyGoals();
     }
 
-    private boolean loadReadyExistingHomeBuild(ServerLevel serverLevel, boolean shelterBuild) {
+    private boolean loadReadyExistingHomeBuild(ServerLevel serverLevel) {
         Optional<PlayerNpcHomeUtil.HomeArea> existingHome = PlayerNpcHomeUtil.getHome(this.playerNpc);
         if (existingHome.isEmpty()) {
             return false;
@@ -469,8 +502,7 @@ public class BuildHouseGoal extends Goal {
                 || !cachedContinuableHomeBuildWork(this.playerNpc, serverLevel)) {
             return false;
         }
-        if (!shelterBuild
-                && !isBuildBatchActive(this.playerNpc)
+        if (!isBuildBatchActive(this.playerNpc)
                 && !this.playerNpc.hasMetBuildSupplyGoals()) {
             return false;
         }
@@ -493,7 +525,7 @@ public class BuildHouseGoal extends Goal {
                 && this.playerNpc.getHoleEscapeCooldown() <= 0
                 && !this.needsHomeSurfaceRecovery()
                 && this.playerNpc.getTarget() == null
-                && !this.shouldShelterAtExistingHome();
+                && this.isConstructionWindow();
     }
 
     @Override
@@ -831,10 +863,9 @@ public class BuildHouseGoal extends Goal {
         return serverLevel.isNight() || serverLevel.isThundering();
     }
 
-    private boolean shouldShelterAtExistingHome() {
+    private boolean isConstructionWindow() {
         return this.playerNpc.level() instanceof ServerLevel serverLevel
-                && shouldBuildDuringShelter(serverLevel)
-                && PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent();
+                && shouldBuildDuringShelter(serverLevel);
     }
 
     private static boolean isBuildBatchActive(PlayerNpcEntity playerNpc) {

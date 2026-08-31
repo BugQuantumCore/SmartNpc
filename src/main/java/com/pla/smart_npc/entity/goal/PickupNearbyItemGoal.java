@@ -1,9 +1,11 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.FarmAi;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.PillarUpAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
@@ -68,6 +70,7 @@ public class PickupNearbyItemGoal extends Goal {
     private static final int HIGH_ITEM_VERTICAL_BLOCK_GAP = 2;
     private static final int PICKUP_PILLAR_SEARCH_RADIUS = 2;
     private static final int MAX_TARGET_CANDIDATES = 6;
+    private static final float TARGET_SELECTION_PATH_NODE_MULTIPLIER = 0.05F;
     // One failed navigation build can consume most of the 50 ms server-tick budget in dense
     // terrain. Later throttled activations can inspect another candidate without batching paths.
     private static final int MAX_TARGET_SELECTION_PATHS = 1;
@@ -135,8 +138,19 @@ public class PickupNearbyItemGoal extends Goal {
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
-                || !this.ensurePathBatchAdmission(serverLevel)) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        // Incidental drops from clearing the build footprint must not steal MOVE from an
+        // active builder preparation episode.  They remain available for pickup once the
+        // bounded terraform scan reports that the site is ready.
+        if (this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
+                && !this.playerNpc.hasAnimalLootPriority()
+                && TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)) {
+            return false;
+        }
+        if (!this.ensurePathBatchAdmission(serverLevel)) {
             return false;
         }
 
@@ -396,6 +410,14 @@ public class PickupNearbyItemGoal extends Goal {
         Path itemPath = pathBudget.createPath(item);
         if (itemPath != null && itemPath.canReach()) {
             return new PickupRoute(itemPath, null, false);
+        }
+
+        // An owned farm fence is intentionally protected from generic pickup obstruction mining.
+        // If its owner is enclosed and the desired item is outside, hand the route to the dedicated
+        // farm-egress safety goal. It may open the saved gate or clear only an owned boundary
+        // fence in the bounded exit corridor; the immutable plan lets FarmSetup repair it later.
+        if (this.requestOwnedFarmGateEgress(item)) {
+            return null;
         }
 
         BlockPos stand = findStandNearItem(item);
@@ -1371,6 +1393,24 @@ public class PickupNearbyItemGoal extends Goal {
         return null;
     }
 
+    private boolean requestOwnedFarmGateEgress(ItemEntity item) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || item == null) {
+            return false;
+        }
+        var plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos itemPos = item.blockPosition();
+        if (plan == null
+                || !FarmAi.isInsideFarmFootprint(plan, feet)
+                || FarmAi.isInsideFarmFootprint(plan, itemPos)) {
+            return false;
+        }
+        this.playerNpc.requestUpwardEscapeTo(itemPos, 20 * 20, 0);
+        this.playerNpc.setIdleTraceDetail("pickup waiting for owned farm gate egress @ "
+                + plan.gatePos().getX() + " " + plan.gatePos().getY() + " " + plan.gatePos().getZ(), 40);
+        return true;
+    }
+
     /**
      * Minecraft can keep an accepted path in the running/not-stuck state even when the NPC's body
      * makes no useful progress toward its next node. Inspect the live collision volume swept toward
@@ -1621,7 +1661,11 @@ public class PickupNearbyItemGoal extends Goal {
                 return null;
             }
             this.remaining--;
-            return playerNpc.getNavigation().createPath(item, 0);
+            return PathNavigationAi.createBoundedPath(
+                    playerNpc,
+                    item.blockPosition(),
+                    TARGET_SELECTION_PATH_NODE_MULTIPLIER
+            );
         }
 
         private Path createPath(BlockPos pos) {
@@ -1629,7 +1673,11 @@ public class PickupNearbyItemGoal extends Goal {
                 return null;
             }
             this.remaining--;
-            return playerNpc.getNavigation().createPath(pos, 0);
+            return PathNavigationAi.createBoundedPath(
+                    playerNpc,
+                    pos,
+                    TARGET_SELECTION_PATH_NODE_MULTIPLIER
+            );
         }
     }
 

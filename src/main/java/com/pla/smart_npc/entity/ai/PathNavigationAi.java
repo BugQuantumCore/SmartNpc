@@ -58,10 +58,13 @@ public final class PathNavigationAi {
             int dx = target.getX() - playerNpc.getBlockX();
             int dz = target.getZ() - playerNpc.getBlockZ();
             int horizontalDistance = (int) Math.ceil(Math.sqrt((double) dx * dx + (double) dz * dz));
-            // PlayerNpc FOLLOW_RANGE is 48, which makes vanilla allocate a 56-block region for
+            // PlayerNpc FOLLOW_RANGE is 48, which makes vanilla inspect a 56-block region for
             // every createPath even when the candidate is local. Keep diagnostic routes local;
             // callers retry/reselect a farther target instead of constructing that huge region.
-            int localFollowRange = Math.max(8, Math.min(32, horizontalDistance + 6));
+            if (horizontalDistance > 48) {
+                return null;
+            }
+            int localFollowRange = Math.max(8, Math.min(48, horizontalDistance + 6));
             return navigation.createPath(target, 0, localFollowRange);
         } finally {
             navigation.resetMaxVisitedNodesMultiplier();
@@ -355,6 +358,19 @@ public final class PathNavigationAi {
             int maxChecks,
             int maxSafeDrop
     ) {
+        return this.findReachableRandomizedCandidate(
+                serverLevel, candidates, preferredPoolSize, maxChecks, maxSafeDrop, 1.0F
+        );
+    }
+
+    public Optional<BlockPos> findReachableRandomizedCandidate(
+            ServerLevel serverLevel,
+            List<BlockPos> candidates,
+            int preferredPoolSize,
+            int maxChecks,
+            int maxSafeDrop,
+            float maxVisitedNodesMultiplier
+    ) {
         if (candidates.isEmpty()) {
             return Optional.empty();
         }
@@ -375,7 +391,12 @@ public final class PathNavigationAi {
                 break;
             }
             if (canStandAt(serverLevel, candidate)
-                    && this.canReachOrSafelyDropTo(serverLevel, candidate, maxSafeDrop)) {
+                    && this.canReachOrSafelyDropTo(
+                    serverLevel,
+                    candidate,
+                    maxSafeDrop,
+                    maxVisitedNodesMultiplier
+            )) {
                 return Optional.of(candidate.immutable());
             }
         }
@@ -444,6 +465,11 @@ public final class PathNavigationAi {
 
     public boolean hasExactPathTo(BlockPos target) {
         Path path = this.playerNpc.getNavigation().createPath(target, 0);
+        return this.isExactPathTo(target, path);
+    }
+
+    public boolean hasExactPathTo(BlockPos target, float maxVisitedNodesMultiplier) {
+        Path path = createBoundedPath(this.playerNpc, target, maxVisitedNodesMultiplier);
         return this.isExactPathTo(target, path);
     }
 

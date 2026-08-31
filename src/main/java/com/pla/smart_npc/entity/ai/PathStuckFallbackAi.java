@@ -17,6 +17,9 @@ public final class PathStuckFallbackAi {
     private static final int DEFAULT_STUCK_TICKS = 20 * 5;
     private static final int DEFAULT_ACTIVE_TICKS = 20 * 2;
     private static final int DEFAULT_RECHECK_TICKS = 20 * 3;
+    // Emergency nudge, not a route planner. Inspect near rings first so the usual recovery does
+    // not pay for the whole radius-five heightmap survey, while retaining the original reach when
+    // the NPC genuinely has no nearby safe first step.
     private static final int DEFAULT_SEARCH_RADIUS = 5;
     private static final int DEFAULT_MAX_FALL = 16;
     private static final double DEFAULT_STEP_OFF_SPEED = 0.28D;
@@ -206,47 +209,53 @@ public final class PathStuckFallbackAi {
             BlockPos directionTarget,
             Predicate<BlockPos> avoidedStand
     ) {
-        List<BlockPos> candidates = new ArrayList<>();
-        List<BlockPos> relaxedCandidates = new ArrayList<>();
         int radiusSqr = DEFAULT_SEARCH_RADIUS * DEFAULT_SEARCH_RADIUS;
-        for (int dx = -DEFAULT_SEARCH_RADIUS; dx <= DEFAULT_SEARCH_RADIUS; dx++) {
-            for (int dz = -DEFAULT_SEARCH_RADIUS; dz <= DEFAULT_SEARCH_RADIUS; dz++) {
-                if (dx == 0 && dz == 0 || dx * dx + dz * dz > radiusSqr) {
-                    continue;
-                }
+        for (int ring = 1; ring <= DEFAULT_SEARCH_RADIUS; ring++) {
+            List<BlockPos> candidates = new ArrayList<>();
+            List<BlockPos> relaxedCandidates = new ArrayList<>();
+            for (int dx = -ring; dx <= ring; dx++) {
+                for (int dz = -ring; dz <= ring; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != ring
+                            || dx * dx + dz * dz > radiusSqr) {
+                        continue;
+                    }
 
-                int x = feet.getX() + dx;
-                int z = feet.getZ() + dz;
-                BlockPos loadedColumn = new BlockPos(x, feet.getY(), z);
-                if (!serverLevel.hasChunkAt(loadedColumn)) {
-                    continue;
-                }
-                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-                int fall = feet.getY() - y;
-                if (fall < 0 || fall > DEFAULT_MAX_FALL) {
-                    continue;
-                }
+                    int x = feet.getX() + dx;
+                    int z = feet.getZ() + dz;
+                    BlockPos loadedColumn = new BlockPos(x, feet.getY(), z);
+                    if (!serverLevel.hasChunkAt(loadedColumn)) {
+                        continue;
+                    }
+                    int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                    int fall = feet.getY() - y;
+                    if (fall < 0 || fall > DEFAULT_MAX_FALL) {
+                        continue;
+                    }
 
-                BlockPos candidate = new BlockPos(x, y, z);
-                if (!PathNavigationAi.canStandAt(serverLevel, candidate)
-                        || !this.canStepOffToward(serverLevel, feet, candidate)) {
-                    continue;
-                }
+                    BlockPos candidate = new BlockPos(x, y, z);
+                    if (!PathNavigationAi.canStandAt(serverLevel, candidate)
+                            || !this.canStepOffToward(serverLevel, feet, candidate)) {
+                        continue;
+                    }
 
-                if (avoidedStand.test(candidate)) {
-                    relaxedCandidates.add(candidate.immutable());
-                } else {
-                    candidates.add(candidate.immutable());
+                    if (avoidedStand.test(candidate)) {
+                        relaxedCandidates.add(candidate.immutable());
+                    } else {
+                        candidates.add(candidate.immutable());
+                    }
                 }
             }
-        }
 
-        BlockPos selected = this.selectStepOffTarget(serverLevel, candidates, feet, directionTarget);
-        if (selected != null) {
-            return selected;
+            BlockPos selected = this.selectStepOffTarget(serverLevel, candidates, feet, directionTarget);
+            if (selected != null) {
+                return selected;
+            }
+            selected = this.selectStepOffTarget(serverLevel, relaxedCandidates, feet, directionTarget);
+            if (selected != null) {
+                return selected;
+            }
         }
-        selected = this.selectStepOffTarget(serverLevel, relaxedCandidates, feet, directionTarget);
-        return selected == null ? this.findOpenPushTarget(serverLevel, feet, directionTarget) : selected;
+        return this.findOpenPushTarget(serverLevel, feet, directionTarget);
     }
 
     private BlockPos selectStepOffTarget(ServerLevel serverLevel, List<BlockPos> candidates, BlockPos feet, BlockPos directionTarget) {

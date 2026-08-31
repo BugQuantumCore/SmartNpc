@@ -49,6 +49,7 @@ public class ReturnHomeGoal extends Goal {
     private boolean completedStoneTripReturn;
     private boolean explorationRecoveryReturn;
     private boolean homeSurfaceRecoveryReturn;
+    private boolean constructionHandoff;
 
     public ReturnHomeGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -73,6 +74,14 @@ public class ReturnHomeGoal extends Goal {
             // A selected supply route owns movement until completion. Crossing the home work-area
             // boundary must not turn ready build work into a higher-priority return-home loop.
             return serverLevel.isNight() || serverLevel.isThundering();
+        }
+        if (!serverLevel.isNight()
+                && !serverLevel.isThundering()
+                && (GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(playerNpc, serverLevel)
+                || PlayerNpcBuildMaterialUtil.isMissingBuildMaterialSearchPending(playerNpc))) {
+            // A ready structure with a missing non-primary input is daytime gathering work, not a
+            // reason for the higher-priority return goal to suppress its exploration/harvest route.
+            return false;
         }
         if (miningShelterOnly && MiningNightCampGoal.shouldPauseMiningForNightCamp(playerNpc, serverLevel)) {
             return false;
@@ -113,6 +122,7 @@ public class ReturnHomeGoal extends Goal {
         if (home.isEmpty()) {
             return false;
         }
+        this.constructionHandoff = false;
 
         PlayerNpcHomeUtil.HomeArea homeArea = home.get();
         boolean forcedExplorationReturn = this.playerNpc.hasExplorationReturnHomeRequest();
@@ -139,6 +149,18 @@ public class ReturnHomeGoal extends Goal {
         this.shelterReturn = this.shouldShelterAtHome(serverLevel);
         this.explorationRecoveryReturn = forcedExplorationReturn;
         this.homeSurfaceRecoveryReturn = forcedHomeSurfaceRecovery;
+        if ("ai.player_npc.terraforming_build_site".equals(this.playerNpc.getCurrentAiState())
+                && !this.shelterReturn
+                && !this.explorationRecoveryReturn
+                && !this.homeSurfaceRecoveryReturn) {
+            // Terraform retains its bounded cursor between actionable site blocks. An ordinary
+            // build/dig-site return must not take MOVE away mid-episode; combat and the explicit
+            // safety returns above still preempt through their higher-priority paths.
+            this.utilityReturn = false;
+            this.buildReturn = false;
+            this.completedStoneTripReturn = false;
+            return false;
+        }
         if (hasActiveSupplyRoute(this.playerNpc)
                 && !this.shelterReturn
                 && !this.explorationRecoveryReturn
@@ -151,7 +173,13 @@ public class ReturnHomeGoal extends Goal {
         // A build-readiness refresh scans blueprint/world state in admitted slices. It cannot make
         // this goal runnable while the NPC is already home or the ordinary return cooldown is
         // active, so avoid starting that work in those cases.
-        this.buildReturn = !miningShelterOnly
+        boolean deferForBuildMaterialGathering = this.shouldDeferUtilityReturnForBuildMaterialGathering(
+                serverLevel,
+                inventoryMostlyFull,
+                homeArea
+        );
+        this.buildReturn = !deferForBuildMaterialGathering
+                && !miningShelterOnly
                 && !insideHomeWorkArea
                 && this.playerNpc.getReturnHomeCooldown() <= 0
                 && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel);
@@ -183,6 +211,18 @@ public class ReturnHomeGoal extends Goal {
                 return false;
             }
             return true;
+        }
+        if (insideHomeWorkArea && this.hasReadyConstructionWork(serverLevel)) {
+            // Once safely back at the site, construction owns the builder turn. Continuing an
+            // ordinary shelter return to the exact center would let this priority-4 goal starve
+            // the priority-5 Terraform/BuildHouse goals.
+            this.utilityReturn = false;
+            this.buildReturn = false;
+            this.shelterReturn = false;
+            this.completedStoneTripReturn = false;
+            this.explorationRecoveryReturn = false;
+            this.homeSurfaceRecoveryReturn = false;
+            return false;
         }
         if (this.shelterReturn && distanceSqr > STOP_DISTANCE_SQR && !insideHomeWorkArea) {
             this.utilityReturn = false;
@@ -223,7 +263,7 @@ public class ReturnHomeGoal extends Goal {
             return false;
         }
 
-        if (this.shouldDeferUtilityReturnForBuildMaterialGathering(serverLevel, inventoryMostlyFull, homeArea)) {
+        if (deferForBuildMaterialGathering) {
             this.utilityReturn = false;
             this.buildReturn = false;
             this.shelterReturn = false;
@@ -284,6 +324,12 @@ public class ReturnHomeGoal extends Goal {
             return false;
         }
         if (this.shelterReturn && !this.shouldShelterAtHome(serverLevel)) {
+            return false;
+        }
+        if (this.shelterReturn
+                && this.hasReachedHomeWorkAreaSurface(this.homeArea)
+                && this.hasReadyConstructionWork(serverLevel)) {
+            this.constructionHandoff = true;
             return false;
         }
         if (!this.shelterReturn
@@ -369,6 +415,7 @@ public class ReturnHomeGoal extends Goal {
                 && (this.buildReturn
                 || this.completedStoneTripReturn
                 || this.homeSurfaceRecoveryReturn
+                || this.constructionHandoff
                 ? this.hasReachedHomeWorkAreaSurface(this.homeArea)
                 : this.hasReachedHomeCenter());
         if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
@@ -380,6 +427,7 @@ public class ReturnHomeGoal extends Goal {
                     || this.completedStoneTripReturn
                     || this.explorationRecoveryReturn
                     || this.homeSurfaceRecoveryReturn
+                    || this.constructionHandoff
                     ? 20 * 12 + this.playerNpc.getRandom().nextInt(20 * 12)
                     : 20 * 60 + this.playerNpc.getRandom().nextInt(20 * 60);
             this.playerNpc.setReturnHomeCooldown(cooldown);
@@ -412,6 +460,7 @@ public class ReturnHomeGoal extends Goal {
         this.completedStoneTripReturn = false;
         this.explorationRecoveryReturn = false;
         this.homeSurfaceRecoveryReturn = false;
+        this.constructionHandoff = false;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
     }
@@ -624,6 +673,12 @@ public class ReturnHomeGoal extends Goal {
                 || ExploreAroundGoal.isSupplyExplorationActive(playerNpc);
     }
 
+    private boolean hasReadyConstructionWork(ServerLevel serverLevel) {
+        return TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)
+                || BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel)
+                || BuildHouseGoal.isHomeBuildWorkSearchPending(this.playerNpc, serverLevel);
+    }
+
     private boolean inventoryMoreThanHalfFull() {
         int used = 0;
         for (int i = 0; i < this.playerNpc.getInventory().getContainerSize(); i++) {
@@ -661,7 +716,8 @@ public class ReturnHomeGoal extends Goal {
         boolean needsMaterialWork = this.needsBuildMaterialReserves()
                 || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, this.playerNpc)
                 || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, this.playerNpc)
-                || GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(this.playerNpc, serverLevel);
+                || GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(this.playerNpc, serverLevel)
+                || PlayerNpcBuildMaterialUtil.isMissingBuildMaterialSearchPending(this.playerNpc);
         if (!needsMaterialWork) {
             return false;
         }

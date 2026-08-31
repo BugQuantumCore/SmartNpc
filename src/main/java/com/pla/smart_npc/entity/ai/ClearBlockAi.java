@@ -47,7 +47,10 @@ public final class ClearBlockAi {
     private static final int MAX_RUNNING_CLEAR_STAND_PATHS = 1;
     private static final int RUNNING_STAND_SELECTION_RETRY_TICKS = 20;
     private static final int DENIED_PATH_RETRY_MAX_TICKS = 4;
-    private static final float CLEAR_STAND_PATH_NODE_MULTIPLIER = 0.25F;
+    // Clear-route recovery is optional local work. A quarter of the entity's unusually large
+    // path-node budget still measured at 133.8 ms in GatherStone.tick; keep each retained route
+    // attempt deliberately tiny and let the existing stand cursor try another candidate later.
+    private static final float CLEAR_STAND_PATH_NODE_MULTIPLIER = 0.005F;
     private static final int APPROACH_REPATH_INTERVAL_TICKS = 10;
     private static final int MAX_APPROACH_TICKS = 20 * 8;
     private static final int MAX_CLEAR_TARGET_TICKS = 20 * 15;
@@ -1098,6 +1101,15 @@ public final class ClearBlockAi {
     }
 
     private static boolean canBreakFromCurrentPosition(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockPos targetPos) {
+        return canBreakFromCurrentPosition(serverLevel, playerNpc, targetPos, false);
+    }
+
+    /** Cheap geometric/raycast preflight for callers that intentionally forbid clear-route A*. */
+    public static boolean canBreakFromCurrentStand(
+            ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
+            BlockPos targetPos
+    ) {
         return canBreakFromCurrentPosition(serverLevel, playerNpc, targetPos, false);
     }
 

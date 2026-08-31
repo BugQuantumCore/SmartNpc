@@ -39,11 +39,11 @@ public class ExploreAroundGoal extends Goal {
     private static final String LOG_EXPLORATION_DETAIL = "exploring for logs";
     private static final String STONE_EXPLORATION_DETAIL = "exploring for stone";
     private static final int[][] SEARCH_DISTANCE_BANDS = {
-            {32, 48},
-            {24, 32},
-            {12, 24},
-            {6, 12},
-            {0, 6}
+            {12, 18},
+            {9, 12},
+            {6, 9},
+            {3, 6},
+            {0, 3}
     };
     private static final int ATTEMPTS_PER_RADIUS = 1;
     private static final int MAX_EXPLORE_TICKS = 20 * 45;
@@ -71,6 +71,7 @@ public class ExploreAroundGoal extends Goal {
     private static final int BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL = 10;
     private static final int BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS = 1;
     private static final float EXPLORE_SELECTION_PATH_NODE_MULTIPLIER = 0.03F;
+    private static final float ACTIVE_EXPLORATION_PATH_NODE_MULTIPLIER = 0.05F;
     private static final double BUILDING_LOG_SCAN_RESET_DISTANCE_SQR = 4.0D * 4.0D;
     private static final int RETURN_HOME_REQUEST_TICKS = 20 * 120;
     private static final int RETURN_HOME_RETRY_COOLDOWN_TICKS = 20 * 15;
@@ -121,6 +122,7 @@ public class ExploreAroundGoal extends Goal {
     private int nextContinuePredicateCheckTick;
     private int nextEscapeRequestTick;
     private int subGoalProbeReadyTick = Integer.MIN_VALUE;
+    private boolean initialRoutePending;
     private boolean continuePredicatesAllowed = true;
     private boolean waitingForRetry;
     private BlockPos forcedDropTargetPos;
@@ -276,15 +278,18 @@ public class ExploreAroundGoal extends Goal {
                 this.subGoalProbeReadyTick = Integer.MIN_VALUE;
                 return false;
             }
-            if (this.subGoalProbeReadyTick != this.playerNpc.tickCount) {
-                // The resource predicate may have used its one path to prove there is no usable
-                // nearby target. Defer exploration selection so it cannot add a second path to
-                // the same admitted NPC tick. The cached predicate is cheap on the retry.
+            if (this.subGoalProbeReadyTick == Integer.MIN_VALUE) {
+                // Separate the bounded local supply probe from exploration target selection.
                 this.subGoalProbeReadyTick = this.playerNpc.tickCount + 1;
                 this.nextSearchTick = this.playerNpc.tickCount + 1;
                 this.canUseThrottle.retryIn(this.playerNpc, 1);
                 return false;
             }
+            if (this.playerNpc.tickCount < this.subGoalProbeReadyTick) {
+                return false;
+            }
+            // GoalSelector may next evaluate several ticks after the deadline. Readiness is a
+            // lower bound, never an exact-tick rendezvous that can be missed forever.
             this.subGoalProbeReadyTick = Integer.MIN_VALUE;
         } else {
             this.subGoalProbeReadyTick = Integer.MIN_VALUE;
@@ -311,6 +316,7 @@ public class ExploreAroundGoal extends Goal {
             this.scheduleRetry(serverLevel);
             return false;
         }
+        this.initialRoutePending = true;
         return this.targetPos != null;
     }
 
@@ -374,127 +380,146 @@ public class ExploreAroundGoal extends Goal {
 
     @Override
     public void start() {
-        if (LOG_EXPLORATION_DETAIL.equals(this.detail) || STONE_EXPLORATION_DETAIL.equals(this.detail)) {
-            ACTIVE_SUPPLY_EXPLORERS.add(this.playerNpc);
-        }
-        this.exploreTicks = 0;
-        this.repathTicks = 0;
-        this.routeFoliageClearBlockAi.stop();
-        this.routeFoliageToolAi.restoreMainHand();
-        this.skippedRouteFoliage.clear();
-        this.recentRouteNodes = List.of();
-        this.recentRouteTarget = null;
-        this.recentRouteSourcePath = null;
-        this.recentRouteSourceNextNode = -1;
-        this.requestedRouteFoliageClear = null;
-        this.recentRouteUntilTick = 0;
-        this.routeFoliageClearAttempts = 0;
-        this.stopExplorationSprint();
-        this.continuePredicatesAllowed = true;
-        this.nextContinuePredicateCheckTick = this.playerNpc.tickCount
-                + 1
-                + Math.floorMod(this.playerNpc.getUUID().hashCode(), CONTINUE_PREDICATE_INTERVAL_TICKS);
-        this.playerNpc.setCurrentAiState("ai.player_npc.exploring");
-        if (this.waitingForRetry) {
-            this.playerNpc.setCurrentAiDetail(this.retryDetail());
-            return;
-        }
-        if (this.forcedDropTargetPos != null && this.playerNpc.level() instanceof ServerLevel serverLevel) {
-            this.forcedDropTicks = Math.max(this.forcedDropTicks, MINING_LOG_COLUMN_DROP_TICKS);
-            this.tickMiningLogColumnDrop(serverLevel);
-            return;
-        }
-        this.startRandomMovementPace();
-        this.playerNpc.setCurrentAiDetail(this.failedClimbFallbackWalk
-                ? "walking after blocked exploration climb"
-                : this.detail);
-        if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
-            if (this.localWaterEscape) {
-                this.pathNavigationAi.tickLocalWaterEscape(serverLevel, this.speed);
+        try {
+            if (LOG_EXPLORATION_DETAIL.equals(this.detail) || STONE_EXPLORATION_DETAIL.equals(this.detail)) {
+                ACTIVE_SUPPLY_EXPLORERS.add(this.playerNpc);
+            }
+            this.exploreTicks = 0;
+            this.repathTicks = 0;
+            this.routeFoliageClearBlockAi.stop();
+            this.routeFoliageToolAi.restoreMainHand();
+            this.skippedRouteFoliage.clear();
+            this.recentRouteNodes = List.of();
+            this.recentRouteTarget = null;
+            this.recentRouteSourcePath = null;
+            this.recentRouteSourceNextNode = -1;
+            this.requestedRouteFoliageClear = null;
+            this.recentRouteUntilTick = 0;
+            this.routeFoliageClearAttempts = 0;
+            this.stopExplorationSprint();
+            this.continuePredicatesAllowed = true;
+            this.nextContinuePredicateCheckTick = this.playerNpc.tickCount
+                    + 1
+                    + Math.floorMod(this.playerNpc.getUUID().hashCode(), CONTINUE_PREDICATE_INTERVAL_TICKS);
+            this.playerNpc.setCurrentAiState("ai.player_npc.exploring");
+            if (this.waitingForRetry) {
+                this.playerNpc.setCurrentAiDetail(this.retryDetail());
                 return;
             }
-            this.moveToTarget(serverLevel);
+            if (this.forcedDropTargetPos != null && this.playerNpc.level() instanceof ServerLevel serverLevel) {
+                this.forcedDropTicks = Math.max(this.forcedDropTicks, MINING_LOG_COLUMN_DROP_TICKS);
+                this.tickMiningLogColumnDrop(serverLevel);
+                return;
+            }
+            this.startRandomMovementPace();
+            this.playerNpc.setCurrentAiDetail(this.failedClimbFallbackWalk
+                    ? "walking after blocked exploration climb"
+                    : this.detail);
+            if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
+                if (this.localWaterEscape) {
+                    this.pathNavigationAi.tickLocalWaterEscape(serverLevel, this.speed);
+                    return;
+                }
+                if (!this.initialRoutePending) {
+                    this.moveToTarget(serverLevel);
+                }
+            }
+        } finally {
+            this.applyActiveNavigationBudget();
         }
     }
 
     @Override
     public void tick() {
-        this.exploreTicks++;
-        if (this.targetPos == null) {
-            if (this.waitingForRetry) {
-                this.tickRetryWait();
-            }
-            return;
-        }
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
-            this.targetPos = null;
-            return;
-        }
-
-
-        if (this.localWaterEscape) {
-            if (this.pathNavigationAi.tickLocalWaterEscape(serverLevel, this.speed)) {
+        try {
+            this.exploreTicks++;
+            if (this.targetPos == null) {
+                if (this.waitingForRetry) {
+                    this.tickRetryWait();
+                }
                 return;
             }
-            this.targetPos = null;
-            this.localWaterEscape = false;
-            this.scheduleWaterEscapeRetry();
-            this.playerNpc.setCurrentAiDetail("water escape unavailable; backing off");
-            return;
-        }
+            if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+                this.targetPos = null;
+                return;
+            }
 
-        if (this.pathNavigationAi.tickWaterTravel(serverLevel, this.targetPos, this.speed)) {
-            return;
-        }
+            if (this.localWaterEscape) {
+                if (this.pathNavigationAi.tickLocalWaterEscape(serverLevel, this.speed)) {
+                    return;
+                }
+                this.targetPos = null;
+                this.localWaterEscape = false;
+                this.scheduleWaterEscapeRetry();
+                this.playerNpc.setCurrentAiDetail("water escape unavailable; backing off");
+                return;
+            }
 
-        if (this.forcedDropTargetPos != null) {
-            this.tickMiningLogColumnDrop(serverLevel);
-            return;
-        }
+            if (this.initialRoutePending) {
+                this.initialRoutePending = false;
+                this.moveToTarget(serverLevel);
+                this.repathTicks = REPATH_INTERVAL_TICKS;
+                return;
+            }
 
-        if (this.routeFoliageClearBlockAi.isRunning()) {
-            this.tickRouteFoliageClear(serverLevel);
-            return;
-        }
+            if (this.pathNavigationAi.tickWaterTravel(serverLevel, this.targetPos, this.speed)) {
+                return;
+            }
 
-        if (this.continueAcrossReachedTargets && this.distanceToTargetSqr() <= ARRIVAL_DISTANCE_SQR) {
-            this.continueFromReachedTarget(serverLevel);
-            return;
-        }
+            if (this.forcedDropTargetPos != null) {
+                this.tickMiningLogColumnDrop(serverLevel);
+                return;
+            }
 
-        this.rememberCurrentNavigationRoute();
-        boolean shouldRepath = this.repathTicks-- <= 0;
-        boolean navigationEnded = this.playerNpc.getNavigation().isDone()
-                || this.playerNpc.getNavigation().isStuck();
-        if (shouldRepath
-                && navigationEnded
-                && this.tryStartRouteFoliageClear(serverLevel, true)) {
-            this.repathTicks = REPATH_INTERVAL_TICKS;
-            return;
-        }
-        if (shouldRepath
-                && navigationEnded
-                && (this.playerNpc.getNavigation().getPath() == null || this.playerNpc.getNavigation().isStuck())
-                && !this.isGenuinelyLocalDescent(this.playerNpc.blockPosition(), this.targetPos)) {
-            this.playerNpc.setCurrentAiDetail("exploration route ended; choosing another target");
-            this.targetPos = null;
-            this.scheduleRetry(serverLevel);
-            return;
-        }
+            if (this.routeFoliageClearBlockAi.isRunning()) {
+                this.tickRouteFoliageClear(serverLevel);
+                return;
+            }
 
-        this.tickRandomMovementPace();
-        this.playerNpc.getLookControl().setLookAt(
-                this.targetPos.getX() + 0.5D,
-                this.targetPos.getY(),
-                this.targetPos.getZ() + 0.5D,
-                30.0F,
-                30.0F
-        );
-        if (shouldRepath && navigationEnded) {
-            this.moveToTarget(serverLevel);
-            this.repathTicks = REPATH_INTERVAL_TICKS;
-        } else if (shouldRepath) {
-            this.repathTicks = REPATH_INTERVAL_TICKS;
+            if (this.continueAcrossReachedTargets && this.distanceToTargetSqr() <= ARRIVAL_DISTANCE_SQR) {
+                this.continueFromReachedTarget(serverLevel);
+                return;
+            }
+
+            this.rememberCurrentNavigationRoute();
+            boolean shouldRepath = this.repathTicks-- <= 0;
+            boolean navigationEnded = this.playerNpc.getNavigation().isDone()
+                    || this.playerNpc.getNavigation().isStuck();
+            if (shouldRepath
+                    && navigationEnded
+                    && this.tryStartRouteFoliageClear(serverLevel, true)) {
+                this.repathTicks = REPATH_INTERVAL_TICKS;
+                return;
+            }
+            if (shouldRepath
+                    && navigationEnded
+                    && (this.playerNpc.getNavigation().getPath() == null || this.playerNpc.getNavigation().isStuck())
+                    && !this.isGenuinelyLocalDescent(this.playerNpc.blockPosition(), this.targetPos)) {
+                this.playerNpc.setCurrentAiDetail("exploration route ended; choosing another target");
+                this.targetPos = null;
+                this.scheduleRetry(serverLevel);
+                return;
+            }
+
+            this.tickRandomMovementPace();
+            this.playerNpc.getLookControl().setLookAt(
+                    this.targetPos.getX() + 0.5D,
+                    this.targetPos.getY(),
+                    this.targetPos.getZ() + 0.5D,
+                    30.0F,
+                    30.0F
+            );
+            if (shouldRepath && navigationEnded) {
+                this.moveToTarget(serverLevel);
+                this.repathTicks = REPATH_INTERVAL_TICKS;
+            } else if (shouldRepath) {
+                this.repathTicks = REPATH_INTERVAL_TICKS;
+            }
+        } finally {
+            // createBoundedPath deliberately restores the navigation default. Exploration keeps a
+            // smaller budget installed while it owns MOVE so vanilla delayed recomputation during
+            // PathfinderMob.super.tick cannot expand into a full 48-block synchronous search.
+            this.applyActiveNavigationBudget();
         }
     }
 
@@ -503,6 +528,7 @@ public class ExploreAroundGoal extends Goal {
         ACTIVE_SUPPLY_EXPLORERS.remove(this.playerNpc);
         this.targetPos = null;
         this.plannedTargetPath = null;
+        this.initialRoutePending = false;
         this.exploreTicks = 0;
         this.repathTicks = 0;
         this.retryWaitTicks = 0;
@@ -525,8 +551,17 @@ public class ExploreAroundGoal extends Goal {
         this.clearForcedDrop();
         this.pathStuckFallbackAi.stop();
         this.pathNavigationAi.stopWaterTravel();
+        // GoalSelector releases MOVE ownership without clearing PathNavigation's retained path.
+        // Stop the exploration route before restoring the default node budget, otherwise a later
+        // idle super.tick may synchronously recompute that stale long-range path at full cost.
+        this.playerNpc.getNavigation().stop();
+        this.playerNpc.getNavigation().resetMaxVisitedNodesMultiplier();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
+    }
+
+    private void applyActiveNavigationBudget() {
+        this.playerNpc.getNavigation().setMaxVisitedNodesMultiplier(ACTIVE_EXPLORATION_PATH_NODE_MULTIPLIER);
     }
 
     private BlockPos findReachableSurfaceTarget(ServerLevel serverLevel) {
@@ -557,37 +592,37 @@ public class ExploreAroundGoal extends Goal {
                 continue;
             }
 
-            Path path = PathNavigationAi.createBoundedPath(
-                    this.playerNpc,
-                    candidate,
-                    EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
-            );
-            boolean validPath = this.pathNavigationAi.isValidPathTo(candidate, path);
-            boolean localSafeDrop = this.isGenuinelyLocalDescent(center, candidate)
-                    && this.pathNavigationAi.canSafelyDropToLocalTarget(
-                    serverLevel,
-                    candidate,
-                    MAX_EXPLORE_SAFE_DROP_BLOCKS,
-                    2
-            );
-            if (validPath || localSafeDrop) {
-                this.plannedTargetPath = validPath ? path : null;
-                this.searchRadiusIndex = 0;
-                this.nextSearchTick = 0;
-                return candidate.immutable();
+            if (this.shouldUseBuildingSupplyLocalSurfaceFallback()) {
+                Path path = PathNavigationAi.createBoundedPath(
+                        this.playerNpc,
+                        candidate,
+                        EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
+                );
+                if (!this.pathNavigationAi.isExactPathTo(candidate, path)) {
+                    continue;
+                }
+                this.plannedTargetPath = path;
             }
+
+            this.searchRadiusIndex = 0;
+            this.nextSearchTick = 0;
+            return candidate.immutable();
         }
-        if (this.shouldUseBuildingLogLocalSurfaceFallback()) {
+        if (this.shouldUseBuildingSupplyLocalSurfaceFallback()) {
             return this.findBuildingLogLocalSurfaceTarget(serverLevel, center);
         }
         return null;
     }
 
-    private boolean shouldUseBuildingLogLocalSurfaceFallback() {
-        return LOG_EXPLORATION_DETAIL.equals(this.detail)
-                && this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
-                && this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
-                && this.playerNpc.shouldPrioritizeLogGathering();
+    private boolean shouldUseBuildingSupplyLocalSurfaceFallback() {
+        if (!this.playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || !this.playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
+            return false;
+        }
+        return (LOG_EXPLORATION_DETAIL.equals(this.detail)
+                && this.playerNpc.shouldPrioritizeLogGathering())
+                || (STONE_EXPLORATION_DETAIL.equals(this.detail)
+                && this.playerNpc.shouldPrioritizeCobblestoneGathering());
     }
 
     private BlockPos findBuildingLogLocalSurfaceTarget(ServerLevel serverLevel, BlockPos center) {
@@ -646,18 +681,22 @@ public class ExploreAroundGoal extends Goal {
         candidates.sort(Comparator
                 .comparingDouble((BlockPos pos) -> pos.distSqr(scanCenter))
                 .thenComparingInt(BlockPos::getY));
-        Optional<PathNavigationAi.ReachablePathCandidate> selected = this.pathNavigationAi.findReachablePathCandidate(
-                serverLevel,
-                candidates,
-                BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL,
-                BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS,
-                EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
-        );
-        if (selected.isEmpty()) {
-            return null;
+        int preferredCount = Math.min(BUILDING_LOG_LOCAL_SURFACE_RANDOM_POOL, candidates.size());
+        int start = preferredCount > 1 ? this.playerNpc.getRandom().nextInt(preferredCount) : 0;
+        int pathChecks = Math.min(BUILDING_LOG_LOCAL_SURFACE_PATH_CHECKS, preferredCount);
+        for (int offset = 0; offset < pathChecks; offset++) {
+            BlockPos candidate = candidates.get((start + offset) % preferredCount);
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    EXPLORE_SELECTION_PATH_NODE_MULTIPLIER
+            );
+            if (this.pathNavigationAi.isExactPathTo(candidate, path)) {
+                this.plannedTargetPath = path;
+                return candidate.immutable();
+            }
         }
-        this.plannedTargetPath = selected.get().path();
-        return selected.get().pos();
+        return null;
     }
 
     private boolean isSafeExploreTarget(ServerLevel serverLevel, BlockPos center, BlockPos pos) {

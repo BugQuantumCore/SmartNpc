@@ -1,5 +1,12 @@
 # Player NPC Inspector Item
 
+The shift-right-click-air overall view includes one concise `Search scope` line sourced from the
+server-scoped adaptive policy: current log footprint (`5x5`, `9x9`, or `11x11`), ore radius
+(`5`, `10`, or `15`), and building-material radius (`8`, `16`, or `32`). Worker auto status keeps
+the effective limit, exploration ceiling, baseline MSPT, and readable reason but omits internal
+growth/overload counters. Natural-population auto status likewise omits probe mode/progress while
+retaining effective population limits, baseline, reason, advisory/learned/exploration diagnostics.
+
 ## Source Files
 
 - `src/main/java/com/pla/smart_npc/item/InventoryViewerItem.java`
@@ -124,3 +131,4 @@ Do not convert inspectator view into a normal GUI screen unless the riding-playe
 Do not re-add a per-tick `CameraType.THIRD_PERSON_FRONT` force in active mode. The camera may start in third-person front, but F5 must remain user-controlled after activation.
 
 If cycling between NPCs changes, keep the server refresh request and local `inspectedEntityId` update together so the overlay and camera target do not desync.
+AI resource holder rows show the remaining NPC-level worker day shift as minutes/seconds. Holders span routine-goal transitions and normally rotate at overworld time 1000 (about 07:00), after the sleep/wake transition; invalid/dead/unloaded NPCs and excess holders after a limit reduction still release immediately.

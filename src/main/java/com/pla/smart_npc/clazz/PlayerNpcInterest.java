@@ -12,7 +12,8 @@ public enum PlayerNpcInterest {
     HUNT_VILLAGERS("Hunt Villagers"),
     TROLL_HIT("Troll Hit"),
     LOOTING("Looting"),
-    CAUTIOUS("Cautious");
+    CAUTIOUS("Cautious"),
+    CHEST_PROTECT("Chest Protect");
 
     private final String displayName;
 

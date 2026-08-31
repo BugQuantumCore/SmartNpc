@@ -4,6 +4,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.Heightmap;
+import com.pla.smart_npc.util.PlayerNpcAdaptiveSearchScope;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -29,6 +31,7 @@ public final class TreeAi {
     // deliberately small and let exploration move the observation center after a miss.
     private static final int MAX_SEARCH_BLOCK_READS = 50;
     private static final int MAX_LEAF_BLOCK_READS = 32;
+    private static final int LOCAL_FOOTPRINT_RADIUS = 2;
     private static final Map<Integer, List<ColumnOffset>> SEARCH_COLUMNS_BY_RADIUS = new HashMap<>();
 
     private TreeAi() {
@@ -40,6 +43,70 @@ public final class TreeAi {
 
     public static Optional<Tree> findNearest(ServerLevel serverLevel, BlockPos center, int radius, Predicate<BlockPos> allowedLogPos) {
         return findNearestSlice(serverLevel, center, radius, allowedLogPos, 0).tree();
+    }
+
+    /**
+     * Observes every loaded surface column in a 5x5 footprint around {@code center}.
+     *
+     * <p>The general retained search intentionally spends several reads down each column, so its
+     * 50-read slice may cover only five or six columns. Exploration needs a different guarantee:
+     * when an NPC walks beside a normal surface tree, it must inspect all 25 nearby columns before
+     * deciding to keep walking. The no-leaves heightmap normally points directly at the top log;
+     * tree expansion remains separately bounded and begins only after that one-read-per-column
+     * observation finds a log.</p>
+     */
+    public static Optional<Tree> findNearestLocalFootprint(
+            ServerLevel serverLevel,
+            BlockPos center,
+            Predicate<BlockPos> allowedLogPos
+    ) {
+        return findNearestLocalFootprintSlice(
+                serverLevel, center, LOCAL_FOOTPRINT_RADIUS, allowedLogPos, 0
+        ).tree();
+    }
+
+    /** One loaded-only surface slice for an adaptive, caller-retained nearby search episode. */
+    public static SearchSlice findNearestLocalFootprintSlice(
+            ServerLevel serverLevel,
+            BlockPos center,
+            int radius,
+            Predicate<BlockPos> allowedLogPos,
+            int startColumnIndex
+    ) {
+        List<ColumnOffset> columns = searchColumns(Math.max(LOCAL_FOOTPRINT_RADIUS, radius));
+        int columnIndex = Math.max(0, Math.min(startColumnIndex, columns.size()));
+        int endColumnIndex = Math.min(
+                columns.size(),
+                columnIndex + PlayerNpcAdaptiveSearchScope.MAX_COLUMNS_PER_SLICE
+        );
+        SearchBudget surfaceBudget = new SearchBudget(endColumnIndex - columnIndex);
+        for (; columnIndex < endColumnIndex; columnIndex++) {
+            ColumnOffset offset = columns.get(columnIndex);
+            BlockPos column = center.offset(offset.dx(), 0, offset.dz());
+            if (!serverLevel.hasChunkAt(column)) {
+                continue;
+            }
+            int topY = serverLevel.getHeight(
+                    Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                    column.getX(),
+                    column.getZ()
+            ) - 1;
+            BlockPos surface = new BlockPos(column.getX(), topY, column.getZ());
+            if (!isLog(serverLevel, surface, allowedLogPos, surfaceBudget)) {
+                continue;
+            }
+            Tree tree = scan(
+                    serverLevel,
+                    surface,
+                    new HashSet<>(),
+                    allowedLogPos,
+                    new SearchBudget(MAX_SEARCH_BLOCK_READS),
+                    new SearchBudget(MAX_LEAF_BLOCK_READS)
+            );
+            return new SearchSlice(Optional.of(tree), 0, true, columns.size());
+        }
+        boolean complete = columnIndex >= columns.size();
+        return new SearchSlice(Optional.empty(), complete ? 0 : columnIndex, complete, columns.size());
     }
 
     /**
@@ -79,8 +146,14 @@ public final class TreeAi {
             if (!serverLevel.hasChunkAt(column)) {
                 continue;
             }
-            for (int dy = -6; dy <= 18 && !searchBudget.exhausted(); dy++) {
-                BlockPos pos = center.offset(offset.dx(), dy, offset.dz());
+            int topY = serverLevel.getHeight(
+                    Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                    column.getX(),
+                    column.getZ()
+            ) - 1;
+            int bottomY = Math.max(serverLevel.getMinBuildHeight(), topY - 8);
+            for (int y = topY; y >= bottomY && !searchBudget.exhausted(); y--) {
+                BlockPos pos = new BlockPos(column.getX(), y, column.getZ());
                 if (visited.contains(pos) || !isLog(serverLevel, pos, allowedLogPos, searchBudget)) {
                     continue;
                 }
@@ -99,7 +172,7 @@ public final class TreeAi {
 
         Optional<Tree> result = Optional.ofNullable(bestTree != null ? bestTree : bestLooseLog);
         boolean complete = columnIndex >= columns.size();
-        return new SearchSlice(result, complete ? 0 : columnIndex, complete);
+        return new SearchSlice(result, complete ? 0 : columnIndex, complete, columns.size());
     }
 
     private static List<ColumnOffset> searchColumns(int radius) {
@@ -211,7 +284,7 @@ public final class TreeAi {
     private record ColumnOffset(int dx, int dz, int distanceSqr) {
     }
 
-    public record SearchSlice(Optional<Tree> tree, int nextColumnIndex, boolean complete) {
+    public record SearchSlice(Optional<Tree> tree, int nextColumnIndex, boolean complete, int totalColumns) {
     }
 
     private static final class SearchBudget {

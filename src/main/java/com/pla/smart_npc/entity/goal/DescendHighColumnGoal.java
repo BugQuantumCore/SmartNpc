@@ -7,6 +7,7 @@ import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -14,7 +15,10 @@ import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Optional;
 
 public class DescendHighColumnGoal extends Goal {
@@ -25,6 +29,8 @@ public class DescendHighColumnGoal extends Goal {
     private static final int LOWER_TERRAIN_RADIUS = 6;
     private static final int MIN_COLUMN_DROP_BLOCKS = 3;
     private static final int MAX_SOLID_SIDE_SUPPORTS = 1;
+    private static final int LOWER_TERRAIN_COLUMNS_PER_PASS = 4;
+    private static final List<BlockPos> LOWER_TERRAIN_OFFSETS = createLowerTerrainOffsets();
 
     private final PlayerNpcEntity playerNpc;
     private final TerraformBuildSiteGoal terraformBuildSiteGoal;
@@ -35,6 +41,8 @@ public class DescendHighColumnGoal extends Goal {
     private int goalTicks;
     private int descentSteps;
     private boolean finished;
+    private int lowerTerrainColumnCursor;
+    private BlockPos lowerTerrainSearchOrigin;
 
     public DescendHighColumnGoal(PlayerNpcEntity playerNpc, TerraformBuildSiteGoal terraformBuildSiteGoal) {
         this.playerNpc = playerNpc;
@@ -63,8 +71,17 @@ public class DescendHighColumnGoal extends Goal {
             return false;
         }
 
-        this.floorTarget = this.findDescendFloor(serverLevel);
-        return this.floorTarget != null;
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            this.floorTarget = this.findDescendFloor(serverLevel);
+            return this.floorTarget != null;
+        } finally {
+            PlayerNpcPerformanceMonitor.recordGoalWork(
+                    this.playerNpc,
+                    this.getClass().getSimpleName() + ".canUse",
+                    timing
+            );
+        }
     }
 
     @Override
@@ -210,28 +227,48 @@ public class DescendHighColumnGoal extends Goal {
     }
 
     private boolean hasLowerWalkableTerrainNearby(ServerLevel serverLevel, BlockPos feet) {
+        if (this.lowerTerrainSearchOrigin == null || !this.lowerTerrainSearchOrigin.equals(feet)) {
+            this.lowerTerrainSearchOrigin = feet.immutable();
+            this.lowerTerrainColumnCursor = 0;
+        }
+        int size = LOWER_TERRAIN_OFFSETS.size();
+        int checked = 0;
+        while (checked++ < LOWER_TERRAIN_COLUMNS_PER_PASS && this.lowerTerrainColumnCursor < size) {
+            BlockPos offset = LOWER_TERRAIN_OFFSETS.get(this.lowerTerrainColumnCursor++);
+            int x = feet.getX() + offset.getX();
+            int z = feet.getZ() + offset.getZ();
+            if (!serverLevel.hasChunk(x >> 4, z >> 4)) {
+                continue;
+            }
+            int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+            BlockPos candidate = new BlockPos(x, y, z);
+            if (feet.getY() - candidate.getY() >= MIN_COLUMN_DROP_BLOCKS
+                    && PathNavigationAi.canStandAt(serverLevel, candidate)) {
+                this.lowerTerrainColumnCursor = 0;
+                this.lowerTerrainSearchOrigin = null;
+                return true;
+            }
+        }
+        if (this.lowerTerrainColumnCursor >= size) {
+            this.lowerTerrainColumnCursor = 0;
+            this.lowerTerrainSearchOrigin = null;
+        }
+        return false;
+    }
+
+    private static List<BlockPos> createLowerTerrainOffsets() {
+        List<BlockPos> offsets = new ArrayList<>();
+        int radiusSqr = LOWER_TERRAIN_RADIUS * LOWER_TERRAIN_RADIUS;
         for (int dx = -LOWER_TERRAIN_RADIUS; dx <= LOWER_TERRAIN_RADIUS; dx++) {
             for (int dz = -LOWER_TERRAIN_RADIUS; dz <= LOWER_TERRAIN_RADIUS; dz++) {
-                if (dx == 0 && dz == 0) {
-                    continue;
-                }
-
                 int distanceSqr = dx * dx + dz * dz;
-                if (distanceSqr > LOWER_TERRAIN_RADIUS * LOWER_TERRAIN_RADIUS) {
-                    continue;
-                }
-
-                int x = feet.getX() + dx;
-                int z = feet.getZ() + dz;
-                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-                BlockPos candidate = new BlockPos(x, y, z);
-                if (feet.getY() - candidate.getY() >= MIN_COLUMN_DROP_BLOCKS
-                        && PathNavigationAi.canStandAt(serverLevel, candidate)) {
-                    return true;
+                if (distanceSqr > 0 && distanceSqr <= radiusSqr) {
+                    offsets.add(new BlockPos(dx, 0, dz));
                 }
             }
         }
-        return false;
+        offsets.sort(Comparator.comparingDouble(offset -> offset.distSqr(BlockPos.ZERO)));
+        return List.copyOf(offsets);
     }
 
     private void updateDetail() {

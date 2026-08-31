@@ -17,7 +17,8 @@ import java.util.List;
 public final class FarmStrollGoal extends Goal {
     private static final int OUTSIDE_RING_OFFSET = 2;
     private static final int OUTSIDE_VERTICAL_RANGE = 2;
-    private static final int MAX_PATH_CHECKS = 32;
+    private static final int MAX_PATH_CHECKS = 1;
+    private static final float FARM_STROLL_PATH_NODE_MULTIPLIER = 0.01F;
     private static final int MAX_STROLL_TICKS = 20 * 12;
     private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int MIN_RETRY_TICKS = 20 * 5;
@@ -31,6 +32,7 @@ public final class FarmStrollGoal extends Goal {
     private int strollTicks;
     private int repathTicks;
     private int nextAttemptTick;
+    private int targetCandidateCursor;
 
     public FarmStrollGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -128,8 +130,25 @@ public final class FarmStrollGoal extends Goal {
                 && !serverLevel.isNight()
                 && !serverLevel.isThundering()
                 && FarmAi.isFarmingJobActive(this.playerNpc)
-                && FarmCropGoal.isFullyPlantedOwnedFarm(this.playerNpc, serverLevel)
+                && (FarmCropGoal.isFullyPlantedOwnedFarm(this.playerNpc, serverLevel)
+                || this.shouldReturnToFarmForPlantingSupplies(serverLevel))
                 && !FarmCropGoal.hasActionableOwnedFarmWork(this.playerNpc, serverLevel);
+    }
+
+    private boolean shouldReturnToFarmForPlantingSupplies(ServerLevel serverLevel) {
+        if (!FarmCropGoal.shouldExploreForFarmSupplies(this.playerNpc, serverLevel)) {
+            return false;
+        }
+        Plan plan = FarmAi.getPlan(this.playerNpc, serverLevel).orElse(null);
+        if (plan == null) {
+            return false;
+        }
+        BlockPos feet = this.playerNpc.blockPosition();
+        int minX = plan.origin().getX() - OUTSIDE_RING_OFFSET;
+        int maxX = plan.origin().getX() + plan.width() - 1 + OUTSIDE_RING_OFFSET;
+        int minZ = plan.origin().getZ() - OUTSIDE_RING_OFFSET;
+        int maxZ = plan.origin().getZ() + plan.depth() - 1 + OUTSIDE_RING_OFFSET;
+        return feet.getX() < minX || feet.getX() > maxX || feet.getZ() < minZ || feet.getZ() > maxZ;
     }
 
     private BlockPos findTarget(ServerLevel serverLevel, Plan plan) {
@@ -157,8 +176,9 @@ public final class FarmStrollGoal extends Goal {
 
         List<BlockPos> unique = new ArrayList<>(candidates.stream().distinct().toList());
         int checks = 0;
-        while (!unique.isEmpty() && checks++ < MAX_PATH_CHECKS) {
-            BlockPos candidate = unique.remove(this.playerNpc.getRandom().nextInt(unique.size())).immutable();
+        int start = unique.isEmpty() ? 0 : Math.floorMod(this.targetCandidateCursor++, unique.size());
+        for (int offset = 0; offset < unique.size() && checks++ < MAX_PATH_CHECKS; offset++) {
+            BlockPos candidate = unique.get((start + offset) % unique.size()).immutable();
             BlockPos candidateGround = candidate.below();
             boolean explicitPath = plan.pathPositions().contains(candidateGround);
             if (candidate.equals(this.playerNpc.blockPosition())
@@ -167,7 +187,7 @@ public final class FarmStrollGoal extends Goal {
                     || plan.containsGround(candidateGround) && !explicitPath
                     || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, candidate)
                     || !PathNavigationAi.canStandAt(serverLevel, candidate)
-                    || !this.pathNavigationAi.hasExactPathTo(candidate)) {
+                    || !this.pathNavigationAi.hasExactPathTo(candidate, FARM_STROLL_PATH_NODE_MULTIPLIER)) {
                 continue;
             }
             return candidate;
@@ -177,7 +197,12 @@ public final class FarmStrollGoal extends Goal {
 
     private boolean moveToTarget(ServerLevel serverLevel) {
         return this.targetPos != null
-                && this.pathNavigationAi.moveToExact(serverLevel, this.targetPos, this.speed, 0);
+                && this.pathNavigationAi.moveToExact(
+                serverLevel,
+                this.targetPos,
+                this.speed,
+                0,
+                FARM_STROLL_PATH_NODE_MULTIPLIER);
     }
 
     private double distanceToTargetSqr() {
@@ -191,11 +216,15 @@ public final class FarmStrollGoal extends Goal {
     }
 
     private void updateDetail() {
+        String action = this.playerNpc.level() instanceof ServerLevel serverLevel
+                && !FarmCropGoal.isFullyPlantedOwnedFarm(this.playerNpc, serverLevel)
+                ? "returning to farm for planting supplies"
+                : "strolling around planted farm";
         if (this.targetPos == null) {
-            this.playerNpc.setCurrentAiDetail("strolling around planted farm");
+            this.playerNpc.setCurrentAiDetail(action);
             return;
         }
-        this.playerNpc.setCurrentAiDetail("strolling around planted farm @ "
+        this.playerNpc.setCurrentAiDetail(action + " @ "
                 + this.targetPos.getX() + " "
                 + this.targetPos.getY() + " "
                 + this.targetPos.getZ());

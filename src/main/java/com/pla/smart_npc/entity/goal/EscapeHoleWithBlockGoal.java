@@ -14,6 +14,7 @@ import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -70,6 +71,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int MAX_ROUTE_ESCAPE_BLOCKS = 96;
     private static final int MAX_GOAL_TICKS = 20 * 120;
     private static final int SEARCH_RADIUS = 5;
+    private static final List<BlockPos> ESCAPE_MATERIAL_OFFSETS = createEscapeMaterialOffsets();
     private static final double BREAK_DISTANCE_SQR = 3.0D * 3.0D;
     private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int MAX_FAILED_PATH_TICKS = 20 * 3;
@@ -77,12 +79,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int GATHER_PATH_RECOVERY_MAX_TICKS = 20 * 30;
     private static final int GATHER_PATH_FALLBACK_FAILED_COOLDOWN_TICKS = 20 * 30;
     private static final int PILLAR_SEARCH_RADIUS = 5;
-    private static final int MAX_PILLAR_PLAN_CANDIDATES = 16;
+    private static final int MAX_PILLAR_PLAN_CANDIDATES = 2;
     private static final int PILLAR_PLAN_RETRY_TICKS = 20;
     private static final int PILLAR_SURFACE_SCAN_UP = 96;
     private static final double PILLAR_BASE_REACHED_SQR = 1.2D * 1.2D;
     private static final int PILLAR_STUCK_MIN_TICKS = 20 * 5;
     private static final int PILLAR_STUCK_RECHECK_TICKS = 20 * 5;
+    private static final int FORCED_PILLAR_BASE_NO_PROGRESS_TICKS = 20;
+    private static final int MAX_FORCED_PILLAR_BASE_RECOVERIES = 3;
     private static final int PILLAR_CLEAR_RETURN_NO_PROGRESS_TICKS = 20;
     private static final int PILLAR_CLEAR_RETURN_FAILED_PATH_WEIGHT = 4;
     private static final double PILLAR_CENTER_EPSILON = 0.05D;
@@ -132,6 +136,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private final BreakingBlockAi breakingBlockAi;
     private final ClearBlockAi clearBlockAi;
     private final PathStuckFallbackAi gatherPathStuckFallbackAi;
+    private final PathStuckFallbackAi protectedPillarPathStuckFallbackAi;
     private EscapeMode mode = EscapeMode.NONE;
     private BlockPos placePos;
     private BlockPos minePos;
@@ -143,6 +148,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private BlockPos settlingPillarSupportPos;
     private BlockPos lastConfirmedPillarSupportPos;
     private BlockPos pillarStuckWatchPos;
+    private BlockPos forcedPillarBaseWatchFeet;
+    private BlockPos forcedPillarBaseWatchTarget;
     private BlockPos pillarClearReturnWatchPos;
     private BlockPos exitClearPos;
     private BlockPos explorationClimbStepOffWatchPos;
@@ -192,16 +199,20 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private int maxPillarBlocks;
     private int pillarsPlaced;
     private int nextPillarPlanTick;
+    private int pillarPlanCandidateCursor;
     private int failedPillarPlaceAttempts;
     private int pillarStuckWatchStartTick;
     private int nextPillarStuckRecoveryTick;
     private int pillarStuckWatchPillarsPlaced;
+    private int forcedPillarBaseWatchStartTick;
+    private int forcedPillarBaseRecoveryAttempts;
     private int pillarClearReturnNoProgressTicks;
     private int explorationClimbStepOffWatchStartTick;
     private int explorationClimbStepOffTicks;
     private boolean explorationClimbStepOffCompleted;
     private final Set<BlockPos> placedPillarSupports = new LinkedHashSet<>();
     private boolean usingTemporaryPickaxe;
+    private boolean protectedPillarReplanPending;
     private boolean usingTemporaryBlock;
     private boolean explorationClimbEpisode;
     private boolean finished;
@@ -213,6 +224,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
         this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
         this.gatherPathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
+        this.protectedPillarPathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.JUMP, Flag.LOOK));
     }
 
@@ -231,6 +243,19 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     @Override
     public boolean canUse() {
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            return this.canUseUnmeasured();
+        } finally {
+            PlayerNpcPerformanceMonitor.recordGoalWork(
+                    this.playerNpc,
+                    this.getClass().getSimpleName() + ".canUse",
+                    timing
+            );
+        }
+    }
+
+    private boolean canUseUnmeasured() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
@@ -302,7 +327,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
 
-        if (this.playerNpc.tickCount < this.nextPillarPlanTick && !requestedClimb) {
+        // A retained requested climb is not a reason to bypass the failed-plan cooldown. The
+        // request remains stored and is retried at the deadline; bypassing here rebuilt the full
+        // pillar plan on every GoalSelector activation pass in freshly generated terrain.
+        if (this.playerNpc.tickCount < this.nextPillarPlanTick) {
             return false;
         }
 
@@ -374,6 +402,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         if (escapeBlocks <= 0) {
+            // Keep a retained climb request, but do not rebuild the same pillar plan and rescan
+            // its material neighborhood on the next GoalSelector activation. A newly acquired
+            // block is still noticed after this short deadline, while first-world terrain does
+            // not repeatedly pay the synchronous plan cost for a currently impossible climb.
+            this.nextPillarPlanTick = this.playerNpc.tickCount + PILLAR_PLAN_RETRY_TICKS;
             return false;
         }
 
@@ -419,6 +452,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         if (this.mode == EscapeMode.PILLAR && this.pillarClearPos != null) {
+            return true;
+        }
+
+        if (this.mode == EscapeMode.PILLAR && this.protectedPillarPathStuckFallbackAi.isRunning()) {
+            return true;
+        }
+
+        if (this.mode == EscapeMode.PILLAR && this.protectedPillarReplanPending) {
             return true;
         }
 
@@ -478,6 +519,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.pillarsPlaced = 0;
         this.failedPillarPlaceAttempts = 0;
         this.resetPillarStuckWatch();
+        this.resetForcedPillarBaseWatch();
+        this.forcedPillarBaseRecoveryAttempts = 0;
         this.resetPillarClearReturnWatch();
         this.resetExplorationClimbStepOffWatch();
         this.clearExplorationClimbStepOff();
@@ -558,6 +601,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.playerNpc.clearBlockBreakProgress(this.exitClearPos);
         this.clearBlockAi.stop();
         this.gatherPathStuckFallbackAi.stop();
+        this.protectedPillarPathStuckFallbackAi.stop();
+        this.protectedPillarReplanPending = false;
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
         this.restorePreviousMainHand();
@@ -1038,10 +1083,17 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || plan.pathPositions().contains(pos)) {
             return false;
         }
-        if (pos.equals(plan.gatePos()) && state.getBlock() instanceof FenceGateBlock) {
-            return false;
+        if (pos.equals(plan.gatePos())
+                && (state.getBlock() instanceof FenceGateBlock || state.getBlock() instanceof FenceBlock)) {
+            return true;
         }
-        return !plan.isFencePosition(pos) || !(state.getBlock() instanceof FenceBlock);
+        // The candidate is already restricted to this owner's active egress corridor. Permit an
+        // expected fence there as a last-resort exit; the plan itself remains unchanged and farm
+        // setup will count/replace the missing fence afterward.
+        if (plan.isFencePosition(pos) && state.getBlock() instanceof FenceBlock) {
+            return true;
+        }
+        return !plan.isFencePosition(pos);
     }
 
     private boolean isFarmEgressClearTargetCooling(BlockPos pos) {
@@ -1581,6 +1633,24 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private void tickPillar(ServerLevel serverLevel) {
+        if (this.protectedPillarPathStuckFallbackAi.tick(serverLevel, "protected pillar reposition")) {
+            this.playerNpc.setCurrentAiDetail(
+                    this.protectedPillarPathStuckFallbackAi.detail("protected pillar reposition"));
+            return;
+        }
+        if (this.protectedPillarReplanPending) {
+            this.protectedPillarReplanPending = false;
+            BlockPos feet = this.playerNpc.blockPosition();
+            PillarPlan plan = this.findPillarPlan(serverLevel, feet, this.climbTargetPos);
+            if (plan == null || this.exceedsRequestedRouteMax(plan)) {
+                this.finished = true;
+                this.playerNpc.setCurrentAiDetail("protected pillar reposition found no safe retry");
+                return;
+            }
+            this.applyRecoveredPillarPlan(plan, "replanned pillar after protected obstruction");
+            this.beginPillarStep(serverLevel);
+            return;
+        }
         if (this.explorationClimbStepOffTargetPos != null) {
             this.tickExplorationClimbStepOff(serverLevel);
             return;
@@ -1619,9 +1689,13 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 if (this.tryStartStuckExplorationClimbStepOff(serverLevel)) {
                     return;
                 }
+                if (this.tryRecoverForcedPillarBase(serverLevel)) {
+                    return;
+                }
                 this.moveToPillarBase();
                 return;
             }
+            this.resetForcedPillarBaseWatch();
             if (this.playerNpc.onGround()) {
                 this.beginPillarStep(serverLevel);
             }
@@ -1645,7 +1719,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (this.placeWaitTicks > MAX_PLACE_WAIT_TICKS) {
             BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, this.playerNpc.blockPosition());
             if (obstruction != null) {
-                this.startPillarClearance(serverLevel, obstruction);
+                this.recoverOrStartPillarClearance(serverLevel, this.playerNpc.blockPosition(), obstruction);
                 return;
             }
             if (!this.playerNpc.onGround()) {
@@ -1679,7 +1753,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (!this.hasPillarPlacementClearance(serverLevel, this.placePos, pillarState)) {
             BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, this.playerNpc.blockPosition());
             if (obstruction != null && this.placeWaitTicks >= PILLAR_STUCK_MIN_TICKS) {
-                this.startPillarClearance(serverLevel, obstruction);
+                this.recoverOrStartPillarClearance(serverLevel, this.playerNpc.blockPosition(), obstruction);
                 return;
             }
             this.lookDownAt(this.placePos);
@@ -1697,7 +1771,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (!this.canPlacePillarWithoutClipping(serverLevel, this.placePos, pillarState)) {
             BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, this.playerNpc.blockPosition());
             if (obstruction != null) {
-                this.startPillarClearance(serverLevel, obstruction);
+                this.recoverOrStartPillarClearance(serverLevel, this.playerNpc.blockPosition(), obstruction);
                 return;
             }
             if (this.tryRecoverPillarPosition(serverLevel, this.playerNpc.blockPosition())) {
@@ -1754,7 +1828,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.nextPillarStuckRecoveryTick = this.playerNpc.tickCount + PILLAR_STUCK_RECHECK_TICKS;
         BlockPos obstruction = this.findPillarRecoveryObstruction(serverLevel, feet);
         if (obstruction != null) {
-            this.startPillarClearance(serverLevel, obstruction);
+            this.recoverOrStartPillarClearance(serverLevel, feet, obstruction);
             return true;
         }
 
@@ -1806,6 +1880,126 @@ public class EscapeHoleWithBlockGoal extends Goal {
         return this.tryMoveToAlternatePillarBase(serverLevel, feet);
     }
 
+    /**
+     * A forced home-surface request can select an adjacent pillar base whose navigation path ends
+     * one cell short. Since {@code placePos} is still null, the normal placed-pillar stuck watcher
+     * never runs and the goal used to retry that completed path indefinitely with an empty detail.
+     * After one bounded no-progress interval, prefer the NPC's current valid column, otherwise
+     * choose a different adjacent base instead of restarting the same failed route.
+     */
+    private boolean tryRecoverForcedPillarBase(ServerLevel serverLevel) {
+        if (!this.playerNpc.isForcedUpwardEscape()
+                || this.climbTargetPos == null
+                || this.pillarBasePos == null
+                || !this.playerNpc.onGround()) {
+            this.resetForcedPillarBaseWatch();
+            return false;
+        }
+        if (!this.playerNpc.getNavigation().isDone() && !this.playerNpc.getNavigation().isStuck()) {
+            this.resetForcedPillarBaseWatch();
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (!feet.equals(this.forcedPillarBaseWatchFeet)
+                || !this.pillarBasePos.equals(this.forcedPillarBaseWatchTarget)) {
+            this.forcedPillarBaseWatchFeet = feet.immutable();
+            this.forcedPillarBaseWatchTarget = this.pillarBasePos.immutable();
+            this.forcedPillarBaseWatchStartTick = this.playerNpc.tickCount;
+            this.updatePillarRecoveryDetail("waiting for pillar base route");
+            return true;
+        }
+        if (this.playerNpc.tickCount - this.forcedPillarBaseWatchStartTick
+                < FORCED_PILLAR_BASE_NO_PROGRESS_TICKS) {
+            this.updatePillarRecoveryDetail("waiting for pillar base route");
+            return true;
+        }
+
+        BlockPos stalledBase = this.pillarBasePos.immutable();
+        this.forcedPillarBaseRecoveryAttempts++;
+
+        // A completed one-node path commonly means the requested adjacent base was rejected
+        // because the NPC's current column has a body/head collider. Clear that collider through
+        // the normal protected pillar-clearance path before searching for another base. Without
+        // this handoff the route watcher can alternate adjacent bases for the whole goal lifetime.
+        BlockPos obstruction = this.findPillarObstruction(serverLevel, feet);
+        if (obstruction != null) {
+            this.forcedPillarBaseRecoveryAttempts = 0;
+            this.recoverOrStartPillarClearance(serverLevel, feet, obstruction);
+            return true;
+        }
+
+        PillarPlan currentPlan = this.createPillarPlan(serverLevel, feet, this.climbTargetPos);
+        if (currentPlan != null && !this.exceedsRequestedRouteMax(currentPlan)) {
+            this.forcedPillarBaseRecoveryAttempts = 0;
+            this.applyRecoveredPillarPlan(currentPlan, "using current pillar base");
+            this.beginPillarStep(serverLevel);
+            return true;
+        }
+        if (this.forcedPillarBaseRecoveryAttempts >= MAX_FORCED_PILLAR_BASE_RECOVERIES) {
+            return this.startForcedPillarBaseFallback(serverLevel);
+        }
+        if (this.tryMoveToAlternatePillarBase(serverLevel, feet, stalledBase, false)) {
+            this.resetForcedPillarBaseWatch();
+            return true;
+        }
+
+        this.forcedPillarBaseWatchStartTick = this.playerNpc.tickCount;
+        this.updatePillarRecoveryDetail("pillar base route blocked");
+        return true;
+    }
+
+    private boolean startForcedPillarBaseFallback(ServerLevel serverLevel) {
+        boolean repositioning = this.protectedPillarPathStuckFallbackAi.start(
+                serverLevel,
+                this.climbTargetPos,
+                "pillar base recovery",
+                pos -> FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)
+                        || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+        );
+        this.playerNpc.setCurrentAiDetail(
+                this.protectedPillarPathStuckFallbackAi.detail("pillar base recovery"));
+        this.forcedPillarBaseRecoveryAttempts = 0;
+        this.resetForcedPillarBaseWatch();
+        if (!repositioning) {
+            this.finished = true;
+            this.playerNpc.setCurrentAiDetail("pillar base recovery found no safe step-off");
+            return true;
+        }
+
+        this.placePos = null;
+        this.pillarBasePos = null;
+        this.pillarClearPos = null;
+        this.placeDelayTicks = 0;
+        this.placeWaitTicks = 0;
+        this.resetPillarStuckWatch();
+        this.protectedPillarReplanPending = true;
+        return true;
+    }
+
+    private void applyRecoveredPillarPlan(PillarPlan plan, String detail) {
+        int escapeBlocks = this.countEscapeBlocks();
+        this.pillarBasePos = plan.basePos();
+        this.pillarExitY = plan.exitY();
+        this.requiredEscapeBlocks = Math.max(1, plan.blocksNeeded());
+        this.maxPillarBlocks = Math.min(
+                escapeBlocks,
+                Math.max(1, Math.min(this.requiredEscapeBlocks, plan.blocksNeeded()))
+        );
+        this.placePos = null;
+        this.placeDelayTicks = 0;
+        this.placeWaitTicks = 0;
+        this.playerNpc.getNavigation().stop();
+        this.resetForcedPillarBaseWatch();
+        this.updatePillarRecoveryDetail(detail);
+    }
+
+    private void resetForcedPillarBaseWatch() {
+        this.forcedPillarBaseWatchFeet = null;
+        this.forcedPillarBaseWatchTarget = null;
+        this.forcedPillarBaseWatchStartTick = 0;
+    }
+
     private boolean tryCenterOnPillarBase(ServerLevel serverLevel) {
         if (this.placePos == null) {
             return false;
@@ -1841,11 +2035,26 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean tryMoveToAlternatePillarBase(ServerLevel serverLevel, BlockPos feet) {
+        return this.tryMoveToAlternatePillarBase(serverLevel, feet, null, false);
+    }
+
+    private boolean tryMoveToAlternatePillarBase(
+            ServerLevel serverLevel,
+            BlockPos feet,
+            @Nullable BlockPos avoidedBase,
+            boolean avoidBuildFootprintObstruction
+    ) {
         BlockPos routeTarget = this.climbTargetPos;
         for (Direction direction : this.directionsToward(feet, routeTarget == null ? feet.above() : routeTarget)) {
             BlockPos candidate = feet.relative(direction);
+            if (candidate.equals(avoidedBase)) {
+                continue;
+            }
             PillarPlan plan = this.createPillarPlan(serverLevel, candidate, routeTarget);
-            if (plan == null || routeTarget != null && this.exceedsRequestedRouteMax(plan)) {
+            if (plan == null
+                    || routeTarget != null && this.exceedsRequestedRouteMax(plan)
+                    || avoidBuildFootprintObstruction
+                    && this.hasBuildFootprintPillarObstruction(serverLevel, plan)) {
                 continue;
             }
 
@@ -1873,6 +2082,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.placedPillarSupports.clear();
             this.failedPillarPlaceAttempts = 0;
             this.resetPillarStuckWatch();
+            this.resetForcedPillarBaseWatch();
             this.playerNpc.getNavigation().moveTo(
                     plan.basePos().getX() + 0.5D,
                     plan.basePos().getY(),
@@ -1889,6 +2099,18 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return true;
         }
 
+        return false;
+    }
+
+    private boolean hasBuildFootprintPillarObstruction(ServerLevel serverLevel, PillarPlan plan) {
+        int topY = Math.min(plan.exitY() + 1, plan.basePos().getY() + 2);
+        for (int y = plan.basePos().getY(); y <= topY; y++) {
+            BlockPos pos = new BlockPos(plan.basePos().getX(), y, plan.basePos().getZ());
+            if (PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                    && this.blocksPillarSpace(serverLevel, pos, serverLevel.getBlockState(pos))) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -2299,7 +2521,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         BlockPos obstruction = this.findPillarObstruction(serverLevel, feet);
         if (obstruction != null) {
-            this.startPillarClearance(serverLevel, obstruction);
+            this.recoverOrStartPillarClearance(serverLevel, feet, obstruction);
             return;
         }
 
@@ -2432,6 +2654,51 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.mineTicks = 0;
         this.restorePreviousPillarMainHand();
         this.resetPillarClearReturnWatch();
+    }
+
+    private void recoverOrStartPillarClearance(
+            ServerLevel serverLevel,
+            BlockPos feet,
+            BlockPos obstruction
+    ) {
+        // A forced surface recovery is allowed to clear its own vertical corridor as a last
+        // resort, but first move to a genuinely open adjacent column so an existing house floor
+        // is not destroyed merely because the original base was one cell out of reach.
+        if (PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, obstruction)) {
+            if (this.tryMoveToAlternatePillarBase(
+                    serverLevel,
+                    feet,
+                    this.pillarBasePos,
+                    true)) {
+                return;
+            }
+            // A blueprint/home obstruction is never the generic pillar clear fallback. Move the
+            // NPC to a safe non-footprint surface stand, then let the retained forced request
+            // replan its pillar column. If no safe step-off exists, end this bounded episode and
+            // retry later instead of destroying the protected structure or holding MOVE forever.
+            boolean repositioning = this.protectedPillarPathStuckFallbackAi.start(
+                    serverLevel,
+                    this.climbTargetPos == null ? obstruction : this.climbTargetPos,
+                    "protected pillar reposition",
+                    pos -> PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+            );
+            this.playerNpc.setCurrentAiDetail(
+                    this.protectedPillarPathStuckFallbackAi.detail("protected pillar reposition"));
+            if (repositioning) {
+                this.placePos = null;
+                this.pillarBasePos = null;
+                this.pillarClearPos = null;
+                this.placeDelayTicks = 0;
+                this.placeWaitTicks = 0;
+                this.resetPillarStuckWatch();
+                this.resetForcedPillarBaseWatch();
+                this.protectedPillarReplanPending = true;
+            } else {
+                this.finished = true;
+            }
+            return;
+        }
+        this.startPillarClearance(serverLevel, obstruction);
     }
 
     private void startPillarClearance(ServerLevel serverLevel, BlockPos obstruction) {
@@ -2732,49 +2999,36 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private PillarPlan findPillarPlan(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
-        PillarPlan directPlan = this.findDirectPillarPlan(serverLevel, feet, routeTarget);
-        if (directPlan != null) {
-            return directPlan;
-        }
-
         List<BlockPos> candidates = new ArrayList<>();
         for (BlockPos pos : BlockPos.betweenClosed(
                 feet.offset(-PILLAR_SEARCH_RADIUS, -1, -PILLAR_SEARCH_RADIUS),
                 feet.offset(PILLAR_SEARCH_RADIUS, 2, PILLAR_SEARCH_RADIUS))) {
-            if (!pos.equals(feet)) {
-                candidates.add(pos.immutable());
-            }
+            candidates.add(pos.immutable());
         }
 
+        // The current column and its cardinal neighbours are already the nearest entries in this
+        // ordering. Previously findDirectPillarPlan synchronously inspected all five of them and
+        // this loop then inspected four more, so one unwrapped canUse pass could scan nine tall
+        // pillar corridors. Keep the documented two-candidate atomic bound and retain the cursor;
+        // a failed pass resumes at the next nearby columns after the normal retry cooldown.
         candidates.sort(Comparator
                 .comparingDouble(feet::distSqr)
                 .thenComparingDouble(pos -> routeTarget == null ? 0.0D : routeTarget.distSqr(pos)));
+        int start = candidates.isEmpty() ? 0 : Math.floorMod(this.pillarPlanCandidateCursor, candidates.size());
         int inspected = 0;
-        for (BlockPos base : candidates) {
-            if (inspected++ >= MAX_PILLAR_PLAN_CANDIDATES) {
-                break;
-            }
+        for (int offset = 0; offset < candidates.size()
+                && inspected < MAX_PILLAR_PLAN_CANDIDATES; offset++, inspected++) {
+            BlockPos base = candidates.get((start + offset) % candidates.size());
             PillarPlan plan = this.createPillarPlan(serverLevel, base, routeTarget);
             if (plan != null) {
+                this.pillarPlanCandidateCursor = 0;
                 return plan;
             }
         }
-
-        return null;
-    }
-
-    private PillarPlan findDirectPillarPlan(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
-        PillarPlan plan = this.createPillarPlan(serverLevel, feet.immutable(), routeTarget);
-        if (plan != null) {
-            return plan;
+        if (!candidates.isEmpty()) {
+            this.pillarPlanCandidateCursor = (start + inspected) % candidates.size();
         }
 
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            plan = this.createPillarPlan(serverLevel, feet.relative(direction), routeTarget);
-            if (plan != null) {
-                return plan;
-            }
-        }
         return null;
     }
 
@@ -2796,7 +3050,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         boolean requestedSurfaceRoute = !forcedRequestedRoute
                 && this.isRequestedSurfaceRoute(serverLevel, this.playerNpc.blockPosition(), routeTarget);
         int requestedSurfaceY = requestedSurfaceRoute ? this.nearbySurfaceY(serverLevel, routeTarget) : base.getY() + 1;
-        int scanTop = Math.min(serverLevel.getMaxBuildHeight() - 3, base.getY() + PILLAR_SURFACE_SCAN_UP);
+        int requestedRouteMax = this.getRequestedRouteMaxPillarBlocks();
+        int scanBlocks = requestedRouteMax > 0
+                ? Math.min(PILLAR_SURFACE_SCAN_UP, requestedRouteMax)
+                : PILLAR_SURFACE_SCAN_UP;
+        int scanTop = Math.min(serverLevel.getMaxBuildHeight() - 3, base.getY() + scanBlocks);
         for (int y = base.getY(); y <= scanTop; y++) {
             BlockPos feetAtY = new BlockPos(base.getX(), y, base.getZ());
             if (!serverLevel.hasChunkAt(feetAtY)) {
@@ -3117,12 +3375,17 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private EscapeMaterialTarget findEscapeMaterialTarget(ServerLevel serverLevel) {
-        List<EscapeMaterialTarget> candidates = new ArrayList<>();
         BlockPos center = this.playerNpc.blockPosition();
 
-        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-SEARCH_RADIUS, -2, -SEARCH_RADIUS), center.offset(SEARCH_RADIUS, 3, SEARCH_RADIUS))) {
-            BlockPos immutable = pos.immutable();
+        // This used to inspect the entire 11x6x11 volume, allocate every valid target/stand pair,
+        // sort the whole result, and only then choose the nearest block. Runtime warnings measured
+        // 158-185 ms in this exact gather-block phase. Iterate a cached nearest-first offset list
+        // and stop at the first usable target; the selected result is identical to the old primary
+        // distance ordering without paying for farther candidates.
+        for (BlockPos offset : ESCAPE_MATERIAL_OFFSETS) {
+            BlockPos immutable = center.offset(offset).immutable();
             if (immutable.equals(center.below())
+                    || !serverLevel.hasChunkAt(immutable)
                     || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, immutable)
                     || !this.canGatherEscapeMaterial(serverLevel.getBlockState(immutable))) {
                 continue;
@@ -3130,18 +3393,26 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
             BlockPos stand = this.findStandPos(serverLevel, immutable);
             if (stand != null) {
-                candidates.add(new EscapeMaterialTarget(immutable, stand));
+                return new EscapeMaterialTarget(immutable, stand);
             }
         }
+        return null;
+    }
 
-        if (candidates.isEmpty()) {
-            return null;
+    private static List<BlockPos> createEscapeMaterialOffsets() {
+        List<BlockPos> offsets = new ArrayList<>((SEARCH_RADIUS * 2 + 1) * 6 * (SEARCH_RADIUS * 2 + 1));
+        for (int dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; dx++) {
+            for (int dy = -2; dy <= 3; dy++) {
+                for (int dz = -SEARCH_RADIUS; dz <= SEARCH_RADIUS; dz++) {
+                    offsets.add(new BlockPos(dx, dy, dz));
+                }
+            }
         }
-
-        candidates.sort(Comparator
-                .comparingDouble((EscapeMaterialTarget target) -> center.distSqr(target.targetPos()))
-                .thenComparingDouble(target -> center.distSqr(target.standPos())));
-        return candidates.get(0);
+        offsets.sort(Comparator
+                .comparingDouble((BlockPos offset) -> offset.distSqr(BlockPos.ZERO))
+                .thenComparingInt(offset -> Math.abs(offset.getY()))
+                .thenComparingInt(BlockPos::getY));
+        return List.copyOf(offsets);
     }
 
     private BlockPos findStandPos(ServerLevel serverLevel, BlockPos target) {
@@ -3822,7 +4093,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 return false;
             }
         }
-        return !this.hasLocalWalkingEscape(serverLevel, feet);
+        // With all four cardinal body-space cells blocked there is no legal first walking step
+        // from the current cell. The former radius-four flood could therefore only confirm the
+        // same answer while performing hundreds of collision/shape reads inside vanilla
+        // GoalSelector time (reported as unwrapped super.tick).
+        return true;
     }
 
     private boolean hasLocalWalkingEscape(ServerLevel serverLevel, BlockPos feet) {
@@ -4094,6 +4369,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         setEscapeMode(EscapeMode.NONE);
         this.clearBlockAi.stop();
         this.gatherPathStuckFallbackAi.stop();
+        this.protectedPillarPathStuckFallbackAi.stop();
+        this.protectedPillarReplanPending = false;
         this.resetFarmEgressNavigation();
         this.resetFarmEgressClearContext();
         this.farmEgressNavigationBlockedThisTick = false;
@@ -4107,6 +4384,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.pillarBasePos = null;
         this.pillarClearPos = null;
         this.pillarStuckWatchPos = null;
+        this.forcedPillarBaseWatchFeet = null;
+        this.forcedPillarBaseWatchTarget = null;
         this.pillarClearReturnWatchPos = null;
         this.exitClearPos = null;
         this.explorationClimbStepOffWatchPos = null;
@@ -4136,6 +4415,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.pillarStuckWatchStartTick = 0;
         this.nextPillarStuckRecoveryTick = 0;
         this.pillarStuckWatchPillarsPlaced = 0;
+        this.forcedPillarBaseWatchStartTick = 0;
+        this.forcedPillarBaseRecoveryAttempts = 0;
         this.pillarClearReturnNoProgressTicks = 0;
         this.explorationClimbStepOffWatchStartTick = 0;
         this.explorationClimbStepOffTicks = 0;

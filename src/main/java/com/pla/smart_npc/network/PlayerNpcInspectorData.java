@@ -3,6 +3,8 @@ package com.pla.smart_npc.network;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcBuildStatusUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
+import com.pla.smart_npc.util.PlayerNpcAdaptiveSearchScope;
+import com.pla.smart_npc.util.PlayerNpcForceTickManager;
 import com.pla.smart_npc.util.PlayerNpcNaturalSpawnCap;
 import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.network.chat.Component;
@@ -68,7 +70,9 @@ public final class PlayerNpcInspectorData {
 
     public static String createAiResourceText(MinecraftServer server, PlayerNpcEntity selectedNpc) {
         PlayerNpcAiWorkBudget.ResourceSnapshot snapshot = PlayerNpcAiWorkBudget.resourceSnapshot(server);
+        PlayerNpcForceTickManager.ForceTickSnapshot forceTicks = PlayerNpcForceTickManager.forceTickSnapshot(server);
         PlayerNpcNaturalSpawnCap.SpawnCapSnapshot spawnCap = PlayerNpcNaturalSpawnCap.snapshot(server);
+        PlayerNpcAdaptiveSearchScope.SearchScopeSnapshot searchScope = PlayerNpcAdaptiveSearchScope.snapshot(server);
         List<PlayerNpcAiWorkBudget.ResourceHolder> holders = snapshot.holders();
         StringBuilder text = new StringBuilder(512);
         if (selectedNpc != null) {
@@ -78,6 +82,9 @@ public final class PlayerNpcInspectorData {
                     .orElse(null);
             text.append("Selected: ").append(bounded(selectedNpc.getDisplayName().getString()));
             text.append(selectedHolder == null ? " [no resource]" : " [" + roles(selectedHolder) + "]");
+            text.append(PlayerNpcForceTickManager.hasForceTicket(selectedNpc.getUUID())
+                    ? " [force ticket]"
+                    : " [normal ticking]");
             text.append('\n');
         }
         text.append("Holders ").append(holders.size())
@@ -88,6 +95,21 @@ public final class PlayerNpcInspectorData {
         if (!automaticWorkerStatus.isBlank()) {
             text.append('\n').append("  Worker auto: ").append(automaticWorkerStatus);
         }
+        text.append('\n').append("Force tickets ").append(forceTicks.modeText())
+                .append(" | used ").append(forceTicks.usedSlots())
+                .append('/').append(forceTicks.effectiveSlots())
+                .append(" | workers ").append(forceTicks.workerTicketCount())
+                .append(" | available ").append(forceTicks.eligibleNpcCount())
+                .append(" | known ").append(forceTicks.knownNpcCount());
+        if (forceTicks.automatic()) {
+            text.append('\n').append("  Force auto: baseline ")
+                    .append(String.format(java.util.Locale.ROOT, "%.1fms", forceTicks.baselineMspt()))
+                    .append(" | exploration max ").append(forceTicks.capabilityLimit())
+                    .append(" | ").append(forceTicks.reason().replace('_', ' '));
+            if (forceTicks.handoffProtectionActive()) {
+                text.append(" | worker handoff prefetch");
+            }
+        }
         text.append('\n').append("NPC population ").append(spawnCap.livingCount())
                 .append(" | natural max ").append(spawnCap.effectiveLimit())
                 .append(spawnCap.automatic() ? " (auto)" : " (fixed)")
@@ -96,9 +118,6 @@ public final class PlayerNpcInspectorData {
         if (spawnCap.automatic()) {
             text.append('\n').append("  Auto: baseline ")
                     .append(String.format(java.util.Locale.ROOT, "%.1fms", spawnCap.baselineMspt()))
-                    .append(" | probe ").append(spawnCap.probeMode().replace('_', ' '))
-                    .append(' ').append(spawnCap.healthyEvaluationCount())
-                    .append('/').append(spawnCap.healthyEvaluationsRequired())
                     .append(" | ").append(spawnCap.reason().replace('_', ' '));
             text.append('\n').append("  Limits: advisory forecast ")
                     .append(spawnCap.advisoryForecastLimit() > 0
@@ -107,6 +126,10 @@ public final class PlayerNpcInspectorData {
                     .append(" | learned safe ").append(spawnCap.learnedSafeLimit())
                     .append(" | exploration max ").append(spawnCap.explorationLimit());
         }
+        text.append('\n').append("Search scope: logs ")
+                .append(searchScope.logFootprintWidth()).append('x').append(searchScope.logFootprintWidth())
+                .append(" | ores radius ").append(searchScope.oreRadius())
+                .append(" | build materials radius ").append(searchScope.buildMaterialRadius());
         text.append('\n').append(PlayerNpcPerformanceMonitor.createInspectorText());
 
         int shown = Math.min(MAX_RESOURCE_HOLDERS, holders.size());
@@ -122,12 +145,20 @@ public final class PlayerNpcInspectorData {
             }
             text.append('\n').append(selected ? "> " : "- ")
                     .append(bounded(name)).append(" [").append(roles(holder)).append(']')
+                    .append(" shift ").append(formatShiftRemaining(holder.shiftRemainingTicks()))
                     .append('\n').append("  ").append(bounded(state)).append(" - ").append(bounded(detail));
         }
         if (holders.size() > shown) {
             text.append('\n').append('+').append(holders.size() - shown).append(" more holders");
         }
         return text.toString();
+    }
+
+    private static String formatShiftRemaining(long ticks) {
+        long seconds = Math.max(0L, ticks / 20L);
+        long minutes = seconds / 60L;
+        long remainingSeconds = seconds % 60L;
+        return minutes + "m" + remainingSeconds + "s";
     }
 
     private static PlayerNpcEntity resolveHolder(MinecraftServer server, PlayerNpcAiWorkBudget.ResourceHolder holder) {

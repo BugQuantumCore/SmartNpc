@@ -84,6 +84,7 @@ public class MiningNightCampGoal extends Goal {
     private static final int RESOURCELESS_NIGHT_WALK_NO_PROGRESS_TICKS = 20 * 2;
     private static final int RESOURCELESS_NIGHT_WALK_MIN_DISTANCE_SQR = 2 * 2;
     private static final int CAN_USE_CHECK_INTERVAL_TICKS = 40;
+    private static final int CONTINUE_CONTEXT_CHECK_INTERVAL_TICKS = 20;
     private static final String CAMP_FURNACE_X = "PlayerNpcNightCampFurnaceX";
     private static final String CAMP_FURNACE_Y = "PlayerNpcNightCampFurnaceY";
     private static final String CAMP_FURNACE_Z = "PlayerNpcNightCampFurnaceZ";
@@ -134,6 +135,8 @@ public class MiningNightCampGoal extends Goal {
     private boolean returnTemporaryMainHandOnRestore;
     private boolean reusableCampAnchor;
     private boolean resourcelessNightWalkActive;
+    private int nextContinueContextCheckTick;
+    private boolean cachedContinueContext = true;
 
     public MiningNightCampGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -325,13 +328,7 @@ public class MiningNightCampGoal extends Goal {
                 && !this.playerNpc.isInWaterOrBubble()
                 && this.playerNpc.getUpwardEscapeTarget() == null
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
-                && (this.buildingBootstrapCamp
-                ? isBuildingBootstrapNightCamp(this.playerNpc, serverLevel)
-                : this.farmingBootstrapCamp
-                        ? isFarmingBootstrapNightContext(this.playerNpc, serverLevel)
-                        : this.furnaceMode == FurnaceMode.RECOVER
-                        || shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
-                        || this.hasOwnedCampFurnaceReference());
+                && this.hasCachedContinueContext(serverLevel);
     }
 
     @Override
@@ -351,6 +348,9 @@ public class MiningNightCampGoal extends Goal {
         this.lookTicks = 0;
         this.repathTicks = 0;
         this.farmingBootstrapPlanCheckTicks = 0;
+        this.cachedContinueContext = true;
+        this.nextContinueContextCheckTick = this.playerNpc.tickCount
+                + CONTINUE_CONTEXT_CHECK_INTERVAL_TICKS;
         this.walkTarget = null;
         this.walkSneaking = false;
         this.playerNpc.getNavigation().stop();
@@ -455,6 +455,22 @@ public class MiningNightCampGoal extends Goal {
         }
         this.stopResourcelessMiningNightWalk();
         this.tickCampActivity(serverLevel);
+    }
+
+    private boolean hasCachedContinueContext(ServerLevel serverLevel) {
+        if (this.playerNpc.tickCount < this.nextContinueContextCheckTick) {
+            return this.cachedContinueContext;
+        }
+        this.nextContinueContextCheckTick = this.playerNpc.tickCount
+                + CONTINUE_CONTEXT_CHECK_INTERVAL_TICKS;
+        this.cachedContinueContext = this.buildingBootstrapCamp
+                ? isBuildingBootstrapNightCamp(this.playerNpc, serverLevel)
+                : this.farmingBootstrapCamp
+                        ? isFarmingBootstrapNightContext(this.playerNpc, serverLevel)
+                        : this.furnaceMode == FurnaceMode.RECOVER
+                        || shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)
+                        || this.hasOwnedCampFurnaceReference();
+        return this.cachedContinueContext;
     }
 
     @Override
@@ -2154,6 +2170,8 @@ public class MiningNightCampGoal extends Goal {
         this.returnTemporaryMainHandOnRestore = false;
         this.reusableCampAnchor = false;
         this.resourcelessNightWalkActive = false;
+        this.cachedContinueContext = true;
+        this.nextContinueContextCheckTick = 0;
     }
 
     private enum FurnaceMode {

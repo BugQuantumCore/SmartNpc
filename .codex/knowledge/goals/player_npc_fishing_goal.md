@@ -30,6 +30,10 @@ Fishing uses support supplies to bootstrap a missing rod and its stone support. 
 3. Craft the missing rod or use an existing carried rod.
 4. Search for reachable water and fish.
 
+Fishing profiles receive 3-7 starter string on a normal new spawn. A persisted, versioned migration repairs legacy fishers whose carried string reserve is below the two required by the rod recipe; it adds only the missing amount and never supplies unrelated NPCs. This also leaves a fisher that currently has a rod with one replacement recipe rather than waiting for the rod to break before discovering that its old starter supply was lost. The compatibility repair is independent of the routine worker scheduler and does not gate or replace the fishing job.
+
+Home storage must not strand that bootstrap. `ManageHomeBaseGoal` keeps fishing rods and string carried by a FISHING profile rather than depositing them during half-full inventory cleanup. `CheckHomeSuppliesGoal` also treats a missing rod or a carried string reserve below two as urgent supply needs, so rods/string deposited by an older build can be recovered from the NPC's owned chest on the short missing-tool recheck cadence.
+
 Fishing arbitration uses `GatherLogsGoal.isLogGatheringEpisodeActive(...)` plus the shared gather cooldown. An already selected log route keeps control until it finishes, and a retry-ready supply demand gets one attempt. If the attempt finds no actionable target and sets `gatherCooldown`, a carried rod can fish or explore for water instead of idling until that reserve is met. A genuinely missing/broken rod still blocks fishing and permits log gathering when rod crafting needs wood.
 
 `CraftBasicGearGoal` may craft a missing fishing rod after critical starter tools are handled and after the active stone-support phase has closed. Do not treat rod crafting as the blocker when the NPC already carries or holds a usable rod; then the remaining blockers are support supplies, water search, navigation, or climb/escape handling.

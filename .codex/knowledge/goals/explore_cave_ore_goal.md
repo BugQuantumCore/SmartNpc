@@ -1,5 +1,12 @@
 # ExploreCaveOreGoal
 
+Ore discovery freezes the shared adaptive radius (5/10/15) when the NPC starts or moves its search
+episode. Each admitted pass reads at most 32 loaded positions from the retained nearest-distributed
+cursor. Partial misses retry promptly and are not stored in the 20-tick nearby-ore negative cache;
+completed misses and positive hits retain the normal cache cadence. Exploration movement supplies
+wide-area coverage without restoring the old atomic radius-15 volume; healthy load still preserves
+the full radius-15 reach over retained slices.
+
 ## Source
 
 - `src/main/java/com/pla/smart_npc/entity/goal/ExploreCaveOreGoal.java`

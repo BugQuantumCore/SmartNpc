@@ -13,7 +13,10 @@ import net.minecraft.world.entity.ai.goal.Goal;
 public final class StartupWorkGatedGoal extends Goal {
     public static final int SERVER_STARTUP_GRACE_TICKS = 60;
     public static final int MAX_RELEASE_STAGGER_TICKS = 60;
-    public static final int ROUTINE_PROBE_SLICES = 4;
+    // GoalSelector evaluates new goals every three ticks. Eight slices keep continuation fully
+    // responsive while preventing one idle worker from polling several expensive job predicates
+    // in the same selector pass (a full idle sweep still completes in roughly 1.2 seconds).
+    public static final int ROUTINE_PROBE_SLICES = 8;
 
     private final PlayerNpcEntity playerNpc;
     private final Goal delegate;

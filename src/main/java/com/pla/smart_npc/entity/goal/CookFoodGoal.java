@@ -6,6 +6,7 @@ import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.FurnaceAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
@@ -47,6 +48,7 @@ public class CookFoodGoal extends Goal {
     private static final int MAX_RECOVER_FURNACE_TICKS = 20 * 10;
     private static final int MAX_COOK_TICKS = 20 * 30;
     private static final int MOVEMENT_REPATH_TICKS = 20;
+    private static final float FURNACE_PATH_NODE_MULTIPLIER = 0.01F;
 
     private final PlayerNpcEntity playerNpc;
     private final ToolAi toolAi;
@@ -619,13 +621,10 @@ public class CookFoodGoal extends Goal {
             if (immutable.equals(center)) {
                 return immutable;
             }
-            Path path = this.playerNpc.getNavigation().createPath(immutable, 0);
-            if (path != null
-                    && path.canReach()
-                    && path.getEndNode() != null
-                    && path.getEndNode().asBlockPos().equals(immutable)) {
-                return immutable;
-            }
+            // Eligibility chooses a physical interaction stand only. The running movement phase
+            // owns the single bounded route so canUse never builds one PathNavigationRegion per
+            // furnace/placement candidate.
+            return immutable;
         }
         return null;
     }
@@ -661,7 +660,11 @@ public class CookFoodGoal extends Goal {
             return true;
         }
         this.movementRepathTicks = MOVEMENT_REPATH_TICKS;
-        Path path = this.playerNpc.getNavigation().createPath(this.furnaceStandPos, 0);
+        Path path = PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                this.furnaceStandPos,
+                FURNACE_PATH_NODE_MULTIPLIER
+        );
         if (path == null
                 || !path.canReach()
                 || path.getEndNode() == null

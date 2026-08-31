@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.event.PlayerNpcChestProtectEvent;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
 import com.pla.smart_npc.util.PlayerNpcBuildLayoutLoader;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
@@ -195,11 +196,12 @@ public final class ChestAi {
         return remainder;
     }
 
-    public static void openChest(ServerLevel serverLevel, BlockPos pos) {
+    public static void openChest(ServerLevel serverLevel, BlockPos pos, PlayerNpcEntity opener) {
         if (!serverLevel.getBlockState(pos).is(Blocks.CHEST)) {
             return;
         }
 
+        PlayerNpcChestProtectEvent.reportOffense(serverLevel, pos, opener, "opened");
         serverLevel.blockEvent(pos, Blocks.CHEST, 1, 1);
         serverLevel.playSound(null, pos, SoundEvents.CHEST_OPEN, SoundSource.BLOCKS, 0.5F, 1.0F);
     }

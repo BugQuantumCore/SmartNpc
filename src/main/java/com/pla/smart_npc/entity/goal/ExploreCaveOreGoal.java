@@ -11,6 +11,7 @@ import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
+import com.pla.smart_npc.util.PlayerNpcAdaptiveSearchScope;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
@@ -45,11 +46,12 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 public class ExploreCaveOreGoal extends Goal {
-    private static final int SEARCH_RADIUS = 15;
     private static final int LOCAL_RESOURCE_RADIUS = 96;
     private static final int SEARCH_DOWN = 15;
     private static final int SEARCH_UP = 15;
-    private static final int MAX_ORE_SCAN_BLOCKS_PER_ATTEMPT = 512;
+    // The cursor preserves complete eventual coverage; keep each admitted activation below the
+    // repeatedly measured 31-51 ms half-thousand-block scan.
+    private static final int MAX_ORE_SCAN_BLOCKS_PER_ATTEMPT = 32;
     private static final int MAX_ORE_TARGET_PATH_CHECKS = 6;
     private static final int MAX_ORE_SELECTION_NAVIGATION_PATHS = 1;
     private static final int MAX_CLUSTER_TARGET_CHECKS = 12;
@@ -87,7 +89,14 @@ public class ExploreCaveOreGoal extends Goal {
     private static final int IDLE_BLOCK_TRACE_TICKS = 20 * 20;
     private static final int GEAR_PRIORITY_RECHECK_TICKS = 20;
     private static final int CONTINUE_ELIGIBILITY_RECHECK_TICKS = 20;
-    private static final List<BlockPos> ORE_SEARCH_OFFSETS = createOreSearchOffsets();
+    private static final Map<Integer, List<BlockPos>> ORE_SEARCH_OFFSETS = Map.of(
+            PlayerNpcAdaptiveSearchScope.ORE_LOCAL_RADIUS,
+            createOreSearchOffsets(PlayerNpcAdaptiveSearchScope.ORE_LOCAL_RADIUS),
+            PlayerNpcAdaptiveSearchScope.ORE_NORMAL_RADIUS,
+            createOreSearchOffsets(PlayerNpcAdaptiveSearchScope.ORE_NORMAL_RADIUS),
+            PlayerNpcAdaptiveSearchScope.ORE_HEALTHY_RADIUS,
+            createOreSearchOffsets(PlayerNpcAdaptiveSearchScope.ORE_HEALTHY_RADIUS)
+    );
     private static final Map<PlayerNpcEntity, NearbyOreProbe> NEARBY_ORE_PROBES = new WeakHashMap<>();
 
     private final PlayerNpcEntity playerNpc;
@@ -121,6 +130,7 @@ public class ExploreCaveOreGoal extends Goal {
     private int torchPlaceTicks;
     private int nextOreSearchTick;
     private int oreSearchCursor;
+    private int oreSearchRadius;
     private int oreSelectionNavigationPathsRemaining = -1;
     private boolean lastOreSearchCompletedPass;
     private int nextGearPriorityCheckTick;
@@ -164,12 +174,19 @@ public class ExploreCaveOreGoal extends Goal {
                 && probe.center.distSqr(center) <= NEARBY_ORE_CACHE_MOVE_SQR
                 ? probe.searchCursor
                 : 0;
+        boundedProbe.oreSearchRadius = probe.level == serverLevel
+                && probe.center != null
+                && probe.center.distSqr(center) <= NEARBY_ORE_CACHE_MOVE_SQR
+                ? probe.searchRadius
+                : PlayerNpcAdaptiveSearchScope.oreCoverageRadius(serverLevel);
         boolean foundOre = boundedProbe.findOreTarget(serverLevel) != null;
         probe.level = serverLevel;
         probe.center = center.immutable();
         probe.searchCursor = boundedProbe.oreSearchCursor;
+        probe.searchRadius = boundedProbe.oreSearchRadius;
         probe.foundOre = foundOre;
-        probe.nextProbeTick = playerNpc.tickCount + NEARBY_ORE_CACHE_TICKS;
+        probe.nextProbeTick = playerNpc.tickCount
+                + (foundOre || boundedProbe.lastOreSearchCompletedPass ? NEARBY_ORE_CACHE_TICKS : 1);
         return foundOre;
     }
 
@@ -261,7 +278,7 @@ public class ExploreCaveOreGoal extends Goal {
         OreTarget target = this.findOreTarget(serverLevel);
         this.resumeInterruptedOreWork = false;
         if (target == null) {
-            // A 512-offset slice is PENDING until the cursor completes the whole bounded
+            // A 32-offset slice is PENDING until the cursor completes the whole bounded
             // search volume. Retrying partial slices promptly preserves mining liveness while
             // the shared admission gate still permits only one small batch per server tick.
             int retryTicks = this.lastOreSearchCompletedPass
@@ -556,13 +573,21 @@ public class ExploreCaveOreGoal extends Goal {
                 || this.oreSearchCenter.distSqr(center) > NEARBY_ORE_CACHE_MOVE_SQR) {
             this.oreSearchCenter = center.immutable();
             this.oreSearchCursor = 0;
+            this.oreSearchRadius = PlayerNpcAdaptiveSearchScope.oreCoverageRadius(serverLevel);
         }
-        int offsetCount = ORE_SEARCH_OFFSETS.size();
+        if (this.oreSearchRadius <= 0) {
+            this.oreSearchRadius = PlayerNpcAdaptiveSearchScope.oreCoverageRadius(serverLevel);
+        }
+        List<BlockPos> searchOffsets = ORE_SEARCH_OFFSETS.getOrDefault(
+                this.oreSearchRadius,
+                ORE_SEARCH_OFFSETS.get(PlayerNpcAdaptiveSearchScope.ORE_LOCAL_RADIUS)
+        );
+        int offsetCount = searchOffsets.size();
         int start = Math.floorMod(this.oreSearchCursor, offsetCount);
         int scanCount = Math.min(MAX_ORE_SCAN_BLOCKS_PER_ATTEMPT, offsetCount - start);
         this.lastOreSearchCompletedPass = start + scanCount >= offsetCount;
         for (int checked = 0; checked < scanCount; checked++) {
-            BlockPos offset = ORE_SEARCH_OFFSETS.get(start + checked);
+            BlockPos offset = searchOffsets.get(start + checked);
             BlockPos immutable = center.offset(offset).immutable();
             if (!serverLevel.hasChunkAt(immutable)) {
                 continue;
@@ -1838,12 +1863,12 @@ public class ExploreCaveOreGoal extends Goal {
         }
     }
 
-    private static List<BlockPos> createOreSearchOffsets() {
+    private static List<BlockPos> createOreSearchOffsets(int searchRadius) {
         List<BlockPos> offsets = new ArrayList<>();
-        int radiusSqr = SEARCH_RADIUS * SEARCH_RADIUS;
-        for (int dy = -SEARCH_DOWN; dy <= SEARCH_UP; dy++) {
-            for (int dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; dx++) {
-                for (int dz = -SEARCH_RADIUS; dz <= SEARCH_RADIUS; dz++) {
+        int radiusSqr = searchRadius * searchRadius;
+        for (int dy = -Math.min(SEARCH_DOWN, searchRadius); dy <= Math.min(SEARCH_UP, searchRadius); dy++) {
+            for (int dx = -searchRadius; dx <= searchRadius; dx++) {
+                for (int dz = -searchRadius; dz <= searchRadius; dz++) {
                     if (dx * dx + dy * dy + dz * dz <= radiusSqr) {
                         offsets.add(new BlockPos(dx, dy, dz));
                     }
@@ -1873,6 +1898,7 @@ public class ExploreCaveOreGoal extends Goal {
         private BlockPos center;
         private int nextProbeTick;
         private int searchCursor;
+        private int searchRadius;
         private boolean foundOre;
     }
 

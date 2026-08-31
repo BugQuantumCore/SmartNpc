@@ -82,6 +82,7 @@ public final class PlayerNpcBuildMaterialUtil {
     private static final List<Item> LOOSE_FILL = List.of(
             Items.DIRT,
             Items.COARSE_DIRT,
+            Items.PODZOL,
             Items.ROOTED_DIRT,
             Items.GRASS_BLOCK,
             Items.SAND,
@@ -468,10 +469,6 @@ public final class PlayerNpcBuildMaterialUtil {
             return Optional.empty();
         }
 
-        Optional<MissingBuildMaterialNeed> staleAnswer = cache != null
-                && cache.sameContext(home.get(), currentLayoutId, inventoryHash)
-                ? cache.need()
-                : Optional.empty();
         MissingNeedSearch search = MISSING_NEED_SEARCHES.get(playerNpc);
         if (search == null || !search.matches(
                 serverLevel.dimension().location(),
@@ -483,12 +480,13 @@ public final class PlayerNpcBuildMaterialUtil {
                     serverLevel.dimension().location(),
                     home.get(),
                     currentLayoutId,
-                    inventoryHash
+                    inventoryHash,
+                    playerNpc
             );
         }
         if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, playerNpc)) {
             MISSING_NEED_SEARCHES.put(playerNpc, search);
-            return staleAnswer;
+            return cachedNeedWhileSearchPending(cache, home.get(), currentLayoutId);
         }
 
         BlockPos origin = home.get().origin();
@@ -501,30 +499,28 @@ public final class PlayerNpcBuildMaterialUtil {
                     || isBlueprintPlaceholder(block.state())
                     || isSecondHalfOfSingleItemBlock(block.state())
                     || matches(serverLevel.getBlockState(block.toWorld(origin)), block.state())
-                    || hasMaterialFor(serverLevel, playerNpc, block, origin)) {
+                    || search.materialLedger().consumePlacement(serverLevel, block)) {
                 continue;
             }
 
             MissingBuildMaterialKind kind = missingKindFor(serverLevel, playerNpc, block, origin);
-            Optional<MissingBuildMaterialNeed> need = Optional.of(new MissingBuildMaterialNeed(kind, block.state(), block.toWorld(origin), describeTarget(block.state())));
-            MISSING_NEED_CACHE.put(playerNpc, new MissingNeedCache(
-                    playerNpc.tickCount,
-                    home.get().origin(),
-                    home.get().width(),
-                    home.get().depth(),
-                    currentLayoutId,
-                    inventoryHash,
-                    need
+            search = search.withCandidate(new MissingBuildMaterialNeed(
+                    kind,
+                    block.state(),
+                    block.toWorld(origin),
+                    describeTarget(block.state())
             ));
-            MISSING_NEED_SEARCHES.remove(playerNpc);
-            return need;
         }
         if (endIndex < blocks.size()) {
             MISSING_NEED_SEARCHES.put(playerNpc, search.withNextBlockIndex(endIndex));
-            return staleAnswer;
+            // Do not expose the new cursor's early candidate while a later slice may contain a
+            // higher-priority primary material. Preserve the last completed answer until this
+            // deterministic bounded refresh replaces it, so pending is never mistaken for none.
+            return cachedNeedWhileSearchPending(cache, home.get(), currentLayoutId);
         }
 
         MISSING_NEED_SEARCHES.remove(playerNpc);
+        Optional<MissingBuildMaterialNeed> selectedNeed = Optional.ofNullable(search.bestNeed());
         MISSING_NEED_CACHE.put(playerNpc, new MissingNeedCache(
                 playerNpc.tickCount,
                 home.get().origin(),
@@ -532,14 +528,24 @@ public final class PlayerNpcBuildMaterialUtil {
                 home.get().depth(),
                 currentLayoutId,
                 inventoryHash,
-                Optional.empty()
+                selectedNeed
         ));
-        return Optional.empty();
+        return selectedNeed;
     }
 
     /** True while the loaded-layout missing-material query has more cursor slices to inspect. */
     public static boolean isMissingBuildMaterialSearchPending(PlayerNpcEntity playerNpc) {
         return playerNpc != null && MISSING_NEED_SEARCHES.containsKey(playerNpc);
+    }
+
+    private static Optional<MissingBuildMaterialNeed> cachedNeedWhileSearchPending(
+            MissingNeedCache cache,
+            PlayerNpcHomeUtil.HomeArea homeArea,
+            String layoutId
+    ) {
+        return cache != null && cache.sameBuildContext(homeArea, layoutId)
+                ? cache.need()
+                : Optional.empty();
     }
 
     private static int missingNeedInventoryHash(PlayerNpcEntity playerNpc) {
@@ -1570,11 +1576,15 @@ public final class PlayerNpcBuildMaterialUtil {
         }
 
         private boolean sameContext(PlayerNpcHomeUtil.HomeArea homeArea, String currentLayoutId, int currentInventoryHash) {
+            return this.sameBuildContext(homeArea, currentLayoutId)
+                    && this.inventoryHash == currentInventoryHash;
+        }
+
+        private boolean sameBuildContext(PlayerNpcHomeUtil.HomeArea homeArea, String currentLayoutId) {
             return this.homeOrigin.equals(homeArea.origin())
                     && this.homeWidth == homeArea.width()
                     && this.homeDepth == homeArea.depth()
-                    && this.layoutId.equals(currentLayoutId)
-                    && this.inventoryHash == currentInventoryHash;
+                    && this.layoutId.equals(currentLayoutId);
         }
     }
 
@@ -1585,13 +1595,16 @@ public final class PlayerNpcBuildMaterialUtil {
             int homeDepth,
             String layoutId,
             int inventoryHash,
-            int nextBlockIndex
+            int nextBlockIndex,
+            MissingBuildMaterialNeed bestNeed,
+            MissingMaterialLedger materialLedger
     ) {
         private static MissingNeedSearch create(
                 ResourceLocation dimension,
                 PlayerNpcHomeUtil.HomeArea homeArea,
                 String layoutId,
-                int inventoryHash
+                int inventoryHash,
+                PlayerNpcEntity playerNpc
         ) {
             return new MissingNeedSearch(
                     dimension,
@@ -1600,7 +1613,9 @@ public final class PlayerNpcBuildMaterialUtil {
                     homeArea.depth(),
                     layoutId,
                     inventoryHash,
-                    0
+                    0,
+                    null,
+                    MissingMaterialLedger.create(playerNpc)
             );
         }
 
@@ -1626,9 +1641,123 @@ public final class PlayerNpcBuildMaterialUtil {
                     this.homeDepth,
                     this.layoutId,
                     this.inventoryHash,
-                    nextBlockIndex
+                    nextBlockIndex,
+                    this.bestNeed,
+                    this.materialLedger
             );
         }
+
+        private MissingNeedSearch withCandidate(MissingBuildMaterialNeed candidate) {
+            if (candidate == null
+                    || this.bestNeed != null
+                    && missingNeedPriority(this.bestNeed.kind()) <= missingNeedPriority(candidate.kind())) {
+                return this;
+            }
+            return new MissingNeedSearch(
+                    this.dimension,
+                    this.homeOrigin,
+                    this.homeWidth,
+                    this.homeDepth,
+                    this.layoutId,
+                    this.inventoryHash,
+                    this.nextBlockIndex,
+                    candidate,
+                    this.materialLedger
+            );
+        }
+    }
+
+    /**
+     * Mutable inventory simulation owned by one bounded missing-material search. Each unmatched
+     * blueprint placement consumes from the snapshot once, so one carried block or one craft cannot
+     * falsely satisfy every later placement. The surrounding search context/inventory hash replaces
+     * this ledger whenever the real inventory, home, dimension, or layout changes.
+     */
+    private static final class MissingMaterialLedger {
+        private final SimpleContainer inventory;
+
+        private MissingMaterialLedger(SimpleContainer inventory) {
+            this.inventory = inventory;
+        }
+
+        private static MissingMaterialLedger create(PlayerNpcEntity playerNpc) {
+            SimpleContainer source = playerNpc.getInventory();
+            SimpleContainer copy = new SimpleContainer(source.getContainerSize() + 2);
+            for (int slot = 0; slot < source.getContainerSize(); slot++) {
+                copy.setItem(slot, source.getItem(slot).copy());
+            }
+            copy.setItem(source.getContainerSize(), playerNpc.getMainHandItem().copy());
+            copy.setItem(source.getContainerSize() + 1, playerNpc.getOffhandItem().copy());
+            return new MissingMaterialLedger(copy);
+        }
+
+        private boolean consumePlacement(ServerLevel serverLevel, PlayerNpcBuildLayout.RelativeBlock block) {
+            BlockState targetState = block.state();
+            if (targetState.isAir() || isBlueprintPlaceholder(targetState)
+                    || block.isSecondHalfOfSingleItemBlock()) {
+                return true;
+            }
+            if (isPottedPlant(targetState)) {
+                if (PlayerNpcCraftingUtil.countItem(this.inventory, stack -> stack.is(Items.FLOWER_POT)) < 1
+                        || PlayerNpcCraftingUtil.countItem(this.inventory,
+                        PlayerNpcBuildMaterialUtil::isPottablePlantStack) < 1) {
+                    return false;
+                }
+                consume(Items.FLOWER_POT);
+                return PlayerNpcCraftingUtil.consumeItem(this.inventory,
+                        PlayerNpcBuildMaterialUtil::isPottablePlantStack, 1);
+            }
+
+            Item targetItem = targetState.getBlock().asItem();
+            MaterialFamily family = familyForState(targetState);
+            List<Item> candidates = candidateItems(family, targetItem);
+            for (Item candidate : candidates) {
+                if (consume(candidate)) {
+                    return true;
+                }
+            }
+
+            Item craftedItem = null;
+            if (targetItem == Items.TORCH
+                    && PlayerNpcCraftingUtil.tryCraftTorches(this.inventory, BUILD_CRAFT_RAW_LOG_RESERVE)) {
+                craftedItem = Items.TORCH;
+            } else if (family == MaterialFamily.GLASS_PANES && tryCraftGlassPaneFromAnyGlass(this.inventory)) {
+                craftedItem = Items.GLASS_PANE;
+            } else if (family == MaterialFamily.BEDS) {
+                Item bed = PlayerNpcCraftingUtil.getCraftableBedItem(this.inventory);
+                if (bed != null && PlayerNpcCraftingUtil.tryCraftBed(this.inventory, BUILD_CRAFT_RAW_LOG_RESERVE)) {
+                    craftedItem = bed;
+                }
+            } else {
+                for (Item candidate : candidates) {
+                    if (PlayerNpcCraftingUtil.tryCraftWithLogConversion(
+                            serverLevel,
+                            this.inventory,
+                            candidate,
+                            true,
+                            BUILD_CRAFT_RAW_LOG_RESERVE
+                    )) {
+                        craftedItem = candidate;
+                        break;
+                    }
+                }
+            }
+            return craftedItem != null && consume(craftedItem);
+        }
+
+        private boolean consume(Item item) {
+            return item != null && item != Items.AIR
+                    && PlayerNpcCraftingUtil.consumeItem(this.inventory, stack -> stack.is(item), 1);
+        }
+    }
+
+    private static int missingNeedPriority(MissingBuildMaterialKind kind) {
+        return switch (kind) {
+            case LOG -> 0;
+            case STONE -> 1;
+            case BED -> 3;
+            default -> 2;
+        };
     }
 
     private enum MaterialFamily {

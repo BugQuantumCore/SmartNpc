@@ -166,6 +166,7 @@ public final class PlayerNpcCommandEvent {
 
     private static int getAiResources(CommandSourceStack source) {
         PlayerNpcAiWorkBudget.ResourceSnapshot snapshot = PlayerNpcAiWorkBudget.resourceSnapshot(source.getServer());
+        PlayerNpcForceTickManager.ForceTickSnapshot forceTicks = PlayerNpcForceTickManager.forceTickSnapshot(source.getServer());
         PlayerNpcNaturalSpawnCap.SpawnCapSnapshot spawnCap = PlayerNpcNaturalSpawnCap.snapshot(source.getServer());
         String mode = snapshot.automatic() ? "auto" : "configured";
         source.sendSuccess(() -> Component.literal("Player NPC AI resources: mode="
@@ -180,6 +181,30 @@ public final class PlayerNpcCommandEvent {
                 + snapshot.expensiveCount()
                 + ", waiting="
                 + snapshot.waitingNpcCount()), false);
+        String forceTickLine = "Player NPC force tickets: mode="
+                + forceTicks.modeText()
+                + ", used="
+                + forceTicks.usedSlots()
+                + "/"
+                + forceTicks.effectiveSlots()
+                + ", workerPriority="
+                + forceTicks.workerTicketCount()
+                + ", available="
+                + forceTicks.eligibleNpcCount()
+                + ", known="
+                + forceTicks.knownNpcCount();
+        if (forceTicks.automatic()) {
+            forceTickLine += ", explorationCeiling="
+                    + forceTicks.capabilityLimit()
+                    + ", baselineMspt="
+                    + String.format(java.util.Locale.ROOT, "%.1f", forceTicks.baselineMspt())
+                    + ", handoffPrefetch="
+                    + forceTicks.handoffProtectionActive()
+                    + ", reason="
+                    + forceTicks.reason();
+        }
+        String finalForceTickLine = forceTickLine;
+        source.sendSuccess(() -> Component.literal(finalForceTickLine), false);
         String spawnCapLine = "Player NPC natural spawn cap: mode="
                 + (spawnCap.automatic() ? "auto" : "configured")
                 + ", effectiveMax="
@@ -256,6 +281,8 @@ public final class PlayerNpcCommandEvent {
                     + holder.runningGoals()
                     + " heldTicks="
                     + holder.heldTicks()
+                    + " shiftRemainingTicks="
+                    + holder.shiftRemainingTicks()
                     + " location="
                     + location
                     + " state="

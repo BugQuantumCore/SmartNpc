@@ -6,8 +6,11 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.init.SmartNpcModEntities;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.MobSpawnType;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
@@ -39,6 +42,7 @@ public final class PlayerNpcNaturalSpawnCap {
     private static final int FAST_EVALUATIONS_BEFORE_GROWTH = 2;
     private static final int FAST_GROWTH_TARGET = 10;
     private static final int RESERVATION_EXPIRY_TICKS = 20 * 10;
+    private static final int LOADED_WORLD_SPAWN_INTERVAL_TICKS = 20 * 20;
     private static final double AUTO_PROBE_MAX_MSPT = 45.0D;
     private static final double AUTO_FAST_PROBE_MAX_MSPT = 40.0D;
     private static final double AUTO_REDUCTION_MSPT = 50.0D;
@@ -167,6 +171,7 @@ public final class PlayerNpcNaturalSpawnCap {
         }
         PopulationState state = state(event.getServer());
         state.updatePolicy(event.getServer(), false);
+        state.tryLoadedWorldSpawn(event.getServer());
         state.flushPersistent(event.getServer());
     }
 
@@ -236,6 +241,52 @@ public final class PlayerNpcNaturalSpawnCap {
                 ? "disabled"
                 : this.configuredLimit > 0 ? "fixed" : "warming_up";
         private String probeMode = "warming";
+        private long nextLoadedWorldSpawnTick;
+
+        /**
+         * Vanilla CREATURE spawning can remain saturated by ordinary passive mobs, leaving a
+         * biome entry visible only during chunk-generation spawning. Make one conservative,
+         * reservation-protected attempt in already-loaded terrain; never generate/load a chunk.
+         */
+        private synchronized void tryLoadedWorldSpawn(MinecraftServer server) {
+            long tick = server.getTickCount();
+            if (tick < this.nextLoadedWorldSpawnTick || !this.hasCapacity(tick)) {
+                return;
+            }
+            this.nextLoadedWorldSpawnTick = tick + LOADED_WORLD_SPAWN_INTERVAL_TICKS;
+            ServerLevel level = server.overworld();
+            if (level == null || level.isNight() || level.players().isEmpty()) {
+                return;
+            }
+            ServerPlayer player = level.players().get(level.random.nextInt(level.players().size()));
+            for (int attempt = 0; attempt < 8; attempt++) {
+                double angle = level.random.nextDouble() * Math.PI * 2.0D;
+                int distance = 24 + level.random.nextInt(25);
+                int x = player.getBlockX() + (int) Math.round(Math.cos(angle) * distance);
+                int z = player.getBlockZ() + (int) Math.round(Math.sin(angle) * distance);
+                BlockPos column = new BlockPos(x, level.getMinBuildHeight(), z);
+                if (!level.hasChunkAt(column)) {
+                    continue;
+                }
+                int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                BlockPos pos = new BlockPos(x, y, z);
+                if (!PlayerNpcEntity.canSpawn(SmartNpcModEntities.PLAYER_NPC.get(), level,
+                        MobSpawnType.NATURAL, pos, level.random)) {
+                    continue;
+                }
+                PlayerNpcEntity npc = SmartNpcModEntities.PLAYER_NPC.get().create(level);
+                if (npc == null) {
+                    return;
+                }
+                npc.moveTo(x + 0.5D, y, z + 0.5D, level.random.nextFloat() * 360.0F, 0.0F);
+                if (!level.noCollision(npc)) {
+                    return;
+                }
+                npc.finalizeSpawn(level, level.getCurrentDifficultyAt(pos), MobSpawnType.NATURAL, null, null);
+                level.addFreshEntityWithPassengers(npc);
+                return;
+            }
+        }
 
         private synchronized boolean tryReserve(long serverTick) {
             this.prunePending(serverTick);

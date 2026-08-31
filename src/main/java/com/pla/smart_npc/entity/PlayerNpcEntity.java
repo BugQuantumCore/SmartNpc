@@ -134,6 +134,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
+import java.util.UUID;
 import java.util.function.Predicate;
 
 public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
@@ -159,7 +160,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_DOWN = 2;
     private static final int EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_UP = 4;
     private static final int EXPLORATION_CLIMB_SAFE_STAND_RANDOM_POOL = 8;
-    private static final int EXPLORATION_CLIMB_SAFE_STAND_PATH_CHECKS = 18;
+    private static final int EXPLORATION_CLIMB_SAFE_STAND_PATH_CHECKS = 1;
+    private static final float EXPLORATION_CLIMB_SAFE_STAND_PATH_MULTIPLIER = 0.01F;
     private static final double EXPLORATION_CLIMB_SAFE_STAND_REACHED_SQR = 1.1D * 1.1D;
     private static final int EXPLORATION_CLIMB_CLEAR_TICKS = 24;
     private static final double EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR = 5.0D * 5.0D;
@@ -177,6 +179,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final long DAY_LENGTH_TICKS = 24000L;
     private static final long DAILY_JOB_ROLL_TIME = 1L;
     private static final long DAILY_JOB_FALLBACK_ROLL_END_TIME = 12000L;
+    private static final int FISHING_STARTER_STRING_VERSION = 1;
+    private static final int FISHING_STARTER_STRING_REQUIRED = 2;
+    private static final int FISHING_STARTER_MIGRATION_INTERVAL_TICKS = 20 * 5;
     private static final List<PlayerNpcInterest> DAILY_JOB_INTERESTS = List.of(
             PlayerNpcInterest.BUILDING,
             PlayerNpcInterest.MINING,
@@ -275,6 +280,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int activeLogSupplyTarget;
     private int activeStoneSupplyTarget;
     private long lastSupplyGoalRerollDay = -1L;
+    private int fishingStarterStringVersion;
     private int workGoalRegistrationIndex;
     @Nullable
     private PlayerNpcInterest selectedDailyJobInterest;
@@ -328,6 +334,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int staleTargetTicks = 0;
     private int staleTargetEntityId = -1;
     private int lastCombatProgressTick = 0;
+    @Nullable
+    private UUID chestProtectionTargetId;
     private int animalLootPriorityTicks = 0;
     @Nullable
     private BlockPos animalLootPriorityPos;
@@ -1359,6 +1367,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         tag.putInt("WoodSupplyTarget", this.woodSupplyTarget);
         tag.putInt("CobblestoneSupplyTarget", this.cobblestoneSupplyTarget);
         tag.putLong("LastSupplyGoalRerollDay", this.lastSupplyGoalRerollDay);
+        tag.putInt("FishingStarterStringVersion", this.fishingStarterStringVersion);
         tag.putLong("SelectedDailyJobDay", this.selectedDailyJobDay);
         if (this.selectedDailyJobInterest != null) {
             tag.putString("SelectedDailyJobInterest", this.selectedDailyJobInterest.name());
@@ -1447,6 +1456,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (tag.contains("LastSupplyGoalRerollDay", Tag.TAG_LONG)) {
             this.lastSupplyGoalRerollDay = tag.getLong("LastSupplyGoalRerollDay");
         }
+        this.fishingStarterStringVersion = tag.getInt("FishingStarterStringVersion");
         if (tag.contains("SelectedDailyJobDay", Tag.TAG_LONG)) {
             this.selectedDailyJobDay = tag.getLong("SelectedDailyJobDay");
         }
@@ -1653,6 +1663,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 1.0D,
                 "exploring for logs",
                 level -> GatherLogsGoal.hasLogSupplyDemand(this, level)
+                        && !TerraformBuildSiteGoal.hasActionablePrepWork(this, level)
                         && !GatherStoneGoal.isStoneSupplyPhaseActive(this, level)
                         && !FarmCropGoal.shouldExploreForFarmSupplies(this, level)
                         && this.canExploreForLogSupply(level)
@@ -1688,7 +1699,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 1.0D,
                 "exploring for seeds and crops",
                 level -> FarmCropGoal.shouldExploreForFarmSupplies(this, level),
-                level -> FarmCropGoal.hasNearbyFarmSupplyTarget(this, level),
+                // FarmCropGoal has higher priority and already gets the first opportunity to
+                // claim any local grass/crop it can actually reach.  Do not make exploration
+                // yield to a separate proximity probe: the probe and the action selector use
+                // independent bounded path windows, so they can disagree forever ("nearby"
+                // says yes while FarmCropGoal cannot select that candidate), leaving an admitted
+                // farmer idle.  Let this lower-priority route start; FarmCropGoal will pre-empt it
+                // as soon as roaming brings a forage target into its actionable window.
+                level -> false,
                 true,
                 false
         ), PlayerNpcInterest.FARMING));
@@ -2346,8 +2364,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && shouldCustomInventoryPickup(e.getItem())
         );
 
+        boolean pickedUpAny = false;
         for (ItemEntity itemEntity : items) {
-            this.tryPickupItemEntity(itemEntity);
+            pickedUpAny |= this.tryPickupItemEntity(itemEntity, false);
+        }
+        if (pickedUpAny) {
+            this.equipBetterGearFromInventory();
         }
     }
 
@@ -2376,6 +2398,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public boolean tryPickupItemEntity(ItemEntity itemEntity) {
+        return this.tryPickupItemEntity(itemEntity, true);
+    }
+
+    private boolean tryPickupItemEntity(ItemEntity itemEntity, boolean equipAfterPickup) {
         if (this.level().isClientSide
                 || itemEntity == null
                 || !itemEntity.isAlive()
@@ -2388,7 +2414,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
 
         boolean pickedUp = tryPickup(itemEntity);
-        if (pickedUp) {
+        if (pickedUp && equipAfterPickup) {
             this.equipBetterGearFromInventory();
         }
         return pickedUp;
@@ -2496,6 +2522,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         this.tickDailyJobSelection(serverLevel);
         this.tickDailySupplyGoalReroll(serverLevel);
+        this.tickFishingStarterStringMigration();
         this.tickAiCooldowns();
         this.clearStaleHealingState();
         this.tickStartupIdleWake();
@@ -2504,14 +2531,13 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.tickExplorationClimbFallback(serverLevel);
         this.tickIdleResourceStuckFallback(serverLevel);
 
-        if ((tickCount + getId()) % 10 == 0) {
+        // Contact pickup must not depend on routine-worker ownership or a global admission slot:
+        // NPCs with the same cadence phase could otherwise starve behind the same earlier entity
+        // forever. The small local AABB scan remains staggered per NPC.
+        if (Math.floorMod(this.tickCount + this.getId(), 10) == 0) {
             this.pickupNearbyExperienceOrbs();
         }
-
-        // Vanilla-style contact pickup does not need an entity query from every force-ticked NPC
-        // on every server tick. Stagger a four-tick cadence by entity id; direct pickup attempts
-        // from PickupNearbyItemGoal still run immediately when that goal reaches its item.
-        if (Math.floorMod(this.tickCount + this.getId(), 4) == 0 && !isInventoryFull()) {
+        if (Math.floorMod(this.tickCount + this.getId(), 4) == 0 && !this.isInventoryFull()) {
             this.pickupNearbyItems();
         }
         if (measurePerformance) {
@@ -2733,7 +2759,13 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
 
         PathNavigationAi navigationAi = new PathNavigationAi(this);
-        if (!navigationAi.moveTo(serverLevel, safeStand, 1.0D, EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_DOWN)) {
+        if (!navigationAi.moveTo(
+                serverLevel,
+                safeStand,
+                1.0D,
+                EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_DOWN,
+                EXPLORATION_CLIMB_SAFE_STAND_PATH_MULTIPLIER
+        )) {
             return false;
         }
 
@@ -2791,7 +2823,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 candidates,
                 EXPLORATION_CLIMB_SAFE_STAND_RANDOM_POOL,
                 EXPLORATION_CLIMB_SAFE_STAND_PATH_CHECKS,
-                EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_DOWN
+                EXPLORATION_CLIMB_SAFE_STAND_VERTICAL_DOWN,
+                EXPLORATION_CLIMB_SAFE_STAND_PATH_MULTIPLIER
         );
     }
 
@@ -2905,7 +2938,16 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         BlockPos feet = this.blockPosition();
         BlockPos navigationTarget = this.getNavigation().getTargetPos();
         BlockPos surfaceEscapeTarget = null;
-        if (!serverLevel.canSeeSky(feet.above())) {
+        // A tree canopy also blocks canSeeSky. Only run the expensive radius surface search when
+        // the NPC is materially below the terrain surface; a logger standing under leaves is not
+        // trapped underground and must not pay for a heightmap sweep during its idle transition.
+        int localSurfaceY = serverLevel.getHeight(
+                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                feet.getX(),
+                feet.getZ()
+        );
+        boolean materiallyBelowSurface = localSurfaceY > feet.getY() + 2;
+        if (!serverLevel.canSeeSky(feet.above()) && materiallyBelowSurface) {
             boolean movedBeyondCachedSearch = this.idleResourceSurfaceSearchOrigin == null
                     || this.idleResourceSurfaceSearchOrigin.distSqr(feet) > 4.0D * 4.0D;
             if (movedBeyondCachedSearch || this.tickCount >= this.nextIdleResourceSurfaceSearchTick) {
@@ -2922,6 +2964,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         + this.getRandom().nextInt(21);
             }
             surfaceEscapeTarget = this.cachedIdleResourceSurfaceEscapeTarget;
+        } else {
+            this.idleResourceSurfaceSearchOrigin = null;
+            this.cachedIdleResourceSurfaceEscapeTarget = null;
+            this.nextIdleResourceSurfaceSearchTick = 0;
         }
         BlockPos routeTarget = navigationTarget == null
                 ? surfaceEscapeTarget == null ? feet : surfaceEscapeTarget
@@ -3523,7 +3569,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (currentTarget != null
                 && !this.hasInterest(PlayerNpcInterest.HUNT_PLAYERS)
                 && this.isPassiveBuildingBlockedByPlayerTarget(currentTarget)
-                && !this.isRecentRetaliationTarget(currentTarget)) {
+                && !this.isRecentRetaliationTarget(currentTarget)
+                && !this.isChestProtectionTarget(currentTarget)) {
             this.setTarget(null);
             this.staleTargetTicks = 0;
             this.staleTargetEntityId = -1;
@@ -3538,6 +3585,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
 
         if (currentTarget == null) {
+            this.chestProtectionTargetId = null;
             this.staleTargetTicks = 0;
             this.staleTargetEntityId = -1;
             return;
@@ -3566,6 +3614,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         if (this.staleTargetTicks > 20 * 3) {
             this.setTarget(null);
+            this.chestProtectionTargetId = null;
             this.staleTargetTicks = 0;
             this.staleTargetEntityId = -1;
             if (this.isCombatAiState(this.getCurrentAiState())) {
@@ -3584,6 +3633,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return target != null && target == this.getLastHurtByMob();
     }
 
+    public void setChestProtectionTarget(LivingEntity offender) {
+        this.chestProtectionTargetId = offender.getUUID();
+        this.setTarget(offender);
+        this.lastCombatProgressTick = this.tickCount;
+    }
+
+    private boolean isChestProtectionTarget(LivingEntity target) {
+        return this.chestProtectionTargetId != null
+                && this.chestProtectionTargetId.equals(target.getUUID());
+    }
+
     private boolean isCombatAiState(String state) {
         return "ai.player_npc.retaliating".equals(state)
                 || "ai.player_npc.melee_attacking".equals(state)
@@ -3600,7 +3660,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || "ai.player_npc.breaking_target_obstruction".equals(state)
                 || "ai.player_npc.hunting_animal".equals(state)
                 || "ai.player_npc.engaging_villager".equals(state)
-                || "ai.player_npc.assisting_alert".equals(state);
+                || "ai.player_npc.assisting_alert".equals(state)
+                || "ai.player_npc.protecting_chest".equals(state);
     }
 
     public SpawnGroupData finalizeSpawn(@NotNull ServerLevelAccessor serverLevelAccessor, @NotNull DifficultyInstance difficultyInstance, @NotNull MobSpawnType mobSpawnType, @Nullable SpawnGroupData spawngroupdata, @Nullable CompoundTag compoundtag) {
@@ -3632,6 +3693,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.mainWeaponItem = this.getMainHandItem().copy();
         this.offWeaponItem = this.getOffWeaponItem().copy();
         this.seedInventory();
+        this.completeFishingStarterStringMigration();
 
         ChatUtil.joinGame(this);
 
@@ -3782,6 +3844,32 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
 
         return true;
+    }
+
+    private void tickFishingStarterStringMigration() {
+        if (this.fishingStarterStringVersion >= FISHING_STARTER_STRING_VERSION
+                || !this.hasInterest(PlayerNpcInterest.FISHING)
+                || Math.floorMod(this.tickCount + this.getId(), FISHING_STARTER_MIGRATION_INTERVAL_TICKS) != 0) {
+            return;
+        }
+
+        this.completeFishingStarterStringMigration();
+    }
+
+    private void completeFishingStarterStringMigration() {
+        if (!this.hasInterest(PlayerNpcInterest.FISHING)) {
+            return;
+        }
+
+        int stringCount = PlayerNpcCraftingUtil.countItem(
+                this.inventory,
+                stack -> stack.is(Items.STRING)
+        );
+        int missing = Math.max(0, FISHING_STARTER_STRING_REQUIRED - stringCount);
+        if (missing > 0 && !InventoryUtils.addItem(this.inventory, new ItemStack(Items.STRING, missing))) {
+            return;
+        }
+        this.fishingStarterStringVersion = FISHING_STARTER_STRING_VERSION;
     }
 
     @Override

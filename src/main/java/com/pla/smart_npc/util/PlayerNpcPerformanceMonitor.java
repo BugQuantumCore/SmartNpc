@@ -258,9 +258,9 @@ public final class PlayerNpcPerformanceMonitor {
         }
     }
 
-    /** Optional visual AI yields when the rolling server tick is already missing 20 TPS. */
+    /** Optional visual AI waits for a trustworthy sample and yields once the server misses 20 TPS. */
     public static boolean isOptionalAiWorkAllowed() {
-        return !hasStableRollingSample() || getAverageMspt() < OPTIONAL_AI_MAX_AVERAGE_MSPT;
+        return hasStableRollingSample() && getAverageMspt() < OPTIONAL_AI_MAX_AVERAGE_MSPT;
     }
 
     /** Records executed Player NPC time, unlike post-tick active-state correlation. */

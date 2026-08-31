@@ -1,5 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
@@ -28,6 +30,9 @@ public class RetargetCloserThreatGoal extends TargetGoal {
         super(mob, true, false);
         this.scanInterval = Math.max(1, scanInterval);
         this.targetConditions = TargetingConditions.forCombat().range(this.getFollowDistance());
+        // NPCs commonly load or spawn as a group. Keep their full follow-distance entity queries
+        // off the same selector tick; the fixed recurring cadence preserves this initial phase.
+        this.nextScanTick = mob.tickCount + mob.getRandom().nextInt(Math.max(20, this.scanInterval));
         this.setFlags(EnumSet.of(Goal.Flag.TARGET));
     }
 
@@ -38,8 +43,19 @@ public class RetargetCloserThreatGoal extends TargetGoal {
         }
         this.nextScanTick = this.mob.tickCount + Math.max(20, this.scanInterval);
 
-        this.nextTarget = this.findCloserThreatTarget();
-        return this.nextTarget != null;
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            this.nextTarget = this.findCloserThreatTarget();
+            return this.nextTarget != null;
+        } finally {
+            if (this.mob instanceof PlayerNpcEntity playerNpc) {
+                PlayerNpcPerformanceMonitor.recordGoalWork(
+                        playerNpc,
+                        this.getClass().getSimpleName() + ".canUse",
+                        timing
+                );
+            }
+        }
     }
 
     @Override

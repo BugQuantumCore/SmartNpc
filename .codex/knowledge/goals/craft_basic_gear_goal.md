@@ -1,5 +1,11 @@
 # CraftBasicGearGoal
 
+Crafting-table travel has a distance-based liveness watchdog. Repeatedly submitting a path or direct movement request is not progress: if distance to the selected stand does not improve by at least 0.25 blocks for 80 ticks, the attempt counts as a route failure. Three failures use the existing safe climb/reposition recovery or finish into the normal retry cooldown. This is especially important for fishing workers caught in water, where `FloatGoal` and water bobbing can coexist with `navigation=done,path=none`; crafting must never retain MOVE indefinitely in that state.
+
+Crafting-table movement must not report a horizontal direct step as successful when the selected stand is more than one block above/below the NPC. After three failed bounded route attempts, the goal first gives shared `ClearBlockAi` one bounded local obstruction candidate at a time. It may clear a physical, breakable route block only when that block is loaded, has no block entity, is not the table/support/standing floor, is not a temporary pillar, and is outside protected farm and saved build footprints. Non-colliding decoration such as the torch reported by the trace is not mistaken for a route wall.
+
+If no safe route block can be cleared and the destination is higher, crafting releases its MOVE/LOOK flags and requests a valid local forced-climb waypoint two blocks above the NPC. The local waypoint matters: using the remote table stand at only `feetY + 1` does not meet the shared escape goal's forced-climb contract and caused a request/discard/reacquire loop. Crafting cannot reacquire while its retained handoff exists, and the handoff is not charged as a failed craft attempt. Wet NPCs do not receive a land-pillar request (the entity correctly clears those); they fall through to `PathStuckFallbackAi`. A same-level or wet failure uses `PathStuckFallbackAi` to move to a safe stand outside protected build/farm space and recomputes the crafting stand. Protected, unbreakable, or block-entity obstructions therefore fall through to safe repositioning rather than being destroyed or making the goal oscillate forever. These recovery paths are part of the admitted worker's full routine; they do not add a secondary worker restriction.
+
 ## Source
 
 - `src/main/java/com/pla/smart_npc/entity/goal/CraftBasicGearGoal.java`

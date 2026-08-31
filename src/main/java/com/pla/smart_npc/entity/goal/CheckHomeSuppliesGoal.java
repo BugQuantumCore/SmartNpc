@@ -24,6 +24,7 @@ import net.minecraft.world.item.ArrowItem;
 import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.CrossbowItem;
+import net.minecraft.world.item.FishingRodItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.PickaxeItem;
@@ -59,6 +60,7 @@ public class CheckHomeSuppliesGoal extends Goal {
     private static final int GENERAL_FUEL_RESERVE = 4;
     private static final int ARROW_RESERVE = 16;
     private static final int BLOCK_RESERVE = 24;
+    private static final int FISHING_STRING_RESERVE = 2;
     private static final float STORAGE_PATH_NODE_MULTIPLIER = 0.05F;
 
     private final PlayerNpcEntity playerNpc;
@@ -249,7 +251,7 @@ public class CheckHomeSuppliesGoal extends Goal {
 
         this.playerNpc.getNavigation().stop();
         if (this.mode == Mode.CHEST && !this.chestOpen) {
-            ChestAi.openChest(serverLevel, this.targetPos);
+            ChestAi.openChest(serverLevel, this.targetPos, this.playerNpc);
             this.chestOpen = true;
             this.actionDelayTicks = ACTION_DELAY_TICKS;
             this.updateDetail();
@@ -482,6 +484,8 @@ public class CheckHomeSuppliesGoal extends Goal {
         }
         SupplyNeedSnapshot need = this.currentSupplyNeed(serverLevel);
         return this.needsMissingTool(need, stack)
+                || need.fishingRod() && stack.getItem() instanceof FishingRodItem
+                || need.fishingString() && stack.is(Items.STRING)
                 || need.food() && stack.isEdible()
                 || need.wood() && this.isWoodSupply(stack)
                 || need.toolCraftingMaterials() && this.isToolCraftingSupply(stack)
@@ -494,6 +498,11 @@ public class CheckHomeSuppliesGoal extends Goal {
     private int desiredWithdrawCount(ServerLevel serverLevel, ItemStack stack) {
         if (this.isToolStack(stack)) {
             return 1;
+        }
+        if (stack.is(Items.STRING)) {
+            int missingString = FISHING_STRING_RESERVE
+                    - this.countInventory(candidate -> candidate.is(Items.STRING));
+            return Math.min(stack.getCount(), Math.max(1, missingString));
         }
         if (stack.isEdible()) {
             return Math.min(stack.getCount(), 8);
@@ -523,13 +532,16 @@ public class CheckHomeSuppliesGoal extends Goal {
                 && (stack.getItem() instanceof AxeItem
                 || stack.getItem() instanceof PickaxeItem
                 || stack.getItem() instanceof ShovelItem
-                || stack.getItem() instanceof SwordItem);
+                || stack.getItem() instanceof SwordItem
+                || stack.getItem() instanceof FishingRodItem);
     }
 
     private boolean needsToolSupply() {
         return this.needsTool(AxeItem.class)
                 || this.needsTool(PickaxeItem.class)
-                || this.needsTool(ShovelItem.class);
+                || this.needsTool(ShovelItem.class)
+                || this.needsFishingRod()
+                || this.needsFishingString();
     }
 
     private boolean needsToolCraftingMaterials() {
@@ -566,6 +578,16 @@ public class CheckHomeSuppliesGoal extends Goal {
         return this.missingBuildMaterialNeed != null;
     }
 
+    private boolean needsFishingRod() {
+        return this.playerNpc.hasInterest(PlayerNpcInterest.FISHING)
+                && !PlayerNpcFishingGoal.hasFishingRod(this.playerNpc);
+    }
+
+    private boolean needsFishingString() {
+        return this.playerNpc.hasInterest(PlayerNpcInterest.FISHING)
+                && this.countInventory(stack -> stack.is(Items.STRING)) < FISHING_STRING_RESERVE;
+    }
+
     private SupplyNeedSnapshot currentSupplyNeed(ServerLevel serverLevel) {
         if (this.supplyNeed == null) {
             boolean furnaceDue = !this.nonBuilderBase
@@ -580,6 +602,8 @@ public class CheckHomeSuppliesGoal extends Goal {
         boolean pickaxe = this.needsTool(PickaxeItem.class);
         boolean shovel = this.needsTool(ShovelItem.class);
         boolean sword = this.needsTool(SwordItem.class);
+        boolean fishingRod = this.needsFishingRod();
+        boolean fishingString = this.needsFishingString();
         boolean food = this.needsFood();
         boolean wood = this.needsWood();
         boolean toolMaterials = axe || pickaxe;
@@ -592,6 +616,8 @@ public class CheckHomeSuppliesGoal extends Goal {
                 pickaxe,
                 shovel,
                 sword,
+                fishingRod,
+                fishingString,
                 food,
                 wood,
                 toolMaterials,
@@ -927,6 +953,8 @@ public class CheckHomeSuppliesGoal extends Goal {
             boolean pickaxe,
             boolean shovel,
             boolean sword,
+            boolean fishingRod,
+            boolean fishingString,
             boolean food,
             boolean wood,
             boolean toolCraftingMaterials,
@@ -936,7 +964,7 @@ public class CheckHomeSuppliesGoal extends Goal {
             boolean furnaceOutput
     ) {
         private boolean needsToolSupply() {
-            return this.axe || this.pickaxe || this.shovel;
+            return this.axe || this.pickaxe || this.shovel || this.fishingRod || this.fishingString;
         }
 
         private boolean hasAnyNeed() {

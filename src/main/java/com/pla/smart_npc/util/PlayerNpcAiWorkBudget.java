@@ -22,7 +22,11 @@ import java.util.WeakHashMap;
  */
 public final class PlayerNpcAiWorkBudget {
     private static final int MAX_EXPENSIVE_BATCHES_PER_TICK = 1;
-    private static final int MAX_ACTIVE_WORK_TICKS = 20 * 120;
+    private static final long MINECRAFT_DAY_TICKS = 24_000L;
+    // Minecraft time 1000 is about 07:00: one in-game hour after dawn/wake-up. Rotating here
+    // avoids changing the worker roster in the same tick as sleep skips the night and wakes
+    // players, while still giving the selected NPCs effectively the complete working day.
+    private static final long WORKER_SHIFT_ROTATION_DAY_TIME = 1_000L;
     private static final int PROBE_REQUEST_STALE_TICKS = 5;
     private static final int EXPENSIVE_REQUEST_STALE_TICKS = 40;
     private static final int DENIAL_VISIBLE_TICKS = 20 * 2;
@@ -32,7 +36,6 @@ public final class PlayerNpcAiWorkBudget {
     private static final int AUTO_CAUTION_GROWTH_CHECKS = 5;
     private static final int AUTO_HIGH_HEALTHY_GROWTH_CHECKS = 3;
     private static final int AUTO_HIGH_CAUTION_GROWTH_CHECKS = 6;
-    private static final int AUTO_OVERLOAD_REDUCTION_CHECKS = 2;
     private static final double AUTO_CAUTION_PROBE_MAX_MSPT = 49.0D;
     private static final double AUTO_REDUCTION_MSPT = 52.0D;
     private static final Map<MinecraftServer, SchedulerState> SERVER_SCHEDULERS = new WeakHashMap<>();
@@ -97,7 +100,18 @@ public final class PlayerNpcAiWorkBudget {
         if (!(playerNpc.level() instanceof ServerLevel serverLevel)) {
             return false;
         }
-        return scheduler(serverLevel).tryAcquireWaitingStrollPathStart(serverLevel.getServer().getTickCount());
+        return scheduler(serverLevel).tryAcquireOptionalPathStart(serverLevel.getServer().getTickCount());
+    }
+
+    /**
+     * Globally admits one optional synchronous navigation path construction per server tick.
+     * Callers retain their target/search cursor when denied and retry on a later tick.
+     */
+    public static boolean tryAcquireNavigationPathStart(PlayerNpcEntity playerNpc) {
+        if (!(playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        return scheduler(serverLevel).tryAcquireOptionalPathStart(serverLevel.getServer().getTickCount());
     }
 
     /**
@@ -112,6 +126,7 @@ public final class PlayerNpcAiWorkBudget {
         if (scheduler == null) {
             return false;
         }
+        scheduler.observeOverworldDayTime(serverLevel.getServer());
         long tick = serverLevel.getServer().getTickCount();
         return scheduler.hasResource(playerNpc.getUUID(), tick, resolveWorkerLimit(serverLevel.getServer()));
     }
@@ -129,6 +144,7 @@ public final class PlayerNpcAiWorkBudget {
         if (scheduler == null) {
             return new ResourceSnapshot(tick, configuredLimit, effectiveLimit, 0, 0, List.of());
         }
+        scheduler.observeOverworldDayTime(server);
         return scheduler.snapshot(tick, configuredLimit, effectiveLimit);
     }
 
@@ -149,7 +165,10 @@ public final class PlayerNpcAiWorkBudget {
     }
 
     private static SchedulerState scheduler(ServerLevel serverLevel) {
-        return SERVER_SCHEDULERS.computeIfAbsent(serverLevel.getServer(), ignored -> new SchedulerState());
+        MinecraftServer server = serverLevel.getServer();
+        SchedulerState scheduler = SERVER_SCHEDULERS.computeIfAbsent(server, ignored -> new SchedulerState());
+        scheduler.observeOverworldDayTime(server);
+        return scheduler;
     }
 
     private static int resolveWorkerLimit(MinecraftServer server) {
@@ -168,7 +187,9 @@ public final class PlayerNpcAiWorkBudget {
     }
 
     private static SchedulerState scheduler(MinecraftServer server) {
-        return SERVER_SCHEDULERS.computeIfAbsent(server, ignored -> new SchedulerState());
+        SchedulerState scheduler = SERVER_SCHEDULERS.computeIfAbsent(server, ignored -> new SchedulerState());
+        scheduler.observeOverworldDayTime(server);
+        return scheduler;
     }
 
     private static final class SchedulerState {
@@ -183,17 +204,44 @@ public final class PlayerNpcAiWorkBudget {
         private final Map<UUID, Long> expensiveAdmittedAtTick = new LinkedHashMap<>();
         private final Deque<UUID> expensiveQueue = new ArrayDeque<>();
         private long schedulerTick = Long.MIN_VALUE;
+        private long observedOverworldDayTime = Long.MIN_VALUE;
+        private long nextWorkerShiftRotationDayTime = Long.MIN_VALUE;
+        private boolean workerShiftRotationPending;
         private long admissionTick = Long.MIN_VALUE;
         private long waitingStrollAdmissionTick = Long.MIN_VALUE;
         private int admissionsThisTick;
         private int automaticWorkerLimit = 1;
         private long lastAutomaticEvaluationTick = Long.MIN_VALUE;
         private int healthyWorkerEvaluations;
-        private int overloadedWorkerEvaluations;
         private int automaticCapabilityLimit = 1;
         private int healthyWorkerEvaluationsRequired = AUTO_HEALTHY_GROWTH_CHECKS;
         private double automaticBaselineMspt;
         private String automaticWorkerReason = "warming_up";
+
+        private void observeOverworldDayTime(MinecraftServer server) {
+            if (server == null || server.overworld() == null) {
+                return;
+            }
+
+            long dayTime = server.overworld().getDayTime();
+            if (this.observedOverworldDayTime == Long.MIN_VALUE
+                    || dayTime < this.observedOverworldDayTime) {
+                // A fresh scheduler has no previous roster to rotate. Give its first holders a
+                // full shift even when the server starts shortly before the morning threshold.
+                // A backwards /time change likewise starts a new, future shift boundary.
+                this.nextWorkerShiftRotationDayTime = nextFullDayMorning(dayTime);
+                this.workerShiftRotationPending = false;
+            } else if (dayTime >= this.nextWorkerShiftRotationDayTime) {
+                this.workerShiftRotationPending = true;
+                this.nextWorkerShiftRotationDayTime = nextFullDayMorning(dayTime);
+            }
+            this.observedOverworldDayTime = dayTime;
+        }
+
+        private static long nextFullDayMorning(long dayTime) {
+            long nextDay = Math.floorDiv(dayTime, MINECRAFT_DAY_TICKS) + 1L;
+            return nextDay * MINECRAFT_DAY_TICKS + WORKER_SHIFT_ROTATION_DAY_TIME;
+        }
 
         private int resolveAutomaticWorkerLimit(long tick) {
             int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
@@ -224,16 +272,10 @@ public final class PlayerNpcAiWorkBudget {
             double reductionMspt = Math.min(AUTO_REDUCTION_MSPT, healthyTarget + 12.0D);
             if (this.automaticBaselineMspt >= reductionMspt) {
                 this.healthyWorkerEvaluations = 0;
-                if (++this.overloadedWorkerEvaluations >= AUTO_OVERLOAD_REDUCTION_CHECKS) {
-                    this.automaticWorkerLimit = Math.max(1, this.automaticWorkerLimit - 1);
-                    this.overloadedWorkerEvaluations = 0;
-                    this.automaticWorkerReason = "sustained_overload_reduced";
-                } else {
-                    this.automaticWorkerReason = "overload_pending";
-                }
+                this.automaticWorkerLimit = this.estimateSafeWorkerLimit(healthyTarget);
+                this.automaticWorkerReason = "measured_overload_reduced";
                 return this.automaticWorkerLimit;
             }
-            this.overloadedWorkerEvaluations = 0;
             if (this.automaticWorkerLimit >= capabilityLimit) {
                 this.healthyWorkerEvaluations = 0;
                 this.automaticWorkerReason = "capability_ceiling";
@@ -271,15 +313,33 @@ public final class PlayerNpcAiWorkBudget {
             return this.automaticWorkerLimit;
         }
 
+        private int estimateSafeWorkerLimit(double targetMspt) {
+            int currentLimit = Math.max(1, this.automaticWorkerLimit);
+            int currentWorkers = Math.max(1, this.activeWorkers.size());
+            double averageMspt = PlayerNpcPerformanceMonitor.getRollingAverageMspt();
+            double npcMs = PlayerNpcPerformanceMonitor.getRollingAverageNpcMs();
+            if (npcMs <= 0.1D || averageMspt <= 0.0D) {
+                return Math.max(1, currentLimit - 1);
+            }
+
+            double nonNpcMs = Math.max(0.0D, averageMspt - npcMs);
+            double availableNpcMs = Math.max(0.0D, targetMspt - nonNpcMs);
+            double measuredNpcMsPerWorker = npcMs / currentWorkers;
+            int measuredSafeLimit = measuredNpcMsPerWorker <= 0.0D
+                    ? currentLimit - 1
+                    : (int) Math.floor(availableNpcMs / measuredNpcMsPerWorker);
+            // An overload sample must always lower the limit, even if another mod dominates the
+            // tick. The floor of one keeps one NPC making progress while the server recovers.
+            return Math.max(1, Math.min(currentLimit - 1, measuredSafeLimit));
+        }
+
         private String automaticWorkerLimitStatus() {
             return "limit " + this.automaticWorkerLimit + " | exploration max " + this.automaticCapabilityLimit
                     + " | baseline " + String.format(java.util.Locale.ROOT, "%.1f", this.automaticBaselineMspt)
-                    + "ms | " + this.automaticWorkerReason.replace('_', ' ')
-                    + " | growth " + this.healthyWorkerEvaluations + "/" + this.healthyWorkerEvaluationsRequired
-                    + " | overload " + this.overloadedWorkerEvaluations + "/" + AUTO_OVERLOAD_REDUCTION_CHECKS;
+                    + "ms | " + this.automaticWorkerReason.replace('_', ' ');
         }
 
-        private boolean tryAcquireWaitingStrollPathStart(long tick) {
+        private boolean tryAcquireOptionalPathStart(long tick) {
             if (this.waitingStrollAdmissionTick == tick) {
                 return false;
             }
@@ -291,6 +351,10 @@ public final class PlayerNpcAiWorkBudget {
             this.beginTick(tick, workerLimit);
             UUID id = playerNpc.getUUID();
             ActiveWorker activeWorker = this.activeWorkers.get(id);
+            if (activeWorker != null && (workerLimit <= 0 || this.workerIndex(id) >= workerLimit)) {
+                this.releaseWorker(id);
+                activeWorker = null;
+            }
             if (activeWorker != null) {
                 activeWorker.lastRequestTick = tick;
                 this.clearDenied(id);
@@ -344,9 +408,6 @@ public final class PlayerNpcAiWorkBudget {
             if (worker == null || workerLimit <= 0 || this.workerIndex(id) >= workerLimit) {
                 return false;
             }
-            if (!this.waiting.isEmpty() && tick - worker.startedTick >= MAX_ACTIVE_WORK_TICKS) {
-                return false;
-            }
             worker.lastRequestTick = tick;
             this.clearDenied(id);
             return true;
@@ -380,9 +441,13 @@ public final class PlayerNpcAiWorkBudget {
             if (worker.runningGoals > 0) {
                 return;
             }
-            this.activeWorkers.remove(id);
-            this.removeExpensiveRequest(id);
-            this.updateWaiting(playerNpc, tick);
+            if (workerLimit <= 0 || this.workerIndex(id) >= workerLimit) {
+                this.releaseWorker(id);
+                this.updateWaiting(playerNpc, tick);
+                return;
+            }
+            // The NPC-level day shift deliberately survives idle gaps between routine delegates.
+            // A cooldown/throttle is not proof that the overall job is complete.
         }
 
         private boolean tryAcquire(PlayerNpcEntity playerNpc, long tick, int workerLimit) {
@@ -391,6 +456,13 @@ public final class PlayerNpcAiWorkBudget {
             if (!this.isScheduled(id)) {
                 this.updateWaiting(playerNpc, tick);
                 return false;
+            }
+            // An active worker is the server's permission for full bounded routine AI. Do not
+            // partially disable that worker behind the probe/startup expensive queue; individual
+            // goals retain their own small scan/path bounds and cadences.
+            if (this.activeWorkers.containsKey(id)) {
+                this.clearDenied(id);
+                return true;
             }
             if (this.admissionTick != tick) {
                 this.admissionTick = tick;
@@ -456,7 +528,8 @@ public final class PlayerNpcAiWorkBudget {
                         this.probeOwners.contains(id),
                         this.expensiveAdmittedAtTick.getOrDefault(id, Long.MIN_VALUE) == tick,
                         worker == null ? 0 : worker.runningGoals,
-                        worker == null ? 0L : Math.max(1L, tick - worker.startedTick + 1L)
+                        worker == null ? 0L : Math.max(1L, tick - worker.startedTick + 1L),
+                        worker == null ? 0L : this.workerShiftRemainingTicks()
                 ));
             }
             return new ResourceSnapshot(
@@ -475,6 +548,11 @@ public final class PlayerNpcAiWorkBudget {
                 this.probeOwners.clear();
                 this.probeDecisions.clear();
                 this.prune(tick);
+                if (this.workerShiftRotationPending) {
+                    this.rotateWorkerShift(tick);
+                    this.workerShiftRotationPending = false;
+                }
+                this.trimWorkers(workerLimit);
                 if (workerLimit <= 0) {
                     this.probeOwners.clear();
                 }
@@ -513,7 +591,14 @@ public final class PlayerNpcAiWorkBudget {
         private void prune(long tick) {
             this.waiting.entrySet().removeIf(entry -> !isUsable(entry.getValue().playerNpc)
                     || tick - entry.getValue().lastRequestTick > PROBE_REQUEST_STALE_TICKS);
-            this.activeWorkers.entrySet().removeIf(entry -> !isUsable(entry.getValue().playerNpc));
+            List<UUID> expiredWorkers = new ArrayList<>();
+            for (Map.Entry<UUID, ActiveWorker> entry : this.activeWorkers.entrySet()) {
+                ActiveWorker worker = entry.getValue();
+                if (!isUsable(worker.playerNpc)) {
+                    expiredWorkers.add(entry.getKey());
+                }
+            }
+            expiredWorkers.forEach(this::releaseWorker);
             this.deniedAtTick.entrySet().removeIf(entry -> tick - entry.getValue() > DENIAL_VISIBLE_TICKS);
             this.expensiveAdmittedAtTick.entrySet().removeIf(entry -> tick - entry.getValue() > 1);
             this.predicateSliceTicks.entrySet().removeIf(entry -> tick - entry.getValue() > DENIAL_VISIBLE_TICKS
@@ -533,6 +618,54 @@ public final class PlayerNpcAiWorkBudget {
         private void removeExpensiveRequest(UUID id) {
             this.expensiveQueue.remove(id);
             this.expensiveRequestedAtTick.remove(id);
+        }
+
+        private void releaseWorker(UUID id) {
+            this.activeWorkers.remove(id);
+            this.removeExpensiveRequest(id);
+        }
+
+        private void rotateWorkerShift(long tick) {
+            if (this.activeWorkers.isEmpty()) {
+                return;
+            }
+
+            // Existing waiters retain the front of the round-robin queue. Previous holders are
+            // appended behind them, so another eligible NPC gets the new day shift whenever one
+            // is available. If no one else is eligible, the old holder may naturally reacquire.
+            List<Map.Entry<UUID, ActiveWorker>> previousWorkers = new ArrayList<>(this.activeWorkers.entrySet());
+            for (Map.Entry<UUID, ActiveWorker> entry : previousWorkers) {
+                this.releaseWorker(entry.getKey());
+            }
+            for (Map.Entry<UUID, ActiveWorker> entry : previousWorkers) {
+                UUID id = entry.getKey();
+                PlayerNpcEntity playerNpc = entry.getValue().playerNpc;
+                if (!isUsable(playerNpc)) {
+                    continue;
+                }
+                this.waiting.remove(id);
+                this.waiting.put(id, new Request(playerNpc, tick));
+                this.markDenied(id, tick);
+            }
+        }
+
+        private long workerShiftRemainingTicks() {
+            if (this.observedOverworldDayTime == Long.MIN_VALUE
+                    || this.nextWorkerShiftRotationDayTime == Long.MIN_VALUE) {
+                return 0L;
+            }
+            return Math.max(0L, this.nextWorkerShiftRotationDayTime - this.observedOverworldDayTime);
+        }
+
+        private void trimWorkers(int workerLimit) {
+            int retained = 0;
+            List<UUID> excess = new ArrayList<>();
+            for (UUID id : this.activeWorkers.keySet()) {
+                if (retained++ >= Math.max(0, workerLimit)) {
+                    excess.add(id);
+                }
+            }
+            excess.forEach(this::releaseWorker);
         }
 
         private void markDenied(UUID id, long tick) {
@@ -599,7 +732,8 @@ public final class PlayerNpcAiWorkBudget {
             boolean probeTurn,
             boolean expensiveSlice,
             int runningGoals,
-            long heldTicks
+            long heldTicks,
+            long shiftRemainingTicks
     ) {
     }
 }

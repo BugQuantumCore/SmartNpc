@@ -140,7 +140,7 @@ Implemented material substitution:
 - `PlayerNpcBuildMaterialUtil` treats the scanned state as canonical and allows equivalent material families at build time.
 - Wood families include planks, logs, doors, trapdoors, fences, fence gates, stairs, and slabs.
 - Bed and carpet colors are interchangeable.
-- Cobblestone-like, loose fill, stone masonry, stone stair, and stone slab families are interchangeable within their own family.
+- Cobblestone-like, loose fill, stone masonry, stone stair, and stone slab families are interchangeable within their own family. Podzol is loose fill alongside dirt/coarse dirt/rooted dirt/grass/sand/gravel/mud, so an unavailable podzol blueprint cell may consume carried dirt rather than blocking otherwise-ready construction.
 - Shared blockstate properties are copied to substitutes so orientation and shape remain close to the blueprint.
 
 ## Build Task Persistence

@@ -118,6 +118,11 @@ public final class FarmSetupGoal extends Goal {
     private Path plannedStandPath;
     private int unreachableRecoveryAttempts;
     private int repairDirtSearchColumnCursor;
+    // Persist bounded TILL selection across canUse() attempts. With a one-path activation
+    // budget, restarting both searches at their nearest entry can retry one unreachable
+    // soil/stand pair forever even though other owned dirt cells are workable.
+    private int untilledGroundCursor;
+    private int interactionStandCursor;
     private int failedFarmReturnRetryAfterTick;
     private long lastExpensiveWorkAdmissionTick = Long.MIN_VALUE;
     private NavigationPathBudget activationPathBudget;
@@ -1236,16 +1241,26 @@ public final class FarmSetupGoal extends Goal {
     }
 
     private BlockPos findUntilledGround(ServerLevel serverLevel) {
-        for (BlockPos ground : this.plan.cropGroundPositions()) {
+        List<BlockPos> cropGround = this.plan.cropGroundPositions();
+        if (cropGround.isEmpty()) {
+            this.untilledGroundCursor = 0;
+            return null;
+        }
+        int start = Math.floorMod(this.untilledGroundCursor, cropGround.size());
+        for (int offset = 0; offset < cropGround.size(); offset++) {
+            int index = (start + offset) % cropGround.size();
+            BlockPos ground = cropGround.get(index);
             BlockState cropState = serverLevel.getBlockState(ground.above());
             if (cropState.getBlock() instanceof CropBlock) {
                 continue;
             }
             BlockState state = serverLevel.getBlockState(ground);
             if (!state.is(Blocks.FARMLAND) && FarmAi.isTillableGround(state)) {
+                this.untilledGroundCursor = (index + 1) % cropGround.size();
                 return ground.immutable();
             }
         }
+        this.untilledGroundCursor = 0;
         return null;
     }
 
@@ -1602,7 +1617,10 @@ public final class FarmSetupGoal extends Goal {
         List<BlockPos> candidates = this.interactionStandCandidates(target);
         candidates.sort(Comparator.comparingDouble(this.playerNpc.blockPosition()::distSqr));
         NavigationPathBudget pathBudget = this.pathBudgetForSelection();
-        for (BlockPos candidate : candidates) {
+        int start = candidates.isEmpty() ? 0 : Math.floorMod(this.interactionStandCursor, candidates.size());
+        for (int offset = 0; offset < candidates.size(); offset++) {
+            int index = (start + offset) % candidates.size();
+            BlockPos candidate = candidates.get(index);
             if (candidate.equals(feet)
                     || avoidStandingAboveTarget && candidate.equals(target.above())
                     || !this.canOccupyPlacementStand(serverLevel, candidate)
@@ -1612,6 +1630,7 @@ public final class FarmSetupGoal extends Goal {
             if (!pathBudget.tryConsume()) {
                 break;
             }
+            this.interactionStandCursor = (index + 1) % candidates.size();
             Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
             if (path != null
                     && path.canReach()

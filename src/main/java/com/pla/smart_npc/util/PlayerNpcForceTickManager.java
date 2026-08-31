@@ -54,6 +54,13 @@ public final class PlayerNpcForceTickManager {
     private static final int TRACKED_NPC_REFRESH_INTERVAL_TICKS = 20;
     private static final int TRACKED_NPC_METADATA_REFRESH_INTERVAL_TICKS = 20 * 5;
     private static final int RESTORED_ENTITY_LOAD_GRACE_TICKS = 20 * 30;
+    private static final int AUTO_EVALUATION_INTERVAL_TICKS = 20 * 5;
+    private static final double AUTO_HEALTHY_GROWTH_MSPT = 40.0D;
+    private static final double AUTO_CAUTION_GROWTH_MSPT = 45.0D;
+    private static final double AUTO_OVERLOAD_REDUCTION_MSPT = 52.0D;
+    private static final int AUTO_HEALTHY_GROWTH_CHECKS = 2;
+    private static final int AUTO_CAUTION_GROWTH_CHECKS = 4;
+    private static final long WORKER_HANDOFF_PREFETCH_TICKS = 20 * 10L;
     private static final String NPC_TAB_PREFIX = "[NPC] ";
     private static final String NPC_TAB_PROFILE_PREFIX = "zzNPC";
     private static final int TAB_PROFILE_NAME_LENGTH = 16;
@@ -64,6 +71,16 @@ public final class PlayerNpcForceTickManager {
     private static final Map<UUID, ManagedNpc> MANAGED_NPCS = new LinkedHashMap<>();
     @Nullable
     private static Boolean lastEnabled;
+    private static int automaticSlotTarget = 1;
+    private static int automaticCapabilityLimit = 1;
+    private static int healthyAutomaticEvaluations;
+    private static long lastAutomaticEvaluationTick = Long.MIN_VALUE;
+    private static double automaticBaselineMspt;
+    private static String automaticReason = "warming_up";
+    private static int effectiveForceTickSlots;
+    private static int extraSelectionCursor;
+    private static long handoffProtectionUntilTick = Long.MIN_VALUE;
+    private static int handoffProtectedSlotFloor;
 
     private PlayerNpcForceTickManager() {
     }
@@ -152,15 +169,18 @@ public final class PlayerNpcForceTickManager {
         }
 
         updateTrackedNpcs(server);
+        rebalanceForceTickets(server);
         PlayerNpcPerformanceMonitor.recordForceManagerTick(performanceStartNanos);
     }
 
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
+        resetAutomaticState();
         if (isEnabled()) {
             restorePersistentTickets(event.getServer());
             reconcileLoadedNpcs(event.getServer());
             lastEnabled = true;
+            rebalanceForceTickets(event.getServer());
         }
     }
 
@@ -168,6 +188,262 @@ public final class PlayerNpcForceTickManager {
     public static void onServerStopping(ServerStoppingEvent event) {
         releaseAll(event.getServer());
         lastEnabled = null;
+        resetAutomaticState();
+    }
+
+    private static void rebalanceForceTickets(MinecraftServer server) {
+        if (server == null || !isEnabled()) {
+            effectiveForceTickSlots = 0;
+            return;
+        }
+
+        PlayerNpcAiWorkBudget.ResourceSnapshot workerSnapshot = PlayerNpcAiWorkBudget.resourceSnapshot(server);
+        LinkedHashSet<UUID> workerIds = new LinkedHashSet<>();
+        for (PlayerNpcAiWorkBudget.ResourceHolder holder : workerSnapshot.holders()) {
+            if (!holder.worker()) {
+                continue;
+            }
+            if (!MANAGED_NPCS.containsKey(holder.npcId()) && holder.playerNpc() != null) {
+                track(holder.playerNpc());
+            }
+            if (MANAGED_NPCS.containsKey(holder.npcId())) {
+                workerIds.add(holder.npcId());
+            }
+        }
+
+        int mode = SmartNpcConfig.getForceTickMode();
+        boolean handoffPrefetch = mode < 0 && workerSnapshot.holders().stream()
+                .filter(PlayerNpcAiWorkBudget.ResourceHolder::worker)
+                .anyMatch(holder -> holder.shiftRemainingTicks() > 0L
+                        && holder.shiftRemainingTicks() <= WORKER_HANDOFF_PREFETCH_TICKS);
+        if (handoffPrefetch) {
+            // The scheduler briefly has no active worker while it rotates the time-1000 roster.
+            // Keep both the old holder and its prefetched replacement loaded through that gap so
+            // the replacement can request work and receive the new shift before either ticket is
+            // reclaimed as a spare.
+            if (server.getTickCount() > handoffProtectionUntilTick) {
+                handoffProtectedSlotFloor = workerIds.size() + 1;
+            } else {
+                handoffProtectedSlotFloor = Math.max(handoffProtectedSlotFloor, workerIds.size() + 1);
+            }
+            handoffProtectionUntilTick = Math.max(handoffProtectionUntilTick, server.getTickCount() + 60L);
+        }
+        boolean handoffProtectionActive = mode < 0
+                && server.getTickCount() <= handoffProtectionUntilTick;
+        if (!handoffProtectionActive) {
+            handoffProtectedSlotFloor = 0;
+        }
+        int slotLimit;
+        if (mode > 0) {
+            automaticReason = "fully_enabled";
+            automaticBaselineMspt = PlayerNpcPerformanceMonitor.getRollingBaselineMspt();
+            slotLimit = MANAGED_NPCS.size();
+        } else {
+            updateAutomaticSlotTarget(server, workerIds.size(), MANAGED_NPCS.size());
+            slotLimit = Math.max(workerIds.size(), automaticSlotTarget);
+            if (handoffPrefetch && MANAGED_NPCS.size() > workerIds.size()) {
+                // Load one future candidate before the time-1000 worker handoff. The scheduler can
+                // then grant that already-ticking NPC the new shift before the old worker's spare
+                // ticket is considered for retention.
+                slotLimit = Math.max(slotLimit, workerIds.size() + 1);
+            }
+            if (handoffProtectionActive) {
+                slotLimit = Math.max(slotLimit,
+                        Math.min(MANAGED_NPCS.size(), handoffProtectedSlotFloor));
+            }
+            slotLimit = Math.min(MANAGED_NPCS.size(), slotLimit);
+        }
+        effectiveForceTickSlots = slotLimit;
+
+        LinkedHashSet<UUID> desired = new LinkedHashSet<>();
+        desired.addAll(workerIds);
+        if (mode > 0) {
+            desired.addAll(MANAGED_NPCS.keySet());
+        } else {
+            // Preserve existing spare holders when possible. Worker changes still take priority:
+            // a newly selected worker consumes a slot before any old non-worker can retain it.
+            for (ManagedNpc managedNpc : MANAGED_NPCS.values()) {
+                if (desired.size() >= slotLimit) {
+                    break;
+                }
+                if (managedNpc.forceTicketSelected) {
+                    desired.add(managedNpc.npcId);
+                }
+            }
+            fillAvailableSpareSlots(server, desired, slotLimit);
+        }
+
+        // Add replacements before releasing old holders so the worker handoff never creates a
+        // moment with no force-ticketed worker chunk.
+        for (UUID desiredId : desired) {
+            ManagedNpc managedNpc = MANAGED_NPCS.get(desiredId);
+            if (managedNpc != null) {
+                managedNpc.setForceTicketSelected(server, true);
+            }
+        }
+        for (ManagedNpc managedNpc : new ArrayList<>(MANAGED_NPCS.values())) {
+            if (!desired.contains(managedNpc.npcId)) {
+                managedNpc.setForceTicketSelected(server, false);
+            }
+        }
+    }
+
+    private static void fillAvailableSpareSlots(
+            MinecraftServer server,
+            LinkedHashSet<UUID> desired,
+            int slotLimit
+    ) {
+        if (desired.size() >= slotLimit || MANAGED_NPCS.isEmpty()) {
+            return;
+        }
+        List<UUID> candidates = new ArrayList<>(MANAGED_NPCS.keySet());
+        int candidateCount = candidates.size();
+        int start = Math.floorMod(extraSelectionCursor, candidateCount);
+        // Grant new spare slots to NPCs that are already loaded first. Persisted unresolved
+        // entries remain a bounded bootstrap fallback, allowing one of them to be loaded when no
+        // currently ticking candidate is available.
+        for (boolean requireLoaded : new boolean[]{true, false}) {
+            int examined = 0;
+            while (desired.size() < slotLimit && examined < candidateCount) {
+                int index = (start + examined) % candidateCount;
+                UUID candidate = candidates.get(index);
+                ManagedNpc managedNpc = MANAGED_NPCS.get(candidate);
+                boolean loaded = managedNpc != null && managedNpc.resolve(server) != null;
+                if (!desired.contains(candidate) && loaded == requireLoaded) {
+                    desired.add(candidate);
+                    extraSelectionCursor = (index + 1) % candidateCount;
+                }
+                examined++;
+            }
+        }
+    }
+
+    private static void updateAutomaticSlotTarget(
+            MinecraftServer server,
+            int activeWorkerCount,
+            int knownNpcCount
+    ) {
+        int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
+        long maxHeapBytes = Math.max(1L, Runtime.getRuntime().maxMemory());
+        int heapGiB = (int) Math.max(1L, maxHeapBytes / (1024L * 1024L * 1024L));
+        automaticCapabilityLimit = (int) Math.max(1L, Math.min(12L,
+                Math.min((long) processors * 2L, (long) heapGiB * 3L)));
+        automaticSlotTarget = Math.max(1, Math.min(automaticSlotTarget, automaticCapabilityLimit));
+
+        long tick = server.getTickCount();
+        if (!PlayerNpcPerformanceMonitor.hasStableRollingSample()) {
+            healthyAutomaticEvaluations = 0;
+            automaticReason = "warming_up";
+            return;
+        }
+        if (lastAutomaticEvaluationTick != Long.MIN_VALUE
+                && tick - lastAutomaticEvaluationTick < AUTO_EVALUATION_INTERVAL_TICKS) {
+            return;
+        }
+        lastAutomaticEvaluationTick = tick;
+        automaticBaselineMspt = PlayerNpcPerformanceMonitor.getRollingBaselineMspt();
+
+        int protectedWorkerFloor = Math.max(1, activeWorkerCount);
+        if (automaticBaselineMspt >= 55.0D) {
+            healthyAutomaticEvaluations = 0;
+            automaticSlotTarget = protectedWorkerFloor;
+            automaticReason = "severe_overload_worker_floor";
+            return;
+        }
+        if (automaticBaselineMspt >= AUTO_OVERLOAD_REDUCTION_MSPT) {
+            healthyAutomaticEvaluations = 0;
+            automaticSlotTarget = Math.max(protectedWorkerFloor, automaticSlotTarget - 1);
+            automaticReason = "overload_removed_spare";
+            return;
+        }
+        if (Math.max(activeWorkerCount, automaticSlotTarget) >= knownNpcCount) {
+            healthyAutomaticEvaluations = 0;
+            automaticReason = "awaiting_unticketed_candidate";
+            return;
+        }
+        if (automaticSlotTarget >= automaticCapabilityLimit) {
+            healthyAutomaticEvaluations = 0;
+            automaticReason = "capability_ceiling";
+            return;
+        }
+
+        int requiredHealthyChecks;
+        if (automaticBaselineMspt <= AUTO_HEALTHY_GROWTH_MSPT) {
+            requiredHealthyChecks = AUTO_HEALTHY_GROWTH_CHECKS;
+            automaticReason = "healthy_growth_pending";
+        } else if (automaticBaselineMspt <= AUTO_CAUTION_GROWTH_MSPT) {
+            requiredHealthyChecks = AUTO_CAUTION_GROWTH_CHECKS;
+            automaticReason = "cautious_growth_pending";
+        } else {
+            healthyAutomaticEvaluations = 0;
+            automaticReason = "holding_for_headroom";
+            return;
+        }
+
+        if (++healthyAutomaticEvaluations >= requiredHealthyChecks) {
+            automaticSlotTarget++;
+            healthyAutomaticEvaluations = 0;
+            automaticReason = "healthy_slot_added";
+        }
+    }
+
+    private static void resetAutomaticState() {
+        automaticSlotTarget = 1;
+        automaticCapabilityLimit = 1;
+        healthyAutomaticEvaluations = 0;
+        lastAutomaticEvaluationTick = Long.MIN_VALUE;
+        automaticBaselineMspt = 0.0D;
+        automaticReason = "warming_up";
+        effectiveForceTickSlots = 0;
+        extraSelectionCursor = 0;
+        handoffProtectionUntilTick = Long.MIN_VALUE;
+        handoffProtectedSlotFloor = 0;
+    }
+
+    public static ForceTickSnapshot forceTickSnapshot(MinecraftServer server) {
+        int mode = SmartNpcConfig.getForceTickMode();
+        List<UUID> selected = new ArrayList<>();
+        int workerPriorityCount = 0;
+        int loadedNpcCount = 0;
+        Set<UUID> workerIds = new LinkedHashSet<>();
+        if (server != null) {
+            for (PlayerNpcAiWorkBudget.ResourceHolder holder
+                    : PlayerNpcAiWorkBudget.resourceSnapshot(server).holders()) {
+                if (holder.worker()) {
+                    workerIds.add(holder.npcId());
+                }
+            }
+        }
+        for (ManagedNpc managedNpc : MANAGED_NPCS.values()) {
+            if (server != null && managedNpc.resolve(server) != null) {
+                loadedNpcCount++;
+            }
+            if (!managedNpc.forceTicketSelected) {
+                continue;
+            }
+            selected.add(managedNpc.npcId);
+            if (workerIds.contains(managedNpc.npcId)) {
+                workerPriorityCount++;
+            }
+        }
+        return new ForceTickSnapshot(
+                mode,
+                mode == 0 ? 0 : effectiveForceTickSlots,
+                selected.size(),
+                workerPriorityCount,
+                loadedNpcCount,
+                MANAGED_NPCS.size(),
+                automaticCapabilityLimit,
+                automaticBaselineMspt,
+                mode < 0 ? automaticReason : mode == 0 ? "disabled" : "fully_enabled",
+                mode < 0 && server != null && server.getTickCount() <= handoffProtectionUntilTick,
+                List.copyOf(selected)
+        );
+    }
+
+    public static boolean hasForceTicket(UUID npcId) {
+        ManagedNpc managedNpc = npcId == null ? null : MANAGED_NPCS.get(npcId);
+        return managedNpc != null && managedNpc.forceTicketSelected;
     }
 
     @SubscribeEvent
@@ -216,8 +492,21 @@ public final class PlayerNpcForceTickManager {
         }
 
         MinecraftServer server = npc.level().getServer();
-        if (server != null) {
-            release(npc.getUUID(), server, removePersistentEntry);
+        if (server == null) {
+            return;
+        }
+        if (removePersistentEntry) {
+            release(npc.getUUID(), server, true);
+            return;
+        }
+
+        // Chunk unload and dimension transfer are not deletion. Keep the saved center/name so an
+        // automatic spare slot can select this NPC again later without requiring a restart.
+        ManagedNpc managedNpc = MANAGED_NPCS.get(npc.getUUID());
+        if (managedNpc != null) {
+            managedNpc.entityId = -1;
+            managedNpc.unresolvedTicks = 0;
+            managedNpc.broadcastTabRemove(server);
         }
     }
 
@@ -522,6 +811,28 @@ public final class PlayerNpcForceTickManager {
         return result;
     }
 
+    public record ForceTickSnapshot(
+            int configuredMode,
+            int effectiveSlots,
+            int usedSlots,
+            int workerTicketCount,
+            int eligibleNpcCount,
+            int knownNpcCount,
+            int capabilityLimit,
+            double baselineMspt,
+            String reason,
+            boolean handoffProtectionActive,
+            List<UUID> selectedNpcIds
+    ) {
+        public boolean automatic() {
+            return this.configuredMode < 0;
+        }
+
+        public String modeText() {
+            return this.configuredMode < 0 ? "AUTO" : this.configuredMode == 0 ? "OFF" : "FULL";
+        }
+    }
+
     private record TicketKey(UUID npcId, long chunkLong) {
     }
 
@@ -543,6 +854,7 @@ public final class PlayerNpcForceTickManager {
         private int nextMetadataRefreshTick;
         private int unresolvedTicks;
         private boolean tabListed;
+        private boolean forceTicketSelected;
 
         private ManagedNpc(UUID npcId) {
             this.npcId = npcId;
@@ -558,21 +870,26 @@ public final class PlayerNpcForceTickManager {
             net.minecraft.resources.ResourceKey<Level> currentLevelKey = level.dimension();
             boolean dimensionChanged = this.levelKey == null || !this.levelKey.equals(currentLevelKey);
             if (this.levelKey != null && dimensionChanged) {
-                this.releaseTickets(server);
+                this.removeForceTickets(server);
             }
 
             ChunkPos nextCenterChunk = npc.chunkPosition();
             String nextUsername = npc.hasUsername() ? npc.getUsername().getCombinedNames() : "";
+            boolean centerChanged = !Objects.equals(this.centerChunk, nextCenterChunk);
             boolean persistentStateChanged = dimensionChanged
-                    || !Objects.equals(this.centerChunk, nextCenterChunk)
+                    || centerChanged
                     || !Objects.equals(this.username, nextUsername);
             this.levelKey = currentLevelKey;
             boolean entityIdChanged = this.entityId != npc.getId();
             this.entityId = npc.getId();
             this.username = nextUsername;
             this.unresolvedTicks = 0;
+            this.centerChunk = nextCenterChunk;
 
-            this.updateForceTickets(level, nextCenterChunk);
+            if (this.forceTicketSelected
+                    && (dimensionChanged || centerChanged || this.forcedChunks.isEmpty())) {
+                this.refreshForceTickets(level, nextCenterChunk);
+            }
             if (persistentStateChanged) {
                 PlayerNpcForceTickData.get(server).put(
                         this.npcId,
@@ -619,14 +936,14 @@ public final class PlayerNpcForceTickManager {
         private void restoreFromData(MinecraftServer server, ServerLevel level, ChunkPos savedCenterChunk, String savedUsername) {
             net.minecraft.resources.ResourceKey<Level> savedLevelKey = level.dimension();
             if (this.levelKey != null && !this.levelKey.equals(savedLevelKey)) {
-                this.releaseTickets(server);
+                this.removeForceTickets(server);
             }
 
             this.levelKey = savedLevelKey;
             this.entityId = -1;
             this.username = Objects.requireNonNullElse(savedUsername, "");
             this.unresolvedTicks = 0;
-            this.updateForceTickets(level, savedCenterChunk);
+            this.centerChunk = savedCenterChunk;
         }
 
         private boolean shouldKeepWaitingForEntity(MinecraftServer server) {
@@ -639,19 +956,28 @@ public final class PlayerNpcForceTickManager {
                 return false;
             }
 
+            if (!this.forceTicketSelected) {
+                // Deliberately unticketed automatic candidates remain known through SavedData.
+                // They may be selected later when MSPT headroom adds a slot or a worker rotates.
+                this.unresolvedTicks = 0;
+                return true;
+            }
             if (this.forcedChunks.isEmpty()) {
-                this.updateForceTickets(level, this.centerChunk);
+                this.refreshForceTickets(level, this.centerChunk);
             }
 
             this.unresolvedTicks += TRACKED_NPC_REFRESH_INTERVAL_TICKS;
             return this.unresolvedTicks <= RESTORED_ENTITY_LOAD_GRACE_TICKS;
         }
 
-        private void updateForceTickets(ServerLevel level, ChunkPos nextCenterChunk) {
-            if (Objects.equals(this.centerChunk, nextCenterChunk) && !this.forcedChunks.isEmpty()) {
+        private void refreshForceTickets(ServerLevel level, ChunkPos nextCenterChunk) {
+            if (nextCenterChunk == null) {
                 return;
             }
             Set<ChunkPos> nextChunks = forceTickChunksAround(level, nextCenterChunk);
+            if (this.forcedChunks.equals(nextChunks)) {
+                return;
+            }
             for (ChunkPos oldChunk : new ArrayList<>(this.forcedChunks)) {
                 if (!nextChunks.contains(oldChunk)) {
                     this.removeTicket(level, oldChunk);
@@ -664,7 +990,24 @@ public final class PlayerNpcForceTickManager {
                     this.forcedChunks.add(nextChunk);
                 }
             }
-            this.centerChunk = nextCenterChunk;
+        }
+
+        private void setForceTicketSelected(MinecraftServer server, boolean selected) {
+            if (this.forceTicketSelected == selected) {
+                return;
+            }
+            this.forceTicketSelected = selected;
+            if (!selected) {
+                this.removeForceTickets(server);
+                return;
+            }
+            if (this.levelKey == null || this.centerChunk == null) {
+                return;
+            }
+            ServerLevel level = server.getLevel(this.levelKey);
+            if (level != null) {
+                this.refreshForceTickets(level, this.centerChunk);
+            }
         }
 
         private void addTicket(ServerLevel level, ChunkPos chunkPos) {
@@ -693,19 +1036,22 @@ public final class PlayerNpcForceTickManager {
         }
 
         private void releaseTickets(MinecraftServer server) {
+            this.forceTicketSelected = false;
+            this.removeForceTickets(server);
+            this.centerChunk = null;
+        }
+
+        private void removeForceTickets(MinecraftServer server) {
             if (this.levelKey == null || this.forcedChunks.isEmpty()) {
-                this.centerChunk = null;
                 this.forcedChunks.clear();
                 return;
             }
-
             ServerLevel level = server.getLevel(this.levelKey);
             if (level != null) {
                 for (ChunkPos chunkPos : new ArrayList<>(this.forcedChunks)) {
                     this.removeTicket(level, chunkPos);
                 }
             }
-            this.centerChunk = null;
             this.forcedChunks.clear();
         }
 

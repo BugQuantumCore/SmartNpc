@@ -192,6 +192,9 @@ public class GatherStoneGoal extends Goal {
         }
 
         boolean miningJob = isMiningJobActive(playerNpc);
+        boolean needsCurrentBuildStone = PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, playerNpc);
+        boolean unresolvedActiveBuildNeed = isStoneGatheringEpisodeActive(playerNpc)
+                && PlayerNpcBuildMaterialUtil.isMissingBuildMaterialSearchPending(playerNpc);
         return fishingSupportJob && playerNpc.shouldPrioritizeCobblestoneGathering()
                 || farmingSupportJob && FarmAi.needsFarmStone(playerNpc, serverLevel)
                 || exploringSupplyJob && playerNpc.shouldPrioritizeCobblestoneGathering()
@@ -201,7 +204,8 @@ public class GatherStoneGoal extends Goal {
                 && !farmingSupportJob
                 && !exploringSupplyJob
                 && (playerNpc.shouldPrioritizeCobblestoneGathering()
-                || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, playerNpc));
+                || needsCurrentBuildStone
+                || unresolvedActiveBuildNeed);
     }
 
     public static boolean isMiningJobActive(PlayerNpcEntity playerNpc) {
@@ -754,16 +758,10 @@ public class GatherStoneGoal extends Goal {
             if (!isSafeStoneStandAt(playerNpc, serverLevel, candidate)) {
                 continue;
             }
-            if (!pathBudget.tryConsume()) {
-                break;
-            }
-            if (pathNavigationAi.canReachOrSafelyDropTo(
-                    serverLevel,
-                    candidate,
-                    MAX_STAND_SAFE_DROP_BLOCKS
-            )) {
-                return Optional.of(candidate.immutable());
-            }
+            // Activation only chooses a physically safe stand. The running goal owns route
+            // creation/retry, so canUse cannot synchronously build a navigation region for each
+            // nearby stone candidate. This preserves fallback/reselection on an unreachable stand.
+            return Optional.of(candidate.immutable());
         }
         return Optional.of(nearest.immutable());
     }
@@ -1543,6 +1541,21 @@ public class GatherStoneGoal extends Goal {
             return this.recoverFromBlockedStoneAccess(serverLevel, "stone route reached protected farm");
         }
         this.markStoneAccessClearing();
+        if (this.clearBlockAi.needsPathWork(serverLevel)) {
+            // Stone-route clearing is optional recovery. Runtime still measured a single retained
+            // clear stand path at 118.8 ms even with a 0.03 node multiplier. Do not pathfind while
+            // this auxiliary clear owns GatherStone.tick: quarantine the inaccessible obstruction
+            // and let normal stone target/stand selection choose another route.
+            this.clearBlockAi.stop();
+            if (clearTarget != null) {
+                this.skippedAccessClearBlocks.add(clearTarget.immutable());
+                this.temporarilyBlockedAccessClears.put(
+                        clearTarget.immutable(),
+                        serverLevel.getGameTime() + FAILED_ACCESS_CLEAR_SKIP_TICKS
+                );
+            }
+            return this.recoverFromBlockedStoneAccess(serverLevel, "stone clear requires costly route; reselecting");
+        }
         boolean pathWorkAllowed = !this.clearBlockAi.needsPathWork(serverLevel)
                 || this.tryAcquireExpensiveWork(serverLevel);
         ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel, pathWorkAllowed);
@@ -1596,19 +1609,29 @@ public class GatherStoneGoal extends Goal {
         addForcedNearbyAccessCandidates(candidates, this.playerNpc.blockPosition(), this.standPos, this.targetPos);
         long now = serverLevel.getGameTime();
         this.temporarilyBlockedAccessClears.entrySet().removeIf(entry -> entry.getValue() <= now);
-        candidates.removeIf(pos -> pos.equals(this.targetPos)
-                || this.skippedAccessClearBlocks.contains(pos)
-                || this.temporarilyBlockedAccessClears.containsKey(pos)
-                || isInsideProtectedStoneTarget(this.playerNpc, pos));
-        boolean started = this.clearBlockAi.startNearest(
+        BlockPos nearest = candidates.stream()
+                .map(BlockPos::immutable)
+                .distinct()
+                .sorted(Comparator.comparingDouble(pos -> pos.distSqr(this.playerNpc.blockPosition())))
+                // Forced recovery can contribute hundreds of positions. Only the nearest small
+                // prefix may run protection/shape/raycast checks in one tick.
+                .limit(16)
+                .filter(pos -> !pos.equals(this.targetPos))
+                .filter(pos -> !this.skippedAccessClearBlocks.contains(pos))
+                .filter(pos -> !this.temporarilyBlockedAccessClears.containsKey(pos))
+                .filter(pos -> !isInsideProtectedStoneTarget(this.playerNpc, pos))
+                .filter(pos -> ClearBlockAi.canBreakFromCurrentStand(serverLevel, this.playerNpc, pos))
+                .findFirst()
+                .orElse(null);
+        boolean started = nearest != null && this.clearBlockAi.start(
                 serverLevel,
-                candidates,
+                nearest,
                 this::isClearablePathState,
                 "clearing stone path",
                 CLEAR_OBSTRUCTION_TICKS,
                 FORCED_CLEAR_DISTANCE_SQR
         );
-        boolean selectionPending = this.clearBlockAi.hasPendingSelection();
+        boolean selectionPending = false;
         if (started) {
             this.clearedAccessForTarget = true;
             this.markStoneAccessClearing();

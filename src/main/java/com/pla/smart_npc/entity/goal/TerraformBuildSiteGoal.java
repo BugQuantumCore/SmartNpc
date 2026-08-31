@@ -69,8 +69,9 @@ public class TerraformBuildSiteGoal extends Goal {
     private static final int SUPPORT_FILL_ESCAPE_HANDOFF_TICKS = 20 * 30;
     private static final int TARGET_SEARCH_RETRY_COOLDOWN_TICKS = 10;
     private static final int ACTIONABLE_PREP_CACHE_TICKS = 20;
-    private static final int MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE = 16;
-    private static final int MAX_TERRAFORM_SUPPORT_COLUMNS_PER_SLICE = 4;
+    private static final int NO_PREP_CACHE_TICKS = 20 * 60 * 5;
+    private static final int MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE = 4;
+    private static final int MAX_TERRAFORM_SUPPORT_COLUMNS_PER_SLICE = 1;
     private static final int MAX_TERRAFORM_LOCAL_PATH_CHECKS = 1;
     private static final int DIRECT_CLEAR_FAILURE_RETRY_TICKS = 20 * 10;
     private static final double SCAFFOLD_PLACE_CLEARANCE_Y = 0.65D;
@@ -103,7 +104,6 @@ public class TerraformBuildSiteGoal extends Goal {
             Items.COBBLED_DEEPSLATE
     );
     private static final Map<PlayerNpcEntity, ActionablePrepCache> ACTIONABLE_PREP_CACHE = new WeakHashMap<>();
-    private static final Map<PlayerNpcBuildLayout, List<PlayerNpcBuildLayout.RelativeBlock>> SORTED_CLEAR_BLOCKS = new WeakHashMap<>();
 
     private final PlayerNpcEntity playerNpc;
     private final PathNavigationAi pathNavigationAi;
@@ -143,6 +143,7 @@ public class TerraformBuildSiteGoal extends Goal {
     private int targetSearchClearBlockIndex;
     private int targetSearchSupportColumnIndex;
     private boolean targetSearchClearComplete;
+    private boolean continuingTargetSearch;
     private boolean usingTemporaryMainHand;
 
     public TerraformBuildSiteGoal(PlayerNpcEntity playerNpc, double speed) {
@@ -276,8 +277,19 @@ public class TerraformBuildSiteGoal extends Goal {
                 return false;
             }
             this.target = supportFillHandoff;
+            this.continuingTargetSearch = false;
             this.targetSearchRetryCooldownTicks = 0;
             return true;
+        }
+
+        // A completed negative scan is authoritative for the current construction phase. The
+        // arbitration helpers already consume this cache, but canUse previously ignored it and
+        // immediately restarted the full cursor scan. That pending rescan published prep=true,
+        // retained priority 5 MOVE ownership, and starved missing-log/stone goals indefinitely.
+        // Supply/fill phase changes invalidate the cache through ActionablePrepCache.matches;
+        // an expired failed-clear cooldown also gets one immediate retry.
+        if (this.shouldHonorCompletedNoPrepCache(serverLevel)) {
+            return false;
         }
 
         if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
@@ -287,13 +299,16 @@ public class TerraformBuildSiteGoal extends Goal {
         TargetSearchResult nextTarget = this.findNextTarget(serverLevel, true);
         if (!nextTarget.complete()) {
             publishPendingPrepCache(this.playerNpc, serverLevel);
-            int retryTicks = 1 + this.playerNpc.getRandom().nextInt(4);
-            this.targetSearchRetryCooldownTicks = retryTicks;
-            this.canUseThrottle.retryIn(this.playerNpc, retryTicks);
-            return false;
+            this.target = null;
+            this.continuingTargetSearch = true;
+            // The goal is starting and now owns a worker turn. Keep the per-tick footprint slice
+            // small, but do not add a second randomized delay between successful admitted slices.
+            this.targetSearchRetryCooldownTicks = 0;
+            return true;
         }
         publishPrepCache(this.playerNpc, serverLevel, nextTarget.target());
         if (nextTarget.target() == null) {
+            this.continuingTargetSearch = false;
             this.targetSearchRetryCooldownTicks = TARGET_SEARCH_RETRY_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(10);
             return false;
         }
@@ -310,13 +325,29 @@ public class TerraformBuildSiteGoal extends Goal {
         }
 
         this.target = nextTarget.target();
+        this.continuingTargetSearch = false;
         this.targetSearchRetryCooldownTicks = 0;
+        return true;
+    }
+
+    private boolean shouldHonorCompletedNoPrepCache(ServerLevel serverLevel) {
+        ActionablePrepCache cached = matchingPrepCache(this.playerNpc, serverLevel);
+        if (cached == null || cached.hasPrep()) {
+            return false;
+        }
+
+        boolean failedClearRetryReady = this.failedDirectClearTargets.values().stream()
+                .anyMatch(retryTick -> retryTick <= serverLevel.getGameTime());
+        if (failedClearRetryReady) {
+            ACTIONABLE_PREP_CACHE.remove(this.playerNpc);
+            return false;
+        }
         return true;
     }
 
     @Override
     public boolean canContinueToUse() {
-        return (this.target != null || !this.temporaryScaffold.isEmpty())
+        return (this.target != null || !this.temporaryScaffold.isEmpty() || this.continuingTargetSearch)
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isStoneAccessClearing()
                 && !hasActiveVerticalEscape(this.playerNpc)
@@ -375,6 +406,9 @@ public class TerraformBuildSiteGoal extends Goal {
 
         if (this.target == null) {
             this.tickScaffoldCleanup(serverLevel);
+            if (this.temporaryScaffold.isEmpty() && this.continuingTargetSearch) {
+                this.tickContinuingTargetSearch(serverLevel);
+            }
             return;
         }
 
@@ -391,9 +425,9 @@ public class TerraformBuildSiteGoal extends Goal {
             this.playerNpc.clearBlockBreakProgress(this.target.pos());
             this.stopEpicFightDiggingAnimation();
             this.workTicks = 0;
+            this.restorePreviousMainHand();
             if (!this.temporaryScaffold.isEmpty()) {
                 this.target = null;
-                this.restorePreviousMainHand();
                 this.clearBlockAi.stop();
                 this.routeBreakingBlockAi.stop();
                 this.routeToolAi.restoreMainHand();
@@ -404,6 +438,7 @@ public class TerraformBuildSiteGoal extends Goal {
             }
             if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
                 this.target = null;
+                this.continuingTargetSearch = true;
                 this.targetSearchRetryCooldownTicks = 1 + this.playerNpc.getRandom().nextInt(4);
                 return;
             }
@@ -411,12 +446,12 @@ public class TerraformBuildSiteGoal extends Goal {
             if (!nextTarget.complete()) {
                 publishPendingPrepCache(this.playerNpc, serverLevel);
                 this.target = null;
-                int retryTicks = 1 + this.playerNpc.getRandom().nextInt(4);
-                this.targetSearchRetryCooldownTicks = retryTicks;
-                this.canUseThrottle.retryIn(this.playerNpc, retryTicks);
+                this.continuingTargetSearch = true;
+                this.targetSearchRetryCooldownTicks = 0;
                 return;
             }
             this.target = nextTarget.target();
+            this.continuingTargetSearch = false;
             publishPrepCache(this.playerNpc, serverLevel, this.target);
             this.resetRouteClearProgress();
             this.skippedRouteClearTargets.clear();
@@ -429,6 +464,7 @@ public class TerraformBuildSiteGoal extends Goal {
         if (this.target.phase() == TerraformPhase.FILL_SUPPORT
                 && this.deferSupportFillForVerticalEscape(serverLevel, this.target.pos())) {
             this.stopEpicFightDiggingAnimation();
+            this.restorePreviousMainHand();
             this.target = null;
             this.workTicks = 0;
             this.resetRouteClearProgress();
@@ -505,6 +541,7 @@ public class TerraformBuildSiteGoal extends Goal {
         if (this.temporaryScaffold.isEmpty()) {
             this.target = null;
         }
+        this.continuingTargetSearch = false;
         this.scaffoldPlacePos = null;
         this.skippedSupportTargets.clear();
         this.skippedRouteClearTargets.clear();
@@ -528,7 +565,7 @@ public class TerraformBuildSiteGoal extends Goal {
         if (this.target.phase() == TerraformPhase.CLEAR_WATER) {
             this.stopEpicFightDiggingAnimation();
             if (state.getFluidState().isEmpty()) {
-                this.target = null;
+                this.queueNextTargetSearch();
                 return;
             }
             if (FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)) {
@@ -543,7 +580,7 @@ public class TerraformBuildSiteGoal extends Goal {
             }
             serverLevel.setBlockAndUpdate(pos, Blocks.AIR.defaultBlockState());
             this.playerNpc.triggerMainHandUseAnimation();
-            this.target = null;
+            this.queueNextTargetSearch();
             this.workTicks = 0;
             this.updateTaskDetail();
             return;
@@ -574,7 +611,8 @@ public class TerraformBuildSiteGoal extends Goal {
 
         boolean temporaryCraftingTable = CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos);
         BlockPos bedCompanion = PlayerNpcBedUtil.findMatchingCompanion(serverLevel, pos, state).orElse(null);
-        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, pos, state, this.playerNpc)) {
+        boolean destroyed = PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, pos, state, this.playerNpc);
+        if (destroyed) {
             this.failedDirectClearTargets.remove(pos);
             PlayerNpcBedUtil.removeRemainingCompanion(serverLevel, this.playerNpc, state, bedCompanion);
             if (temporaryCraftingTable) {
@@ -592,29 +630,33 @@ public class TerraformBuildSiteGoal extends Goal {
         }
         this.playerNpc.clearBlockBreakProgress(pos);
         this.stopEpicFightDiggingAnimation();
-        this.target = null;
+        this.queueNextTargetSearch(destroyed);
         this.workTicks = 0;
         this.restorePreviousMainHand();
         this.updateTaskDetail();
     }
 
     private void tickFillSupport(ServerLevel serverLevel) {
-        if (this.workTicks++ < PLACE_DELAY_TICKS) {
-            return;
-        }
-        this.workTicks = 0;
-
         BlockPos pos = this.target.pos();
+        // Equip the exact support block before the placement windup so the visible hand matches
+        // the state that will be placed. The selected one-item stack remains in main hand across
+        // retriable clearance failures and is consumed only by a successful placeHeldBlock call.
         Optional<ItemStack> fillStack = this.useFillBlockInMainHand();
         if (fillStack.isEmpty()) {
             if (this.isSupportFillEscapeHandoffTarget(this.target)) {
                 this.clearSupportFillEscapeHandoff(false);
             }
+            this.restorePreviousMainHand();
             this.target = null;
             return;
         }
-
         BlockState fillState = ((BlockItem) fillStack.get().getItem()).getBlock().defaultBlockState();
+
+        if (this.workTicks++ < PLACE_DELAY_TICKS) {
+            return;
+        }
+        this.workTicks = 0;
+
         if (!PlayerNpcHomeUtil.isReplaceableForNpcBuild(serverLevel, pos)) {
             this.noteSupportFillFailure(serverLevel, pos, "blocked");
             return;
@@ -640,7 +682,61 @@ public class TerraformBuildSiteGoal extends Goal {
         if (this.isSupportFillEscapeHandoffTarget(this.target)) {
             this.clearSupportFillEscapeHandoff(false);
         }
+        // placeHeldBlock consumed the selected one-item fill stack. Restore the original hand
+        // before the cursor moves to another target; stop() remains the interruption fallback.
+        this.restorePreviousMainHand();
+        this.queueNextTargetSearch();
+    }
+
+    /**
+     * Keep ownership of the builder work turn while the bounded footprint cursor finds the next
+     * actionable block. Releasing the goal after every successful block let unrelated routine
+     * goals win arbitration for seconds at a time even though terraform work remained.
+     */
+    private void tickContinuingTargetSearch(ServerLevel serverLevel) {
+        if (this.targetSearchRetryCooldownTicks > 0) {
+            this.targetSearchRetryCooldownTicks--;
+            return;
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.targetSearchRetryCooldownTicks = 1 + this.playerNpc.getRandom().nextInt(4);
+            return;
+        }
+
+        TargetSearchResult nextTarget = this.findNextTarget(serverLevel, true);
+        if (!nextTarget.complete()) {
+            publishPendingPrepCache(this.playerNpc, serverLevel);
+            // Admission succeeded and each pass is already hard-capped at four clear blocks or
+            // one support column. Resume on the next normal goal tick instead of idling another
+            // one-to-four goal ticks; denial above remains the only randomized backoff.
+            this.targetSearchRetryCooldownTicks = 0;
+            return;
+        }
+
+        this.target = nextTarget.target();
+        publishPrepCache(this.playerNpc, serverLevel, this.target);
+        this.continuingTargetSearch = false;
+        if (this.target != null && !canRunTargetNow(serverLevel, this.playerNpc, this.target)) {
+            this.target = null;
+        }
+        this.resetRouteClearProgress();
+        this.skippedRouteClearTargets.clear();
+        this.updateTaskDetail();
+        if (this.target != null) {
+            this.moveToTarget(serverLevel);
+        }
+    }
+
+    private void queueNextTargetSearch() {
+        this.queueNextTargetSearch(true);
+    }
+
+    private void queueNextTargetSearch(boolean immediate) {
         this.target = null;
+        this.continuingTargetSearch = true;
+        if (immediate) {
+            this.targetSearchRetryCooldownTicks = 0;
+        }
     }
 
     private boolean handleSupportFillClipping(ServerLevel serverLevel, BlockPos pos, BlockState fillState) {
@@ -696,6 +792,9 @@ public class TerraformBuildSiteGoal extends Goal {
         if (!this.skippedSupportTargets.contains(immutable)) {
             this.skippedSupportTargets.add(immutable);
         }
+        // This target has now failed permanently for the current pass. Return the unconsumed held
+        // fill item to inventory and restore the original hand before selecting another target.
+        this.restorePreviousMainHand();
         this.supportFillFailures = 0;
         this.lastSupportFillFailurePos = null;
         if (this.isSupportFillEscapeHandoffTarget(this.target)) {
@@ -703,6 +802,7 @@ public class TerraformBuildSiteGoal extends Goal {
         }
         if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
             this.target = null;
+            this.continuingTargetSearch = true;
             this.targetSearchRetryCooldownTicks = 1 + this.playerNpc.getRandom().nextInt(4);
             this.updateTaskDetail();
             return;
@@ -711,13 +811,13 @@ public class TerraformBuildSiteGoal extends Goal {
         if (!nextTarget.complete()) {
             publishPendingPrepCache(this.playerNpc, serverLevel);
             this.target = null;
-            int retryTicks = 1 + this.playerNpc.getRandom().nextInt(4);
-            this.targetSearchRetryCooldownTicks = retryTicks;
-            this.canUseThrottle.retryIn(this.playerNpc, retryTicks);
+            this.continuingTargetSearch = true;
+            this.targetSearchRetryCooldownTicks = 0;
             this.updateTaskDetail();
             return;
         }
         this.target = nextTarget.target();
+        this.continuingTargetSearch = false;
         publishPrepCache(this.playerNpc, serverLevel, this.target);
         if (this.target == null) {
             this.supportFillRetryCooldownTicks = SUPPORT_FILL_RETRY_COOLDOWN_TICKS;
@@ -1349,7 +1449,9 @@ public class TerraformBuildSiteGoal extends Goal {
             return;
         }
         if (this.target == null) {
-            this.playerNpc.setCurrentAiDetail("");
+            this.playerNpc.setCurrentAiDetail(this.continuingTargetSearch
+                    ? "checking build site"
+                    : "");
             return;
         }
 
@@ -1388,7 +1490,10 @@ public class TerraformBuildSiteGoal extends Goal {
         BuildContext buildContext = context.get();
         this.ensureTargetSearchContext(buildContext);
         if (!this.targetSearchClearComplete) {
-            List<PlayerNpcBuildLayout.RelativeBlock> blocks = sortedClearBlocks(buildContext.layout());
+            // Layout data is already an immutable, deterministic loader-order list. Do not lazily
+            // sort the entire blueprint inside the first canUse call for this layout; that full
+            // stream sort bypasses the retained four-block slice.
+            List<PlayerNpcBuildLayout.RelativeBlock> blocks = buildContext.layout().blocks();
             int endIndex = Math.min(
                     blocks.size(),
                     this.targetSearchClearBlockIndex + MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE
@@ -1407,7 +1512,10 @@ public class TerraformBuildSiteGoal extends Goal {
                 );
                 if (clearTarget.isPresent()) {
                     TerraformTarget selected = clearTarget.get();
-                    this.resetTargetSearch();
+                    // Resume after this blueprint entry once it has been cleared. Restarting at
+                    // zero after every target made later terraform blocks take many admitted
+                    // four-entry slices even though the active episode already owned a cursor.
+                    this.targetSearchClearBlockIndex = index + 1;
                     return TargetSearchResult.complete(selected);
                 }
             }
@@ -1457,7 +1565,9 @@ public class TerraformBuildSiteGoal extends Goal {
                             TerraformPhase.FILL_SUPPORT,
                             Blocks.DIRT.defaultBlockState()
                     );
-                    this.resetTargetSearch();
+                    // Retain this column so a multi-block support hole is filled bottom-up on the
+                    // next bounded pass, without rescanning all earlier footprint columns.
+                    this.targetSearchSupportColumnIndex = columnIndex;
                     return TargetSearchResult.complete(selected);
                 }
             }
@@ -1486,17 +1596,6 @@ public class TerraformBuildSiteGoal extends Goal {
         this.targetSearchClearBlockIndex = 0;
         this.targetSearchSupportColumnIndex = 0;
         this.targetSearchClearComplete = false;
-    }
-
-    private static List<PlayerNpcBuildLayout.RelativeBlock> sortedClearBlocks(PlayerNpcBuildLayout layout) {
-        synchronized (SORTED_CLEAR_BLOCKS) {
-            return SORTED_CLEAR_BLOCKS.computeIfAbsent(layout, key -> key.blocks().stream()
-                    .sorted(Comparator
-                            .comparingInt(PlayerNpcBuildLayout.RelativeBlock::y)
-                            .thenComparingInt(PlayerNpcBuildLayout.RelativeBlock::x)
-                            .thenComparingInt(PlayerNpcBuildLayout.RelativeBlock::z))
-                    .toList());
-        }
     }
 
     private static boolean canRunTargetNow(ServerLevel serverLevel, PlayerNpcEntity playerNpc, TerraformTarget target) {
@@ -1539,7 +1638,10 @@ public class TerraformBuildSiteGoal extends Goal {
                 layoutId,
                 hasPrep,
                 hasPrep && canRunTargetNow(serverLevel, playerNpc, target),
-                needsShovel
+                needsShovel,
+                playerNpc.shouldPrioritizeLogGathering(),
+                playerNpc.shouldPrioritizeCobblestoneGathering(),
+                hasFillBlock(playerNpc)
         ));
     }
 
@@ -1552,8 +1654,11 @@ public class TerraformBuildSiteGoal extends Goal {
                 home.map(PlayerNpcHomeUtil.HomeArea::origin).orElse(null),
                 layoutId,
                 true,
+                true,
                 false,
-                false
+                playerNpc.shouldPrioritizeLogGathering(),
+                playerNpc.shouldPrioritizeCobblestoneGathering(),
+                hasFillBlock(playerNpc)
         ));
     }
 
@@ -1775,6 +1880,12 @@ public class TerraformBuildSiteGoal extends Goal {
 
     private Optional<ItemStack> useFillBlockInMainHand() {
         ItemStack mainHand = this.playerNpc.getMainHandItem();
+        // Once a temporary fill item has entered its visible windup, keep that exact stack selected
+        // until placement, final failure, or interruption restores the original hand. A newly
+        // acquired higher-priority fill item must not make the rendered hand change mid-action.
+        if (this.usingTemporaryMainHand && isFillStack(mainHand)) {
+            return Optional.of(mainHand);
+        }
         Optional<net.minecraft.world.item.Item> preferredInventoryFill = this.findPreferredInventoryFillItem();
         if (preferredInventoryFill.isPresent()
                 && (!isFillStack(mainHand)
@@ -2184,7 +2295,10 @@ public class TerraformBuildSiteGoal extends Goal {
             String layoutId,
             boolean hasPrep,
             boolean actionable,
-            boolean needsShovel
+            boolean needsShovel,
+            boolean needsLogSupply,
+            boolean needsStoneSupply,
+            boolean hasFillMaterial
     ) {
         private boolean matches(
                 PlayerNpcEntity playerNpc,
@@ -2193,12 +2307,16 @@ public class TerraformBuildSiteGoal extends Goal {
                 String currentLayoutId
         ) {
             int age = playerNpc.tickCount - this.tick;
+            int maxAge = this.hasPrep ? ACTIONABLE_PREP_CACHE_TICKS : NO_PREP_CACHE_TICKS;
             return age >= 0
-                    && age <= ACTIONABLE_PREP_CACHE_TICKS
+                    && age <= maxAge
                     + Math.floorMod(playerNpc.getUUID().hashCode(), 10)
                     && this.dimension.equals(serverLevel.dimension().location())
                     && java.util.Objects.equals(this.homeOrigin, home == null ? null : home.origin())
-                    && this.layoutId.equals(currentLayoutId);
+                    && this.layoutId.equals(currentLayoutId)
+                    && this.needsLogSupply == playerNpc.shouldPrioritizeLogGathering()
+                    && this.needsStoneSupply == playerNpc.shouldPrioritizeCobblestoneGathering()
+                    && this.hasFillMaterial == hasFillBlock(playerNpc);
         }
     }
 

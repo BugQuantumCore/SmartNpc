@@ -238,11 +238,14 @@ public final class FarmCropGoal extends Goal {
             return false;
         }
         boolean activeLogRoute = GatherLogsGoal.isLogGatheringEpisodeActive(this.playerNpc);
-        boolean missingPlantingSupplies = needsPlantingSupplies(this.playerNpc, serverLevel);
-        if (activeLogRoute
-                || GatherLogsGoal.shouldDeferFarmCropWork(this.playerNpc, serverLevel)
+        boolean deferredForLogs = !activeLogRoute
+                && GatherLogsGoal.shouldDeferFarmCropWork(this.playerNpc, serverLevel);
+        // The planting-supply inventory/plot walk is only relevant to the log-defer exception.
+        // Avoid paying for it on every ordinary FarmCrop canUse probe.
+        boolean deferFarmWork = deferredForLogs
                 && !hasActionableOwnedFarmWork(this.playerNpc, serverLevel)
-                && !missingPlantingSupplies) {
+                && !needsPlantingSupplies(this.playerNpc, serverLevel);
+        if (activeLogRoute || deferFarmWork) {
             this.playerNpc.setIdleTraceDetail(activeLogRoute
                     ? "farm crop deferred: active log gathering route"
                     : "farm crop deferred: required log supply", 40);
@@ -399,16 +402,16 @@ public final class FarmCropGoal extends Goal {
             return true;
         }
 
-        BlockPos villageCrop = this.findNearbyMatureCrop(serverLevel);
-        if (villageCrop != null && this.selectWorldAction(serverLevel, Action.HARVEST, villageCrop)) {
-            return true;
-        }
-
         if (!FarmAi.hasFarmSeedOrCrop(this.playerNpc)) {
             BlockPos forage = this.findNearbyForage(serverLevel);
             if (forage != null && this.selectWorldAction(serverLevel, Action.FORAGE, forage)) {
                 return true;
             }
+        }
+
+        BlockPos villageCrop = this.findNearbyMatureCrop(serverLevel);
+        if (villageCrop != null && this.selectWorldAction(serverLevel, Action.HARVEST, villageCrop)) {
+            return true;
         }
 
         WorldTarget bonemeal = this.findBonemealableOwnCrop(serverLevel);
