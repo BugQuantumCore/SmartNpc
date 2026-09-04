@@ -70,6 +70,7 @@ public final class ReturnPositionAi {
     private String lastRouteDebug = "";
     private String lastClearDebug = "";
     private String lastPillarDebug = "";
+    private boolean workerSlotPaused;
 
     public ReturnPositionAi(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -83,6 +84,15 @@ public final class ReturnPositionAi {
     }
 
     public void start(BlockPos target) {
+        if (this.workerSlotPaused
+                && PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)
+                && this.target != null
+                && this.target.equals(target)
+                && this.pillarUpAi.isRunning()) {
+            this.workerSlotPaused = false;
+            return;
+        }
+        this.workerSlotPaused = false;
         this.target = target.immutable();
         this.repathTicks = 0;
         this.routeAttempts = 0;
@@ -103,6 +113,9 @@ public final class ReturnPositionAi {
     /** Starts return state while reusing an exact path already paid for by target selection. */
     public void start(BlockPos target, Path selectedPath) {
         this.start(target);
+        if (this.pillarUpAi.isRunning()) {
+            return;
+        }
         if (!isExactPathTo(selectedPath, target)) {
             return;
         }
@@ -165,6 +178,10 @@ public final class ReturnPositionAi {
             boolean allowOpenSkyVerticalRecovery
     ) {
         if (target == null) {
+            return;
+        }
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.pauseForWorkerSlotLoss();
             return;
         }
         if (this.target == null || !this.target.equals(target)) {
@@ -428,6 +445,10 @@ public final class ReturnPositionAi {
     }
 
     public void stop() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc) && this.pillarUpAi.isRunning()) {
+            this.pauseForWorkerSlotLoss();
+            return;
+        }
         this.clearBlockAi.stop();
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
@@ -446,6 +467,17 @@ public final class ReturnPositionAi {
         this.lastRouteDebug = "";
         this.lastClearDebug = "";
         this.lastPillarDebug = "";
+    }
+
+    private void pauseForWorkerSlotLoss() {
+        this.playerNpc.getNavigation().stop();
+        this.clearBlockAi.stop();
+        this.breakingBlockAi.stop();
+        this.pathStuckFallbackAi.stop();
+        this.toolAi.restoreMainHand();
+        this.workerSlotPaused = true;
+        // Keep the return target and PillarUpAi's unplaced/settling support state. The caller may
+        // restart ordinary movement later, while a matching holder resumes the vertical step.
     }
 
     private boolean tryStartDirectPillar(

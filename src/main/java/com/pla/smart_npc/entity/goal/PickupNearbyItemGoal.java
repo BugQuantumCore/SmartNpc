@@ -13,6 +13,7 @@ import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
@@ -70,7 +71,8 @@ public class PickupNearbyItemGoal extends Goal {
     private static final int HIGH_ITEM_VERTICAL_BLOCK_GAP = 2;
     private static final int PICKUP_PILLAR_SEARCH_RADIUS = 2;
     private static final int MAX_TARGET_CANDIDATES = 6;
-    private static final float TARGET_SELECTION_PATH_NODE_MULTIPLIER = 0.05F;
+    private static final float TARGET_SELECTION_PATH_NODE_MULTIPLIER = 0.03F;
+    private static final float OVERLOADED_TARGET_SELECTION_PATH_NODE_MULTIPLIER = 0.01F;
     // One failed navigation build can consume most of the 50 ms server-tick budget in dense
     // terrain. Later throttled activations can inspect another candidate without batching paths.
     private static final int MAX_TARGET_SELECTION_PATHS = 1;
@@ -114,6 +116,7 @@ public class PickupNearbyItemGoal extends Goal {
     private int nextDetailProgressRefreshTick;
     private UUID lastDetailTargetId;
     private BlockPos lastDetailPriorityCenter;
+    private boolean workerSlotPaused;
 
     public PickupNearbyItemGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -127,6 +130,9 @@ public class PickupNearbyItemGoal extends Goal {
 
     @Override
     public boolean canUse() {
+        if (!PlayerNpcAiWorkBudget.hasWorkerSlot(this.playerNpc)) {
+            return false;
+        }
         if (giveUpCooldownTicks > 0) {
             giveUpCooldownTicks--;
             return false;
@@ -134,6 +140,13 @@ public class PickupNearbyItemGoal extends Goal {
 
         if (!canCollectRightNow()) {
             return false;
+        }
+        if (this.workerSlotPaused
+                && this.targetItem != null
+                && this.isCollectable(this.targetItem)
+                && (this.pickupPillarBasePos != null
+                || this.pickupPillarAi != null && this.pickupPillarAi.isRunning())) {
+            return true;
         }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
@@ -167,6 +180,10 @@ public class PickupNearbyItemGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            return false;
+        }
         return canCollectRightNow()
                 && targetItem != null
                 && isCollectable(targetItem)
@@ -177,6 +194,21 @@ public class PickupNearbyItemGoal extends Goal {
 
     @Override
     public void start() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            this.playerNpc.getNavigation().stop();
+            return;
+        }
+        if (this.workerSlotPaused
+                && this.targetItem != null
+                && (this.pickupPillarBasePos != null
+                || this.pickupPillarAi != null && this.pickupPillarAi.isRunning())) {
+            this.workerSlotPaused = false;
+            this.playerNpc.setCurrentAiState(AI_STATE);
+            this.updateDetail();
+            return;
+        }
+        this.workerSlotPaused = false;
         pickupTicks = 0;
         repathTicks = 0;
         failedPathTicks = 0;
@@ -202,6 +234,11 @@ public class PickupNearbyItemGoal extends Goal {
 
     @Override
     public void tick() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            this.playerNpc.getNavigation().stop();
+            return;
+        }
         if (targetItem == null || !targetItem.isAlive() || targetItem.getItem().isEmpty()) {
             // GoalSelector will stop this goal and the next canUse() performs an admitted,
             // bounded retarget. Never hide a second six-path selection batch inside running tick.
@@ -287,6 +324,21 @@ public class PickupNearbyItemGoal extends Goal {
 
     @Override
     public void stop() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)
+                && (this.workerSlotPaused
+                || this.pickupPillarBasePos != null
+                || this.pickupPillarAi != null && this.pickupPillarAi.isRunning())) {
+            this.playerNpc.getNavigation().stop();
+            this.breakingBlockAi.stop();
+            this.clearBlockAi.stop();
+            this.pathStuckFallbackAi.stop();
+            this.helperToolAi.restoreMainHand();
+            this.workerSlotPaused = true;
+            if (AI_STATE.equals(this.playerNpc.getCurrentAiState())) {
+                this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+            }
+            return;
+        }
         boolean gaveUp = pickupTicks >= MAX_PICKUP_TICKS || failedPathTicks >= MAX_FAILED_PATH_TICKS;
         if (gaveUp) {
             giveUpCooldownTicks = FAILED_PICKUP_COOLDOWN_TICKS + playerNpc.getRandom().nextInt(20 * 4);
@@ -1664,7 +1716,7 @@ public class PickupNearbyItemGoal extends Goal {
             return PathNavigationAi.createBoundedPath(
                     playerNpc,
                     item.blockPosition(),
-                    TARGET_SELECTION_PATH_NODE_MULTIPLIER
+                    targetSelectionPathNodeMultiplier()
             );
         }
 
@@ -1676,8 +1728,14 @@ public class PickupNearbyItemGoal extends Goal {
             return PathNavigationAi.createBoundedPath(
                     playerNpc,
                     pos,
-                    TARGET_SELECTION_PATH_NODE_MULTIPLIER
+                    targetSelectionPathNodeMultiplier()
             );
+        }
+
+        private float targetSelectionPathNodeMultiplier() {
+            return PlayerNpcPerformanceMonitor.isAiWorkOverloaded()
+                    ? OVERLOADED_TARGET_SELECTION_PATH_NODE_MULTIPLIER
+                    : TARGET_SELECTION_PATH_NODE_MULTIPLIER;
         }
     }
 

@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.PlayerNpcAlertManager;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
@@ -21,7 +22,14 @@ public class RespondToNpcAlertGoal extends Goal {
     private static final double AVOID_SPEED = 1.0D;
     private static final int AVOID_TICKS = 80;
     private static final int AVOID_REPATH_TICKS = 20;
-    private static final float PATH_NODE_MULTIPLIER = 0.15F;
+    // Alert responses refresh every second, so a short route is enough to make safe progress and
+    // can be replaced as the threat moves. The old 16x7/.15 probe expanded a comparatively large
+    // synchronous navigation region during Mob.super.tick() and was the only state transition at
+    // the trace's 291 ms hottest NPC.
+    private static final int AVOID_HORIZONTAL_RANGE = 10;
+    private static final int AVOID_VERTICAL_RANGE = 4;
+    private static final float PATH_NODE_MULTIPLIER = 0.03F;
+    private static final float OVERLOADED_PATH_NODE_MULTIPLIER = 0.01F;
 
     private final PlayerNpcEntity playerNpc;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle(10);
@@ -127,21 +135,41 @@ public class RespondToNpcAlertGoal extends Goal {
             return;
         }
 
-        Vec3 awayPos = DefaultRandomPos.getPosAway(this.playerNpc, 16, 7, this.threat.position());
-        if (awayPos == null) {
-            Vec3 away = this.playerNpc.position().subtract(this.threat.position());
-            if (away.lengthSqr() < 1.0E-4D) {
-                away = Vec3.directionFromRotation(0.0F, this.playerNpc.getYRot());
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            Vec3 awayPos = DefaultRandomPos.getPosAway(
+                    this.playerNpc,
+                    AVOID_HORIZONTAL_RANGE,
+                    AVOID_VERTICAL_RANGE,
+                    this.threat.position()
+            );
+            if (awayPos == null) {
+                Vec3 away = this.playerNpc.position().subtract(this.threat.position());
+                if (away.lengthSqr() < 1.0E-4D) {
+                    away = Vec3.directionFromRotation(0.0F, this.playerNpc.getYRot());
+                }
+                awayPos = this.playerNpc.position().add(away.normalize().scale(AVOID_HORIZONTAL_RANGE));
             }
-            awayPos = this.playerNpc.position().add(away.normalize().scale(12.0D));
-        }
-        Path path = PathNavigationAi.createBoundedPath(
-                this.playerNpc,
-                BlockPos.containing(awayPos.x, awayPos.y, awayPos.z),
-                PATH_NODE_MULTIPLIER
-        );
-        if (path != null && path.getNodeCount() > 0) {
-            this.playerNpc.getNavigation().moveTo(path, AVOID_SPEED);
+            float pathBudget = PlayerNpcPerformanceMonitor.isAiWorkOverloaded()
+                    ? OVERLOADED_PATH_NODE_MULTIPLIER
+                    : PATH_NODE_MULTIPLIER;
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    BlockPos.containing(awayPos.x, awayPos.y, awayPos.z),
+                    pathBudget
+            );
+            if (path != null && path.getNodeCount() > 0) {
+                this.playerNpc.getNavigation().moveTo(path, AVOID_SPEED);
+            }
+        } finally {
+            // This goal is deliberately not a routine-worker wrapper, so time its only expensive
+            // operation directly rather than leaving future alert-route regressions hidden in
+            // the residual Mob.super.tick() bucket.
+            PlayerNpcPerformanceMonitor.recordGoalWork(
+                    this.playerNpc,
+                    this.getClass().getSimpleName() + ".moveAway",
+                    timing
+            );
         }
     }
 

@@ -60,6 +60,11 @@ public final class PlayerNpcForceTickManager {
     private static final double AUTO_OVERLOAD_REDUCTION_MSPT = 52.0D;
     private static final int AUTO_HEALTHY_GROWTH_CHECKS = 2;
     private static final int AUTO_CAUTION_GROWTH_CHECKS = 4;
+    // Keep automatic chunk tickets aligned with the routine AI budget. Extra tickets keep both
+    // NPC entities and their surrounding chunk/block-entity work alive, so a larger independent
+    // ceiling can recreate the same TPS pressure even after routine worker growth is capped.
+    // Manual forceTickManage=1 remains an explicit opt-in to ticket every NPC.
+    private static final int AUTO_MAX_FORCE_TICK_SLOTS = 4;
     private static final long WORKER_HANDOFF_PREFETCH_TICKS = 20 * 10L;
     private static final String NPC_TAB_PREFIX = "[NPC] ";
     private static final String NPC_TAB_PROFILE_PREFIX = "zzNPC";
@@ -326,7 +331,7 @@ public final class PlayerNpcForceTickManager {
         int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
         long maxHeapBytes = Math.max(1L, Runtime.getRuntime().maxMemory());
         int heapGiB = (int) Math.max(1L, maxHeapBytes / (1024L * 1024L * 1024L));
-        automaticCapabilityLimit = (int) Math.max(1L, Math.min(12L,
+        automaticCapabilityLimit = (int) Math.max(1L, Math.min(AUTO_MAX_FORCE_TICK_SLOTS,
                 Math.min((long) processors * 2L, (long) heapGiB * 3L)));
         automaticSlotTarget = Math.max(1, Math.min(automaticSlotTarget, automaticCapabilityLimit));
 

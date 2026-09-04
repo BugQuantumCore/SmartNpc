@@ -61,9 +61,12 @@ public final class PlayerNpcPerformanceMonitor {
     private static long hottestNpcTickNanos;
     private static long hottestNpcSuperTickNanos;
     private static long hottestNpcCustomTickNanos;
+    private static long hottestNpcWrappedGoalNanos;
+    private static long hottestNpcUnattributedSuperNanos;
     private static String hottestNpcTickName = "none";
     private static String hottestNpcTickState = PlayerNpcEntity.AI_IDLE;
     private static String hottestNpcTickDetail = "none";
+    private static String hottestNpcNavigationDetail = "none";
     private static long measuredForceManagerNanos;
     private static long measuredTraceLoggerNanos;
     private static long measuredWaitingStrollNanos;
@@ -72,6 +75,7 @@ public final class PlayerNpcPerformanceMonitor {
     private static int goalWorkInvocationCount;
     private static String hottestGoalWorkName = "none";
     private static String hottestGoalWorkNpc = "none";
+    private static final Map<Integer, Long> goalWorkNanosByNpcId = new LinkedHashMap<>();
 
     private PlayerNpcPerformanceMonitor() {
     }
@@ -92,9 +96,12 @@ public final class PlayerNpcPerformanceMonitor {
         hottestNpcTickNanos = 0L;
         hottestNpcSuperTickNanos = 0L;
         hottestNpcCustomTickNanos = 0L;
+        hottestNpcWrappedGoalNanos = 0L;
+        hottestNpcUnattributedSuperNanos = 0L;
         hottestNpcTickName = "none";
         hottestNpcTickState = PlayerNpcEntity.AI_IDLE;
         hottestNpcTickDetail = "none";
+        hottestNpcNavigationDetail = "none";
         measuredForceManagerNanos = 0L;
         measuredTraceLoggerNanos = 0L;
         measuredWaitingStrollNanos = 0L;
@@ -103,6 +110,7 @@ public final class PlayerNpcPerformanceMonitor {
         goalWorkInvocationCount = 0;
         hottestGoalWorkName = "none";
         hottestGoalWorkNpc = "none";
+        goalWorkNanosByNpcId.clear();
         tickStartNanos = System.nanoTime();
     }
 
@@ -167,6 +175,9 @@ public final class PlayerNpcPerformanceMonitor {
         hottestNpcTickNanos = 0L;
         hottestNpcSuperTickNanos = 0L;
         hottestNpcCustomTickNanos = 0L;
+        hottestNpcWrappedGoalNanos = 0L;
+        hottestNpcUnattributedSuperNanos = 0L;
+        hottestNpcNavigationDetail = "none";
         measuredForceManagerNanos = 0L;
         measuredTraceLoggerNanos = 0L;
         measuredWaitingStrollNanos = 0L;
@@ -175,6 +186,7 @@ public final class PlayerNpcPerformanceMonitor {
         goalWorkInvocationCount = 0;
         hottestGoalWorkName = "none";
         hottestGoalWorkNpc = "none";
+        goalWorkNanosByNpcId.clear();
         resetSamples();
     }
 
@@ -263,6 +275,14 @@ public final class PlayerNpcPerformanceMonitor {
         return hasStableRollingSample() && getAverageMspt() < OPTIONAL_AI_MAX_AVERAGE_MSPT;
     }
 
+    /**
+     * True while the stable rolling window is already missing 20 TPS. Runtime schedulers and
+     * navigation goals use this to shed optional capacity without abandoning active destinations.
+     */
+    public static boolean isAiWorkOverloaded() {
+        return hasStableRollingSample() && getAverageMspt() >= OPTIONAL_AI_MAX_AVERAGE_MSPT;
+    }
+
     /** Records executed Player NPC time, unlike post-tick active-state correlation. */
     public static void recordNpcEntityTick(
             PlayerNpcEntity playerNpc,
@@ -280,15 +300,26 @@ public final class PlayerNpcPerformanceMonitor {
         measuredNpcSuperTickNanos += boundedSuperTickNanos;
         measuredNpcCustomTickNanos += customTickNanos;
         if (elapsedNanos > hottestNpcTickNanos) {
+            long wrappedGoalNanos = goalWorkNanosByNpcId.getOrDefault(playerNpc.getId(), 0L);
             hottestNpcTickNanos = elapsedNanos;
             hottestNpcSuperTickNanos = boundedSuperTickNanos;
             hottestNpcCustomTickNanos = customTickNanos;
+            hottestNpcWrappedGoalNanos = wrappedGoalNanos;
+            hottestNpcUnattributedSuperNanos = Math.max(0L, boundedSuperTickNanos - wrappedGoalNanos);
             hottestNpcTickName = sanitize(playerNpc.getDisplayName().getString()) + "#" + playerNpc.getId();
             hottestNpcTickState = sanitize(playerNpc.getCurrentAiState());
             hottestNpcTickDetail = sanitize(playerNpc.getCurrentAiDetail());
             if (hottestNpcTickDetail.isBlank()) {
                 hottestNpcTickDetail = "none";
             }
+            var navigation = playerNpc.getNavigation();
+            var path = navigation.getPath();
+            hottestNpcNavigationDetail = path == null
+                    ? "done=" + navigation.isDone() + " stuck=" + navigation.isStuck() + " path=none"
+                    : "done=" + navigation.isDone()
+                    + " stuck=" + navigation.isStuck()
+                    + " nodes=" + path.getNodeCount()
+                    + " next=" + path.getNextNodeIndex();
         }
     }
 
@@ -300,6 +331,7 @@ public final class PlayerNpcPerformanceMonitor {
         long elapsedNanos = Math.max(0L, System.nanoTime() - startNanos);
         totalGoalWorkNanos += elapsedNanos;
         goalWorkInvocationCount++;
+        goalWorkNanosByNpcId.merge(playerNpc.getId(), elapsedNanos, Long::sum);
         if (elapsedNanos <= hottestGoalWorkNanos) {
             return;
         }
@@ -381,6 +413,7 @@ public final class PlayerNpcPerformanceMonitor {
         }
 
         NpcTraceSummary summary = collectNpcTrace(server);
+        PlayerNpcAiWorkBudget.ResourceSnapshot resources = PlayerNpcAiWorkBudget.resourceSnapshot(server);
         double measuredNpcMs = measuredNpcTickNanos / NANOS_PER_MILLISECOND;
         boolean npcDominatedIdleTick = measuredNpcMs >= NPC_DOMINATED_WARNING_MIN_MSPT
                 && measuredNpcMs >= currentMspt * 0.5D;
@@ -391,20 +424,25 @@ public final class PlayerNpcPerformanceMonitor {
 
         lastWarningServerTick = serverTick;
         SmartNpc.LOGGER.warn(
-                "Smart NPC TPS warning: server tick is slow; latestMspt={}, averageMspt={}, effectiveTps={}/20, sampleWindowTicks={}, reason={}, activePlayerNpcGoals={}, totalPlayerNpcs={}",
+                "Smart NPC TPS warning: server tick is slow; latestMspt={}, averageMspt={}, effectiveTps={}/20, sampleWindowTicks={}, reason={}, activePlayerNpcGoals={}, totalPlayerNpcs={}, routineWorkers={}/{}, runningRoutineWorkers={}, idleRoutineWorkers={}, waitingRoutineNpcs={}",
                 format(currentMspt),
                 format(averageMspt),
                 format(getAverageTps()),
                 rollingCount,
                 tickSpike ? "single tick spike" : "rolling average",
                 summary.activeNpcCount(),
-                summary.totalNpcCount()
+                summary.totalNpcCount(),
+                resources.activeWorkerCount(),
+                resources.effectiveWorkerLimit(),
+                resources.runningWorkerCount(),
+                resources.idleWorkerCount(),
+                resources.waitingNpcCount()
         );
 
         SmartNpc.LOGGER.warn("Smart NPC TPS trace states: {}", summary.stateCountsText());
         double averageNpcMs = rollingCount <= 0 ? 0.0D : rollingTotalNpcMs / rollingCount;
         SmartNpc.LOGGER.warn(
-                "Smart NPC measured work: latestNpcMs={} (super={} custom={}), averageNpcMs={}, hottestNpcMs={} (super={} custom={}), hottestNpc={} state={} detail=\"{}\", wrappedGoalTotalMs={} calls={}, hottestWrappedGoalMs={} goal={} npc={}, waitingStrollMs={}, forceManagerMs={}, traceLoggerMs={}; latestUnmeasuredServerMs={} (chunks, block entities, other entities/mods and server tasks)",
+                "Smart NPC measured work: latestNpcMs={} (super={} custom={}), averageNpcMs={}, hottestNpcMs={} (super={} custom={} wrappedGoals={} unattributedSuper={}), hottestNpc={} state={} detail=\"{}\" nav=\"{}\", wrappedGoalTotalMs={} calls={}, hottestWrappedGoalMs={} goal={} npc={}, waitingStrollMs={}, forceManagerMs={}, traceLoggerMs={}; latestUnmeasuredServerMs={} (chunks, block entities, other entities/mods and server tasks)",
                 format(measuredNpcMs),
                 format(measuredNpcSuperTickNanos / NANOS_PER_MILLISECOND),
                 format(measuredNpcCustomTickNanos / NANOS_PER_MILLISECOND),
@@ -412,9 +450,12 @@ public final class PlayerNpcPerformanceMonitor {
                 format(hottestNpcTickNanos / NANOS_PER_MILLISECOND),
                 format(hottestNpcSuperTickNanos / NANOS_PER_MILLISECOND),
                 format(hottestNpcCustomTickNanos / NANOS_PER_MILLISECOND),
+                format(hottestNpcWrappedGoalNanos / NANOS_PER_MILLISECOND),
+                format(hottestNpcUnattributedSuperNanos / NANOS_PER_MILLISECOND),
                 hottestNpcTickName,
                 hottestNpcTickState,
                 hottestNpcTickDetail,
+                hottestNpcNavigationDetail,
                 format(totalGoalWorkNanos / NANOS_PER_MILLISECOND),
                 goalWorkInvocationCount,
                 format(hottestGoalWorkNanos / NANOS_PER_MILLISECOND),

@@ -95,6 +95,7 @@ public class GatherStoneGoal extends Goal {
     private static final int STONE_EGRESS_REPATH_INTERVAL_TICKS = 20;
     private static final int FAILED_STONE_SAFE_STAND_SKIP_TICKS = 20 * 12;
     private static final int STONE_WORK_NO_PROGRESS_TICKS = 20 * 5;
+    private static final double STONE_WORK_PROGRESS_EPSILON = 0.5D;
     private static final int IDLE_DIAGNOSTIC_TICKS = 20 * 8;
 
     private final PlayerNpcEntity playerNpc;
@@ -119,10 +120,11 @@ public class GatherStoneGoal extends Goal {
     private int stoneEgressReachTicks;
     private int nextStoneEgressPathAttemptTick;
     private BlockPos temporarilyBlockedTarget;
-    private BlockPos lastStoneWorkProgressPos;
+    private BlockPos stoneWorkProgressTarget;
     private long temporarilyBlockedTargetUntilTick;
     private int lastStoneWorkProgressCount;
     private int stoneWorkNoProgressTicks;
+    private double bestStoneWorkDistance = Double.MAX_VALUE;
     private String lastPhaseDiagnostic = "";
     private int lastDetailMode = -1;
     private int nextDetailProgressRefreshTick;
@@ -165,6 +167,35 @@ public class GatherStoneGoal extends Goal {
                 result
         ));
         return result;
+    }
+
+    /**
+     * Read-only arbitration result published by the authoritative higher-priority stone goal.
+     * DigDown uses this instead of launching a duplicate StoneAi scan in the same selector pass.
+     */
+    public static boolean hasCachedNearbyStoneTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null || serverLevel == null) {
+            return false;
+        }
+        NearbyStoneTargetCache cached = NEARBY_STONE_TARGET_CACHE.get(playerNpc);
+        return cached != null
+                && cached.result()
+                && playerNpc.tickCount < cached.expiresAtTick()
+                && cached.dimension().equals(serverLevel.dimension().location().toString())
+                && cached.origin().distSqr(playerNpc.blockPosition()) <= NEARBY_STONE_TARGET_CACHE_DISTANCE_SQR;
+    }
+
+    private static void cacheNearbyStoneTarget(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel,
+            boolean result
+    ) {
+        NEARBY_STONE_TARGET_CACHE.put(playerNpc, new NearbyStoneTargetCache(
+                playerNpc.blockPosition().immutable(),
+                serverLevel.dimension().location().toString(),
+                playerNpc.tickCount + NEARBY_STONE_TARGET_CACHE_TICKS,
+                result
+        ));
     }
 
     public static boolean isStoneSupplyPhaseActive(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -280,7 +311,8 @@ public class GatherStoneGoal extends Goal {
         if (this.shouldStayHomeForWeather(serverLevel) && !miningJob
                 || !isStoneSupplyPhaseActive(this.playerNpc, serverLevel)
                 || (!this.playerNpc.isStoneAccessClearing()
-                && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel))) {
+                && BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel)
+                && !PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, this.playerNpc))) {
             return false;
         }
 
@@ -288,7 +320,9 @@ public class GatherStoneGoal extends Goal {
             return false;
         }
 
-        return this.selectTarget(serverLevel);
+        boolean selected = this.selectTarget(serverLevel);
+        cacheNearbyStoneTarget(this.playerNpc, serverLevel, selected);
+        return selected;
     }
 
     @Override
@@ -1464,18 +1498,32 @@ public class GatherStoneGoal extends Goal {
     }
 
     private boolean recoverIfStoneWorkStuck(ServerLevel serverLevel) {
-        if (this.targetPos == null || this.stoneEgressPos != null || this.breakingBlockAi.isRunning()) {
+        if (this.targetPos == null
+                || this.stoneEgressPos != null
+                || this.breakingBlockAi.isRunning()
+                || this.clearBlockAi.isRunning()) {
             this.resetStoneWorkProgressMonitor();
             return false;
         }
 
         int stoneCount = ResourceAi.countStone(this.playerNpc);
-        BlockPos currentPos = this.playerNpc.blockPosition();
-        if (this.lastStoneWorkProgressPos == null
-                || !this.lastStoneWorkProgressPos.equals(currentPos)
+        BlockPos progressTarget = this.standPos == null ? this.targetPos : this.standPos;
+        double currentDistance = Math.sqrt(this.playerNpc.distanceToSqr(
+                progressTarget.getX() + 0.5D,
+                progressTarget.getY(),
+                progressTarget.getZ() + 0.5D
+        ));
+        if (this.stoneWorkProgressTarget == null
+                || !this.stoneWorkProgressTarget.equals(progressTarget)
                 || this.lastStoneWorkProgressCount != stoneCount) {
-            this.lastStoneWorkProgressPos = currentPos.immutable();
+            this.stoneWorkProgressTarget = progressTarget.immutable();
             this.lastStoneWorkProgressCount = stoneCount;
+            this.stoneWorkNoProgressTicks = 0;
+            this.bestStoneWorkDistance = currentDistance;
+            return false;
+        }
+        if (currentDistance + STONE_WORK_PROGRESS_EPSILON < this.bestStoneWorkDistance) {
+            this.bestStoneWorkDistance = currentDistance;
             this.stoneWorkNoProgressTicks = 0;
             return false;
         }
@@ -1489,13 +1537,22 @@ public class GatherStoneGoal extends Goal {
             return false;
         }
 
+        if (!this.tryAcquireExpensiveWork(serverLevel)) {
+            this.setStoneDiagnostic("stone access stuck; clear recovery queued for shared search slice");
+            return true;
+        }
+        if (this.startClearingRoute(serverLevel)) {
+            this.resetStoneWorkProgressMonitor();
+            return true;
+        }
         return this.recoverFromBlockedStoneAccess(serverLevel, "stone access stuck");
     }
 
     private void resetStoneWorkProgressMonitor() {
-        this.lastStoneWorkProgressPos = null;
+        this.stoneWorkProgressTarget = null;
         this.lastStoneWorkProgressCount = 0;
         this.stoneWorkNoProgressTicks = 0;
+        this.bestStoneWorkDistance = Double.MAX_VALUE;
     }
 
     private boolean recoverFromBlockedStoneAccess(ServerLevel serverLevel, String reason) {
@@ -1573,6 +1630,9 @@ public class GatherStoneGoal extends Goal {
                     + " target=" + posText(this.targetPos));
             this.failedAccessAttempts = 0;
             this.repathTicks = 0;
+            // Give the next retained obstruction/stand route its own bounded progress window.
+            // The completed clear is real progress even though it does not increase stone count.
+            this.resetStoneWorkProgressMonitor();
         } else if (result == ClearBlockAi.TickResult.FAILED) {
             this.setStoneDiagnostic("stone route clear failed clear=" + posText(clearTarget)
                     + " state=" + blockStateText(serverLevel, clearTarget)
@@ -1612,14 +1672,24 @@ public class GatherStoneGoal extends Goal {
         BlockPos nearest = candidates.stream()
                 .map(BlockPos::immutable)
                 .distinct()
-                .sorted(Comparator.comparingDouble(pos -> pos.distSqr(this.playerNpc.blockPosition())))
-                // Forced recovery can contribute hundreds of positions. Only the nearest small
-                // prefix may run protection/shape/raycast checks in one tick.
-                .limit(16)
                 .filter(pos -> !pos.equals(this.targetPos))
                 .filter(pos -> !this.skippedAccessClearBlocks.contains(pos))
                 .filter(pos -> !this.temporarilyBlockedAccessClears.containsKey(pos))
+                // Body/route generation contributes many nearby air cells. Discard those before
+                // bounding the expensive checks, otherwise the first sixteen slots can all be
+                // empty space and hide the actual dirt/grass obstruction just beyond them.
+                .filter(pos -> serverLevel.hasChunkAt(pos)
+                        && !serverLevel.getBlockState(pos).isAir())
+                .sorted(Comparator.comparingDouble(pos -> pos.distSqr(this.playerNpc.blockPosition())))
+                // Forced recovery can still contribute hundreds of solid positions. Only the
+                // nearest small prefix may run protection/shape/raycast checks in one tick.
+                .limit(16)
                 .filter(pos -> !isInsideProtectedStoneTarget(this.playerNpc, pos))
+                .filter(pos -> ClearBlockAi.isBreakablePathObstruction(
+                        serverLevel,
+                        pos,
+                        serverLevel.getBlockState(pos)
+                ))
                 .filter(pos -> ClearBlockAi.canBreakFromCurrentStand(serverLevel, this.playerNpc, pos))
                 .findFirst()
                 .orElse(null);

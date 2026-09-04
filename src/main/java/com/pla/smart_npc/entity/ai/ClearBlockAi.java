@@ -1113,6 +1113,19 @@ public final class ClearBlockAi {
         return canBreakFromCurrentPosition(serverLevel, playerNpc, targetPos, false);
     }
 
+    /**
+     * Cheap geometric/raycast preflight for callers whose clear contract explicitly permits
+     * partial-shape cover such as flowers, mushrooms, and other replaceable farm vegetation.
+     */
+    public static boolean canBreakFromCurrentStand(
+            ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
+            BlockPos targetPos,
+            boolean allowSoftCover
+    ) {
+        return canBreakFromCurrentPosition(serverLevel, playerNpc, targetPos, allowSoftCover);
+    }
+
     private static boolean canBreakFromCurrentPosition(
             ServerLevel serverLevel,
             PlayerNpcEntity playerNpc,

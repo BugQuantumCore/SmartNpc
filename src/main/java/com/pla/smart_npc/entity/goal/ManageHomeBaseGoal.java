@@ -17,6 +17,7 @@ import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.nbt.Tag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
@@ -42,6 +43,7 @@ import java.util.List;
 import java.util.Optional;
 
 public class ManageHomeBaseGoal extends Goal {
+    private static final String LAST_HOME_CHEST_DEPOSIT_NIGHT = "PlayerNpcLastHomeChestDepositNight";
     private static final int COOLDOWN_TICKS = 20 * 8;
     private static final double HOME_ACTION_DISTANCE_SQR = 8.0D * 8.0D;
     private static final double RECOVER_TABLE_BREAK_DISTANCE_SQR = 3.0D * 3.0D;
@@ -62,6 +64,7 @@ public class ManageHomeBaseGoal extends Goal {
     private final BreakingBlockAi breakingBlockAi;
     private final PlacingBlockAi placingBlockAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
+    private final boolean nightlyDepositOnly;
     private PlayerNpcHomeUtil.HomeArea homeArea;
     private BlockPos baseAnchor;
     private boolean nonBuilderBase;
@@ -83,11 +86,48 @@ public class ManageHomeBaseGoal extends Goal {
     private String planDetail = "";
 
     public ManageHomeBaseGoal(PlayerNpcEntity playerNpc) {
+        this(playerNpc, false);
+    }
+
+    public ManageHomeBaseGoal(PlayerNpcEntity playerNpc, boolean nightlyDepositOnly) {
         this.playerNpc = playerNpc;
+        this.nightlyDepositOnly = nightlyDepositOnly;
         this.toolAi = new ToolAi(playerNpc);
         this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
+    }
+
+    /**
+     * Lets the higher-priority night-camp goal yield while a non-builder has one real
+     * storage action to perform at its persistent camp base. The same predicate used by
+     * the deposit goal keeps camp from yielding merely because the inventory is full when
+     * the chest cannot accept any of its disposable stacks.
+     */
+    public static boolean hasPendingCampBaseNightlyDeposit(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null
+                || serverLevel == null
+                || !serverLevel.isNight()
+                || playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || hasAttemptedDepositThisNight(playerNpc, serverLevel)
+                || !inventoryMoreThanHalfFull(playerNpc)) {
+            return false;
+        }
+
+        BlockPos baseAnchor = PlayerNpcBaseUtil.getNonBuilderBase(playerNpc, serverLevel).orElse(null);
+        BlockPos chestPos = ChestAi.findOwnedSupplyChest(playerNpc, serverLevel);
+        if (baseAnchor == null
+                || chestPos == null
+                || baseAnchor.distSqr(chestPos) > HOME_ACTION_DISTANCE_SQR
+                || playerNpc.distanceToSqr(
+                baseAnchor.getX() + 0.5D,
+                baseAnchor.getY(),
+                baseAnchor.getZ() + 0.5D
+        ) > HOME_ACTION_DISTANCE_SQR
+                || !(serverLevel.getBlockEntity(chestPos) instanceof ChestBlockEntity chest)) {
+            return false;
+        }
+        return hasDepositCandidate(playerNpc, serverLevel, chest);
     }
 
     @Override
@@ -98,7 +138,7 @@ public class ManageHomeBaseGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.getManageHomeCooldown() > 0) {
+                || !this.nightlyDepositOnly && this.playerNpc.getManageHomeCooldown() > 0) {
             return false;
         }
         if (GatherLogsGoal.isLogGatheringEpisodeActive(this.playerNpc)) {
@@ -124,6 +164,20 @@ public class ManageHomeBaseGoal extends Goal {
         this.baseAnchor = this.homeArea == null
                 ? PlayerNpcBaseUtil.getNonBuilderBase(this.playerNpc, serverLevel).orElse(null)
                 : PlayerNpcHomeUtil.center(this.homeArea);
+        if (this.nightlyDepositOnly) {
+            if (this.baseAnchor == null
+                    || !this.nonBuilderBase && this.homeArea == null
+                    || !this.isNearHome()) {
+                return false;
+            }
+            boolean deposit = this.shouldDepositToChest(serverLevel);
+            if (deposit) {
+                this.planDetail = this.nonBuilderBase
+                        ? "nightly deposit to base chest"
+                        : "nightly deposit to home chest";
+            }
+            return deposit;
+        }
         if (this.nonBuilderBase && this.baseAnchor == null) {
             return false;
         }
@@ -198,7 +252,8 @@ public class ManageHomeBaseGoal extends Goal {
             return serverLevel.getBlockState(this.recoveryTablePos).is(Blocks.CRAFTING_TABLE);
         }
         return this.pendingCraftingTablePos != null
-                || this.depositChestPos != null
+                || serverLevel.isNight()
+                && this.depositChestPos != null
                 && !this.depositFinished
                 && serverLevel.getBlockState(this.depositChestPos).is(Blocks.CHEST);
     }
@@ -229,6 +284,14 @@ public class ManageHomeBaseGoal extends Goal {
         this.depositChestOpen = false;
         this.depositFinished = false;
         this.depositMovedAny = false;
+
+        if (this.nightlyDepositOnly) {
+            if (this.beginDepositToChest(serverLevel)) {
+                return;
+            }
+            this.finishHomeAction(false);
+            return;
+        }
 
         if (this.canRecoverTemporaryCraftingTable(serverLevel)) {
             this.recoveryTablePos = this.getTemporaryCraftingTablePos();
@@ -597,8 +660,15 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private boolean shouldDepositToChest(ServerLevel serverLevel) {
-        return this.inventoryMoreThanHalfFull()
-                && this.findHomeChest(serverLevel) != null;
+        if (!serverLevel.isNight()
+                || hasAttemptedDepositThisNight(this.playerNpc, serverLevel)
+                || !this.inventoryMoreThanHalfFull()) {
+            return false;
+        }
+        BlockPos chestPos = this.findHomeChest(serverLevel);
+        return chestPos != null
+                && serverLevel.getBlockEntity(chestPos) instanceof ChestBlockEntity chest
+                && this.hasDepositCandidate(chest);
     }
 
     private boolean shouldYieldToBuildMaterialGathering(ServerLevel serverLevel) {
@@ -610,6 +680,13 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private boolean beginDepositToChest(ServerLevel serverLevel) {
+        if (!this.shouldDepositToChest(serverLevel)) {
+            return false;
+        }
+        // One activation is the nightly storage pass. Mark it before path setup so an
+        // unreachable stand cannot make night camp and home management retry each other
+        // for the rest of the night.
+        markDepositAttemptedThisNight(this.playerNpc, serverLevel);
         BlockPos chestPos = this.findHomeChest(serverLevel);
         if (chestPos == null || !(serverLevel.getBlockEntity(chestPos) instanceof ChestBlockEntity chest)) {
             return false;
@@ -633,6 +710,14 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private void tickDepositToChest(ServerLevel serverLevel) {
+        if (!serverLevel.isNight()) {
+            if (this.depositChestOpen && this.depositChestPos != null) {
+                ChestAi.closeChest(serverLevel, this.depositChestPos);
+                this.depositChestOpen = false;
+            }
+            this.finishHomeAction(this.depositMovedAny);
+            return;
+        }
         if (this.depositChestPos == null
                 || !(serverLevel.getBlockEntity(this.depositChestPos) instanceof ChestBlockEntity chest)) {
             this.finishHomeAction(this.depositMovedAny);
@@ -728,22 +813,27 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private boolean hasDepositCandidate(Container chest) {
-        SimpleContainer inventory = this.playerNpc.getInventory();
+        return this.playerNpc.level() instanceof ServerLevel serverLevel
+                && hasDepositCandidate(this.playerNpc, serverLevel, chest);
+    }
+
+    private static boolean hasDepositCandidate(PlayerNpcEntity playerNpc, ServerLevel serverLevel, Container chest) {
+        SimpleContainer inventory = playerNpc.getInventory();
         for (int i = 0; i < inventory.getContainerSize(); i++) {
             ItemStack stack = inventory.getItem(i);
-            if (stack.isEmpty() || this.shouldKeepStack(stack)) {
+            if (stack.isEmpty() || shouldKeepStack(playerNpc, serverLevel, stack)) {
                 continue;
             }
             ItemStack toMove = stack.copy();
             toMove.setCount(Math.max(1, stack.getCount() / 2));
-            if (toMove.getCount() > this.addToContainerPreview(chest, toMove).getCount()) {
+            if (toMove.getCount() > addToContainerPreview(chest, toMove).getCount()) {
                 return true;
             }
         }
         return false;
     }
 
-    private ItemStack addToContainerPreview(Container container, ItemStack stack) {
+    private static ItemStack addToContainerPreview(Container container, ItemStack stack) {
         ItemStack remaining = stack.copy();
         for (int i = 0; i < container.getContainerSize() && !remaining.isEmpty(); i++) {
             ItemStack existing = container.getItem(i);
@@ -795,8 +885,12 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private boolean shouldKeepStack(ItemStack stack) {
-        if (this.playerNpc.level() instanceof ServerLevel serverLevel
-                && PlayerNpcBuildStatusUtil.shouldKeepForCurrentBuild(serverLevel, this.playerNpc, stack)) {
+        return this.playerNpc.level() instanceof ServerLevel serverLevel
+                && shouldKeepStack(this.playerNpc, serverLevel, stack);
+    }
+
+    private static boolean shouldKeepStack(PlayerNpcEntity playerNpc, ServerLevel serverLevel, ItemStack stack) {
+        if (PlayerNpcBuildStatusUtil.shouldKeepForCurrentBuild(serverLevel, playerNpc, stack)) {
             return true;
         }
 
@@ -805,7 +899,7 @@ public class ManageHomeBaseGoal extends Goal {
                 || stack.getItem() instanceof ArmorItem
                 || stack.getItem() instanceof BowItem
                 || stack.getItem() instanceof ShieldItem
-                || (this.playerNpc.hasInterest(PlayerNpcInterest.FISHING)
+                || (playerNpc.hasInterest(PlayerNpcInterest.FISHING)
                 && (stack.getItem() instanceof FishingRodItem || stack.is(Items.STRING)))
                 || stack.isEdible()
                 || stack.is(Items.ARROW)
@@ -1096,9 +1190,13 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private int usedInventorySlots() {
+        return usedInventorySlots(this.playerNpc);
+    }
+
+    private static int usedInventorySlots(PlayerNpcEntity playerNpc) {
         int used = 0;
-        for (int i = 0; i < this.playerNpc.getInventory().getContainerSize(); i++) {
-            if (!this.playerNpc.getInventory().getItem(i).isEmpty()) {
+        for (int i = 0; i < playerNpc.getInventory().getContainerSize(); i++) {
+            if (!playerNpc.getInventory().getItem(i).isEmpty()) {
                 used++;
             }
         }
@@ -1106,7 +1204,24 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private boolean inventoryMoreThanHalfFull() {
-        return this.usedInventorySlots() > this.playerNpc.getInventory().getContainerSize() / 2;
+        return inventoryMoreThanHalfFull(this.playerNpc);
+    }
+
+    private static boolean inventoryMoreThanHalfFull(PlayerNpcEntity playerNpc) {
+        return usedInventorySlots(playerNpc) > playerNpc.getInventory().getContainerSize() / 2;
+    }
+
+    private static boolean hasAttemptedDepositThisNight(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return playerNpc.getPersistentData().contains(LAST_HOME_CHEST_DEPOSIT_NIGHT, Tag.TAG_LONG)
+                && playerNpc.getPersistentData().getLong(LAST_HOME_CHEST_DEPOSIT_NIGHT) == currentNight(serverLevel);
+    }
+
+    private static void markDepositAttemptedThisNight(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        playerNpc.getPersistentData().putLong(LAST_HOME_CHEST_DEPOSIT_NIGHT, currentNight(serverLevel));
+    }
+
+    private static long currentNight(ServerLevel serverLevel) {
+        return serverLevel.getDayTime() / 24000L;
     }
 
     private void returnStack(ItemStack stack) {

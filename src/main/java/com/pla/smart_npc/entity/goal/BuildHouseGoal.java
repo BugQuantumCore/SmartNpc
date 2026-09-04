@@ -74,6 +74,10 @@ public class BuildHouseGoal extends Goal {
     private static final int MAX_UNREACHABLE_BUILD_TARGET_TICKS = 20 * 4;
     private static final int BUILD_ROUTE_REPATH_TICKS = 20;
     private static final int BUILD_ROUTE_NO_PROGRESS_TICKS = 20 * 3;
+    // Building changes blocks beside the active route, which can make vanilla navigation defer a
+    // synchronous path recomputation until Mob.super.tick(). Keep that delayed work bounded for
+    // the complete MOVE-owning lifetime rather than only around the explicit moveTo call.
+    private static final float ACTIVE_BUILD_PATH_NODE_MULTIPLIER = 0.05F;
     private static final int CRAFT_ROUTE_CLEAR_TRIGGER_TICKS = 20;
     private static final int CRAFT_ROUTE_NO_PROGRESS_TICKS = 20 * 3;
     private static final int CRAFT_ROUTE_CLEAR_TICKS = 24;
@@ -161,7 +165,7 @@ public class BuildHouseGoal extends Goal {
     public static boolean hasReadyHomeBuildWork(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         if (!playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
                 || !playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
-                || !shouldBuildDuringShelter(serverLevel)
+                || !isConstructionWindow(playerNpc, serverLevel)
                 || playerNpc.getBuildHouseCooldown() > 0
                 || !playerNpc.hasMetBuildSupplyGoals() && !isBuildBatchActive(playerNpc)) {
             return false;
@@ -170,18 +174,56 @@ public class BuildHouseGoal extends Goal {
         return hasContinuableHomeBuildWork(playerNpc, serverLevel);
     }
 
+    /**
+     * Lets log-supply owners hand movement back when inventory changes make an unfinished build
+     * actionable before an older no-work cooldown expires. The actual blueprint/world query stays
+     * cursor-sliced; a pending matching search reserves the handoff until it resolves.
+     */
+    public static boolean shouldYieldSupplyWorkForBuild(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null
+                || serverLevel == null
+                || !playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
+                || !playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
+                || !isConstructionWindow(playerNpc, serverLevel)
+                || !playerNpc.hasMetBuildSupplyGoals() && !isBuildBatchActive(playerNpc)) {
+            return false;
+        }
+
+        // A completed missing-material scan is the authoritative phase owner.  `continuable`
+        // means that some blueprint block can be placed, possibly from a later phase; it must not
+        // suppress the log route that supplies the earliest unfinished wooden phase.
+        if (PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, playerNpc)) {
+            return false;
+        }
+
+        if (hasContinuableHomeBuildWork(playerNpc, serverLevel)) {
+            // A cooldown recorded against the previous inventory must not strand newly placeable
+            // work. Structural/terrain gates are still revalidated by BuildHouseGoal.canUse().
+            playerNpc.setBuildHouseCooldown(0);
+            return true;
+        }
+        return isMatchingHomeBuildWorkSearchPending(playerNpc, serverLevel);
+    }
+
     /** True while the admitted existing-home readiness scan still has blueprint slices to inspect. */
     public static boolean isHomeBuildWorkSearchPending(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
         if (playerNpc == null
                 || serverLevel == null
                 || !playerNpc.hasInterest(PlayerNpcInterest.BUILDING)
                 || !playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)
-                || !shouldBuildDuringShelter(serverLevel)
+                || !isConstructionWindow(playerNpc, serverLevel)
                 || playerNpc.getBuildHouseCooldown() > 0
                 || !playerNpc.hasMetBuildSupplyGoals() && !isBuildBatchActive(playerNpc)) {
             return false;
         }
 
+        return isMatchingHomeBuildWorkSearchPending(playerNpc, serverLevel);
+    }
+
+    private static boolean isMatchingHomeBuildWorkSearchPending(
+            PlayerNpcEntity playerNpc,
+            ServerLevel serverLevel
+    ) {
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
         if (home.isEmpty()) {
             return false;
@@ -278,19 +320,6 @@ public class BuildHouseGoal extends Goal {
         )) {
             return cache.continuable();
         }
-        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, playerNpc)) {
-            // Keep a same-context answer until one shared work slice can refresh it. This avoids
-            // turning every priority probe into an independent blueprint/world scan.
-            return cache != null
-                    && cache.sameContext(
-                    serverLevel.dimension().location(),
-                    homeArea,
-                    layoutId,
-                    inventoryHash
-            )
-                    && cache.continuable();
-        }
-
         Optional<PlayerNpcBuildLayout> layout = layoutId.isEmpty()
                 ? Optional.empty()
                 : PlayerNpcBuildLayoutLoader.getLayout(layoutId);
@@ -334,6 +363,21 @@ public class BuildHouseGoal extends Goal {
                     inventoryHash
             );
         }
+        if (search.lastSliceTick() == playerNpc.tickCount
+                || !PlayerNpcAiWorkBudget.tryAcquire(serverLevel, playerNpc)) {
+            // Active workers bypass the global expensive-work queue. Multiple arbitration
+            // predicates may therefore reach this method in one selector pass; retain the cursor
+            // after one eight-block slice instead of completing the blueprint synchronously.
+            HOME_BUILD_WORK_SEARCHES.put(playerNpc, search);
+            return cache != null
+                    && cache.sameContext(
+                    serverLevel.dimension().location(),
+                    homeArea,
+                    layoutId,
+                    inventoryHash
+            )
+                    && cache.continuable();
+        }
         List<PlayerNpcBuildLayout.RelativeBlock> blocks = layout.get().blocks();
         int endIndex = Math.min(blocks.size(), search.nextBlockIndex() + MAX_READY_BUILD_BLOCKS_PER_SLICE);
         boolean hasUnfinishedRequired = search.hasUnfinishedRequired();
@@ -358,6 +402,7 @@ public class BuildHouseGoal extends Goal {
         if (!continuable && endIndex < blocks.size()) {
             HOME_BUILD_WORK_SEARCHES.put(playerNpc, search.advance(
                     endIndex,
+                    playerNpc.tickCount,
                     hasUnfinishedRequired,
                     hasMaterialForPlacement
             ));
@@ -438,13 +483,13 @@ public class BuildHouseGoal extends Goal {
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
-        boolean shelterBuild = shouldBuildDuringShelter(serverLevel);
+        boolean constructionWindow = isConstructionWindow(this.playerNpc, serverLevel);
         boolean existingHome = PlayerNpcHomeUtil.getHome(this.playerNpc).isPresent();
-        if (!shelterBuild && existingHome) {
-            // Building-interest daytime is reserved for site preparation and supply work once a
-            // home exists. A first site still has to be selected during daytime: stone gathering
-            // deliberately waits for that site to be prepared, so postponing selection until
-            // night leaves a new builder with its log reserve unable to enter either phase.
+        if (!constructionWindow && existingHome) {
+            // Until both supply goals are met, daytime remains reserved for site preparation and
+            // supply work once a home exists. A first site still has to be selected during daytime:
+            // stone gathering deliberately waits for that site to be prepared, so postponing
+            // selection until night leaves a new builder unable to enter either phase.
             return false;
         }
         if (this.playerNpc.getBuildHouseCooldown() > 0) {
@@ -477,9 +522,9 @@ public class BuildHouseGoal extends Goal {
         if (TerraformBuildSiteGoal.hasPrepWork(this.playerNpc, serverLevel)) {
             return false;
         }
-        // Site selection/preparation may begin during the day, but actual blueprint placement
-        // remains restricted to the night/thunder construction window.
-        return shelterBuild && this.playerNpc.hasMetBuildSupplyGoals();
+        // Site selection/preparation may begin before every supply goal is met, but actual
+        // blueprint placement requires the full supply threshold outside shelter hours.
+        return constructionWindow && this.playerNpc.hasMetBuildSupplyGoals();
     }
 
     private boolean loadReadyExistingHomeBuild(ServerLevel serverLevel) {
@@ -535,6 +580,7 @@ public class BuildHouseGoal extends Goal {
 
     @Override
     public void start() {
+        this.applyActiveNavigationBudget();
         this.blueprint.clear();
         this.blueprint.addAll(this.selectedLayout.blocks());
         this.blueprint.sort(Comparator
@@ -580,115 +626,125 @@ public class BuildHouseGoal extends Goal {
 
     @Override
     public void tick() {
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || this.origin == null || this.blueprint.isEmpty()) {
-            return;
-        }
-
-        if (this.tickWaterEscape(serverLevel, this.activeBuildBlock)) {
-            return;
-        }
-        if (this.tickCraftRouteClear(serverLevel, this.activeBuildBlock)) {
-            return;
-        }
-
-        PlayerNpcBuildLayout.RelativeBlock block = this.currentBuildBlock(serverLevel);
-        if (block == null) {
-            this.blueprint.clear();
-            return;
-        }
-
-        BlockPos target = block.toWorld(this.origin);
-
-        if (this.trackPlacementTarget(target) && this.samePlacementTicks >= MAX_SAME_PLACEMENT_TICKS) {
-            this.recoverStalledPlacement(serverLevel, target, block);
-            return;
-        }
-        if (this.tryPlaceBuildSiteCraftingTable(serverLevel)
-                || this.tryCraftMaterialAtBuildSiteCraftingTable(serverLevel, block)) {
-            return;
-        }
-
-        this.previewPlacementItem(block);
-        this.playerNpc.getLookControl().setLookAt(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, 40.0F, 40.0F);
-        if (this.waitingForPlacementClearance
-                && this.placementClearancePos != null
-                && this.placementClearanceState != null) {
-            if (!this.canPlaceWithoutClipping(serverLevel, this.placementClearancePos, this.placementClearanceState)) {
-                if (this.placementClearanceTicks++ >= MAX_PLACEMENT_CLEARANCE_TICKS) {
-                    this.placementClearanceTicks = 0;
-                    this.placementClearanceRetries++;
-                }
-                if (this.placementClearanceRetries >= MAX_PLACEMENT_CLEARANCE_RETRIES) {
-                    this.deferBlockedPlacement(block);
-                    this.clearPlacementClearance();
-                    this.updateTaskDetail("deferred blocked", block);
-                    return;
-                }
-                this.handlePlacementCollision(serverLevel, this.placementClearancePos, this.placementClearanceState);
-                this.updateTaskDetail("moving clear of", block);
+        try {
+            if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || this.origin == null || this.blueprint.isEmpty()) {
                 return;
             }
-            this.clearPlacementClearance();
-        }
 
-        if (!this.canPlaceFromCurrentPosition(target)) {
-            this.moveTowardBuildTarget(target, block, "walking to");
-            return;
-        }
-        this.clearUnreachableBuildTarget();
+            if (this.tickWaterEscape(serverLevel, this.activeBuildBlock)) {
+                return;
+            }
+            if (this.tickCraftRouteClear(serverLevel, this.activeBuildBlock)) {
+                return;
+            }
 
-        this.playerNpc.getNavigation().stop();
-        if (this.placingBlockAi.tickDelay(PlacingBlockAi.PLAYER_LIKE_BUILD_DELAY)) {
-            this.tickBuildMotion(serverLevel, target, block.state());
-            this.updateTaskDetail("placing", block);
-            return;
-        }
-        this.placeDelay = 0;
-        this.placementAttempts++;
-        if (this.placementAttempts > MAX_PLACEMENT_ATTEMPTS) {
-            this.deferBlockedPlacement(block);
-            this.placementAttempts = 0;
-            this.samePlacementTicks = 0;
-            this.updateTaskDetail("deferred retry limit", block);
-            return;
-        }
-
-        if (!this.placeExactBlock(serverLevel, block)) {
-            if (this.ranOutOfMaterials) {
+            PlayerNpcBuildLayout.RelativeBlock block = this.currentBuildBlock(serverLevel);
+            if (block == null) {
                 this.blueprint.clear();
                 return;
             }
-            if (this.waitingForPlacementClearance || this.placementRecoveryThisTick) {
+
+            BlockPos target = block.toWorld(this.origin);
+
+            if (this.trackPlacementTarget(target) && this.samePlacementTicks >= MAX_SAME_PLACEMENT_TICKS) {
+                this.recoverStalledPlacement(serverLevel, target, block);
                 return;
             }
-            this.deferBlockedPlacement(block);
+            if (this.tryPlaceBuildSiteCraftingTable(serverLevel)
+                    || this.tryCraftMaterialAtBuildSiteCraftingTable(serverLevel, block)) {
+                return;
+            }
+
+            this.previewPlacementItem(block);
+            this.playerNpc.getLookControl().setLookAt(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, 40.0F, 40.0F);
+            if (this.waitingForPlacementClearance
+                    && this.placementClearancePos != null
+                    && this.placementClearanceState != null) {
+                if (!this.canPlaceWithoutClipping(serverLevel, this.placementClearancePos, this.placementClearanceState)) {
+                    if (this.placementClearanceTicks++ >= MAX_PLACEMENT_CLEARANCE_TICKS) {
+                        this.placementClearanceTicks = 0;
+                        this.placementClearanceRetries++;
+                    }
+                    if (this.placementClearanceRetries >= MAX_PLACEMENT_CLEARANCE_RETRIES) {
+                        this.deferBlockedPlacement(block);
+                        this.clearPlacementClearance();
+                        this.updateTaskDetail("deferred blocked", block);
+                        return;
+                    }
+                    this.handlePlacementCollision(serverLevel, this.placementClearancePos, this.placementClearanceState);
+                    this.updateTaskDetail("moving clear of", block);
+                    return;
+                }
+                this.clearPlacementClearance();
+            }
+
+            if (!this.canPlaceFromCurrentPosition(target)) {
+                this.moveTowardBuildTarget(target, block, "walking to");
+                return;
+            }
+            this.clearUnreachableBuildTarget();
+
+            this.playerNpc.getNavigation().stop();
+            if (this.placingBlockAi.tickDelay(PlacingBlockAi.PLAYER_LIKE_BUILD_DELAY)) {
+                this.tickBuildMotion(serverLevel, target, block.state());
+                this.updateTaskDetail("placing", block);
+                return;
+            }
+            this.placeDelay = 0;
+            this.placementAttempts++;
+            if (this.placementAttempts > MAX_PLACEMENT_ATTEMPTS) {
+                this.deferBlockedPlacement(block);
+                this.placementAttempts = 0;
+                this.samePlacementTicks = 0;
+                this.updateTaskDetail("deferred retry limit", block);
+                return;
+            }
+
+            if (!this.placeExactBlock(serverLevel, block)) {
+                if (this.ranOutOfMaterials) {
+                    this.blueprint.clear();
+                    return;
+                }
+                if (this.waitingForPlacementClearance || this.placementRecoveryThisTick) {
+                    return;
+                }
+                this.deferBlockedPlacement(block);
+                this.placementAttempts = 0;
+                this.samePlacementTicks = 0;
+                return;
+            }
+
+            if (this.placedBlockThisTick && this.placedBlockStateThisTick != null) {
+                this.placingBlockAi.playPlaceEffects(
+                        serverLevel,
+                        this.placedBlockSoundPos == null ? target : this.placedBlockSoundPos,
+                        this.placedBlockStateThisTick
+                );
+                this.finishPlacementMainHand();
+            }
+            this.blueprint.remove(block);
+            this.clearActiveBuildBlock();
             this.placementAttempts = 0;
             this.samePlacementTicks = 0;
-            return;
+            if (countsTowardBuildProgress(block)) {
+                this.completedPlacements++;
+            }
+            this.updateTaskDetail("placed", block);
+        } finally {
+            // Helper paths restore the navigation default after an explicit path build. Reapply
+            // the builder lifetime budget so vanilla delayed recomputation remains bounded.
+            this.applyActiveNavigationBudget();
         }
-
-        if (this.placedBlockThisTick && this.placedBlockStateThisTick != null) {
-            this.placingBlockAi.playPlaceEffects(
-                    serverLevel,
-                    this.placedBlockSoundPos == null ? target : this.placedBlockSoundPos,
-                    this.placedBlockStateThisTick
-            );
-            this.finishPlacementMainHand();
-        }
-        this.blueprint.remove(block);
-        this.clearActiveBuildBlock();
-        this.placementAttempts = 0;
-        this.samePlacementTicks = 0;
-        if (countsTowardBuildProgress(block)) {
-            this.completedPlacements++;
-        }
-        this.updateTaskDetail("placed", block);
     }
 
     @Override
     public void stop() {
         this.stopCraftRouteClear();
         this.restorePreviousMainHand();
+        // Releasing MOVE does not clear PathNavigation's retained route. Stop it before restoring
+        // the default node budget so a later idle tick cannot recompute a stale build path.
+        this.playerNpc.getNavigation().stop();
+        this.playerNpc.getNavigation().resetMaxVisitedNodesMultiplier();
         if (!this.playerNpc.level().isClientSide) {
             boolean canContinueBatch = this.playerNpc.level() instanceof ServerLevel serverLevel
                     && !this.ranOutOfMaterials
@@ -740,6 +796,10 @@ public class BuildHouseGoal extends Goal {
         this.waterEscapeAi.stop();
         this.missingMaterial = "";
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+    }
+
+    private void applyActiveNavigationBudget() {
+        this.playerNpc.getNavigation().setMaxVisitedNodesMultiplier(ACTIVE_BUILD_PATH_NODE_MULTIPLIER);
     }
 
     private boolean tickWaterEscape(ServerLevel serverLevel, PlayerNpcBuildLayout.RelativeBlock block) {
@@ -863,9 +923,13 @@ public class BuildHouseGoal extends Goal {
         return serverLevel.isNight() || serverLevel.isThundering();
     }
 
+    private static boolean isConstructionWindow(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        return shouldBuildDuringShelter(serverLevel) || playerNpc.hasMetBuildSupplyGoals();
+    }
+
     private boolean isConstructionWindow() {
         return this.playerNpc.level() instanceof ServerLevel serverLevel
-                && shouldBuildDuringShelter(serverLevel);
+                && isConstructionWindow(this.playerNpc, serverLevel);
     }
 
     private static boolean isBuildBatchActive(PlayerNpcEntity playerNpc) {
@@ -1060,6 +1124,7 @@ public class BuildHouseGoal extends Goal {
 
     private PlayerNpcBuildLayout.RelativeBlock nextUnfinishedBlock(ServerLevel serverLevel) {
         PlayerNpcBuildLayout.RelativeBlock firstMissingBlock = null;
+        int unfinishedPhase = Integer.MAX_VALUE;
         for (int i = 0; i < this.blueprint.size(); ) {
             PlayerNpcBuildLayout.RelativeBlock block = this.blueprint.get(i);
             if (PlayerNpcBuildMaterialUtil.isBlueprintPlaceholder(block.state())) {
@@ -1072,6 +1137,16 @@ public class BuildHouseGoal extends Goal {
                     this.completedPlacements++;
                 }
                 continue;
+            }
+
+            int blockPhase = buildPlacementPriority(block);
+            if (unfinishedPhase == Integer.MAX_VALUE) {
+                unfinishedPhase = blockPhase;
+            } else if (blockPhase > unfinishedPhase) {
+                // Do not skip an unavailable foundation/core phase and place later decoration or
+                // amenities.  Continue looking within the same phase so carried partial supplies
+                // are still consumed before the gather handoff.
+                break;
             }
 
             boolean hasMaterial = PlayerNpcBuildMaterialUtil.hasMaterialFor(serverLevel, this.playerNpc, block, this.origin);
@@ -1451,7 +1526,13 @@ public class BuildHouseGoal extends Goal {
             return true;
         }
 
+        if (this.tryRelocateBlockingUtility(serverLevel, pos, existing)) {
+            this.placementRecoveryThisTick = true;
+            this.placeDelay = 0;
+            return false;
+        }
         if (!this.canClearForBuild(serverLevel, pos, existing)) {
+            this.updateTaskDetail("paired cell blocked by", existing, pos);
             return false;
         }
 
@@ -1559,7 +1640,8 @@ public class BuildHouseGoal extends Goal {
     }
 
     private boolean tryRelocateBlockingUtility(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        if (!(state.is(Blocks.CHEST) || state.is(Blocks.FURNACE))
+        if (!this.isInsideSelectedBuildFootprint(pos)
+                || !(state.is(Blocks.CHEST) || state.is(Blocks.FURNACE))
                 || !(serverLevel.getBlockEntity(pos) instanceof Container source)) {
             return false;
         }
@@ -1801,8 +1883,14 @@ public class BuildHouseGoal extends Goal {
             return;
         }
 
+        int phase = buildPlacementPriority(block);
         this.blueprint.remove(index);
-        this.blueprint.add(block);
+        int insertionIndex = 0;
+        while (insertionIndex < this.blueprint.size()
+                && buildPlacementPriority(this.blueprint.get(insertionIndex)) <= phase) {
+            insertionIndex++;
+        }
+        this.blueprint.add(insertionIndex, block);
         this.clearActiveBuildBlock();
     }
 
@@ -2142,10 +2230,9 @@ public class BuildHouseGoal extends Goal {
     }
 
     private static int buildPlacementPriority(PlayerNpcBuildLayout.RelativeBlock block) {
-        if (block != null && isTorchPlacement(block.state())) {
-            return 20;
-        }
-        return 0;
+        return block == null
+                ? Integer.MAX_VALUE
+                : PlayerNpcBuildMaterialUtil.buildMaterialPhasePriority(block.state());
     }
 
     private static boolean isTorchPlacement(BlockState state) {
@@ -2273,6 +2360,7 @@ public class BuildHouseGoal extends Goal {
             String layoutId,
             int inventoryHash,
             int nextBlockIndex,
+            int lastSliceTick,
             boolean hasUnfinishedRequired,
             boolean hasMaterialForPlacement
     ) {
@@ -2290,6 +2378,7 @@ public class BuildHouseGoal extends Goal {
                     layoutId,
                     inventoryHash,
                     0,
+                    Integer.MIN_VALUE,
                     false,
                     false
             );
@@ -2311,6 +2400,7 @@ public class BuildHouseGoal extends Goal {
 
         private HomeBuildWorkSearch advance(
                 int nextBlockIndex,
+                int lastSliceTick,
                 boolean hasUnfinishedRequired,
                 boolean hasMaterialForPlacement
         ) {
@@ -2322,6 +2412,7 @@ public class BuildHouseGoal extends Goal {
                     this.layoutId,
                     this.inventoryHash,
                     nextBlockIndex,
+                    lastSliceTick,
                     hasUnfinishedRequired,
                     hasMaterialForPlacement
             );

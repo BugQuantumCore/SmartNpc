@@ -2,6 +2,7 @@ package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -39,6 +40,7 @@ public final class PillarUpAi {
     private final PlacingBlockAi placingBlockAi;
     private final ItemLike blockItem;
     private final BlockState placeState;
+    private final boolean gatherLogsOwnedSupports;
     private BlockPos placePos;
     private BlockPos lastPlacedPos;
     private BlockPos lastFailureBlockerPos;
@@ -52,11 +54,22 @@ public final class PillarUpAi {
     private final Set<BlockPos> placedSupports = new LinkedHashSet<>();
 
     public PillarUpAi(PlayerNpcEntity playerNpc, ToolAi toolAi, ItemLike blockItem, BlockState placeState) {
+        this(playerNpc, toolAi, blockItem, placeState, false);
+    }
+
+    public PillarUpAi(
+            PlayerNpcEntity playerNpc,
+            ToolAi toolAi,
+            ItemLike blockItem,
+            BlockState placeState,
+            boolean gatherLogsOwnedSupports
+    ) {
         this.playerNpc = playerNpc;
         this.toolAi = toolAi;
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.blockItem = blockItem;
         this.placeState = placeState;
+        this.gatherLogsOwnedSupports = gatherLogsOwnedSupports;
     }
 
     public boolean isRunning() {
@@ -68,6 +81,9 @@ public final class PillarUpAi {
     }
 
     public String startBlocker(ServerLevel serverLevel, BlockPos feet) {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            return "worker slot not held";
+        }
         if (!this.playerNpc.onGround()) {
             return "not on ground";
         }
@@ -96,6 +112,9 @@ public final class PillarUpAi {
 
     public BlockPos startBlockerPos(ServerLevel serverLevel, BlockPos feet) {
         if (feet == null) {
+            return null;
+        }
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
             return null;
         }
         if (!this.playerNpc.onGround()
@@ -148,6 +167,13 @@ public final class PillarUpAi {
     }
 
     public TickResult tick(ServerLevel serverLevel) {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            // Keep the pending placement/settlement coordinates intact. The owning goal may be
+            // resumed by a later worker holder, but this non-holder must not jump, place, equip,
+            // or continue navigation in the meantime.
+            this.playerNpc.getNavigation().stop();
+            return this.isRunning() ? TickResult.RUNNING : TickResult.IDLE;
+        }
         if (this.settlingSupportPos != null) {
             return this.tickSupportSettlement(serverLevel);
         }
@@ -229,7 +255,11 @@ public final class PillarUpAi {
         if (!this.isStablePillarSupport(serverLevel, placedSupport)) {
             return this.fail("placed pillar support did not remain solid", placedSupport);
         }
-        this.playerNpc.markTemporaryPillarSupport(placedSupport);
+        if (this.gatherLogsOwnedSupports) {
+            this.playerNpc.markGatherLogsTemporaryPillarSupport(placedSupport);
+        } else {
+            this.playerNpc.markTemporaryPillarSupport(placedSupport);
+        }
         this.placedSupports.add(placedSupport);
         this.beginSupportSettlement(placedSupport);
         return TickResult.RUNNING;

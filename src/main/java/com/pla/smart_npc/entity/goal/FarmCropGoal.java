@@ -43,7 +43,11 @@ public final class FarmCropGoal extends Goal {
     private static final int LOCAL_SUPPLY_Y_RANGE = 3;
     private static final int MAX_LOCAL_PATH_CHECKS = 1;
     private static final int MAX_OWNED_CROP_PATH_CHECKS = 1;
-    private static final float FARM_PATH_NODE_MULTIPLIER = 0.05F;
+    // Crop selection admits only one path per throttled goal probe, and createBoundedPath still
+    // enforces a loaded corridor and a 48-block ceiling. Use the normal node allowance for that
+    // one route: a farmer returning from daytime work can be 30-40 blocks from its owned plot,
+    // where the former 0.05 allowance exhausted before reaching every otherwise valid stand.
+    private static final float FARM_PATH_NODE_MULTIPLIER = 1.0F;
     private static final int MAX_ACTION_TICKS = 20 * 20;
     private static final int USE_ACTION_TICKS = 9;
     private static final int CLEAR_TICKS = 18;

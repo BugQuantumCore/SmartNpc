@@ -16,6 +16,7 @@ import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
 import com.pla.smart_npc.util.PlayerNpcBaseUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.Registries;
@@ -53,6 +54,7 @@ public class MiningNightCampGoal extends Goal {
     private static final int ACTION_DELAY_TICKS = 12;
     private static final int FURNACE_ACTION_COOLDOWN_TICKS = 20;
     private static final int FURNACE_FAIL_COOLDOWN_TICKS = 20 * 3;
+    private static final int FURNACE_IDLE_SCAN_INTERVAL_TICKS = 20;
     private static final int MAX_FURNACE_RECOVERY_TICKS = 20 * 10;
     private static final double FURNACE_USE_DISTANCE_SQR = 2.25D * 2.25D;
     private static final double FURNACE_STAND_REACHED_SQR = 1.25D * 1.25D;
@@ -76,9 +78,15 @@ public class MiningNightCampGoal extends Goal {
     private static final int MIN_LOOK_TICKS = 20;
     private static final int RANDOM_LOOK_TICKS = 20 * 3;
     private static final int WALK_REPATH_TICKS = 20;
+    private static final int CAMP_WALK_CANDIDATE_CHECKS = 32;
+    private static final int CAMP_WALK_PATH_CHECKS = 4;
+    private static final float CAMP_WALK_PATH_NODE_MULTIPLIER = 0.10F;
+    private static final int FARM_CAMP_SELECTION_PATH_CHECKS = 2;
+    private static final float FARM_CAMP_SELECTION_PATH_NODE_MULTIPLIER = 0.03F;
+    private static final float OVERLOADED_FARM_CAMP_SELECTION_PATH_NODE_MULTIPLIER = 0.01F;
     private static final int RESOURCELESS_NIGHT_ROAM_RADIUS = 8;
     private static final int RESOURCELESS_NIGHT_WALK_CANDIDATE_CHECKS = 128;
-    private static final int RESOURCELESS_NIGHT_WALK_PATH_CHECKS = 48;
+    private static final int RESOURCELESS_NIGHT_WALK_PATH_CHECKS = 4;
     private static final int RESOURCELESS_NIGHT_WALK_RETRY_TICKS = 10;
     private static final int RESOURCELESS_NIGHT_WALK_REPATH_TICKS = 20;
     private static final int RESOURCELESS_NIGHT_WALK_NO_PROGRESS_TICKS = 20 * 2;
@@ -135,6 +143,7 @@ public class MiningNightCampGoal extends Goal {
     private boolean returnTemporaryMainHandOnRestore;
     private boolean reusableCampAnchor;
     private boolean resourcelessNightWalkActive;
+    private boolean farmCampArrivalComplete;
     private int nextContinueContextCheckTick;
     private boolean cachedContinueContext = true;
 
@@ -261,6 +270,13 @@ public class MiningNightCampGoal extends Goal {
             return false;
         }
 
+        // Camp owns MOVE/LOOK at a higher priority than home management. Give a farmer's
+        // persistent base one nightly deposit pass before camping claims those controls.
+        if (ManageHomeBaseGoal.hasPendingCampBaseNightlyDeposit(this.playerNpc, serverLevel)) {
+            this.playerNpc.setIdleTraceDetail("night camp waiting for nightly base-chest deposit", 40);
+            return false;
+        }
+
         this.resetPlan();
         this.buildingBootstrapCamp = isBuildingBootstrapNightCamp(this.playerNpc, serverLevel);
         this.farmingBootstrapCamp = !this.buildingBootstrapCamp
@@ -357,6 +373,7 @@ public class MiningNightCampGoal extends Goal {
         if ((this.farmingCamp || this.persistentBaseCamp) && this.campCenter != null) {
             this.returnPositionAi.start(this.campCenter);
         }
+        this.farmCampArrivalComplete = this.farmingCamp && this.isWithinFarmCamp();
         this.playerNpc.setCurrentAiState(this.activeAiState());
         this.playerNpc.setCurrentAiDetail(this.buildingBootstrapCamp
                 ? "camping before choosing build area"
@@ -395,6 +412,24 @@ public class MiningNightCampGoal extends Goal {
             this.tickRecoverFurnace(serverLevel);
             return;
         }
+        if (this.farmingCamp && !this.farmCampArrivalComplete && this.isWithinFarmCamp()) {
+            // Farm camp walking intentionally ranges around the whole exterior perimeter,
+            // which can extend beyond the tighter arrival radius. Once the initial return
+            // reaches camp, do not let that radius preempt the goal's own WALK activity and
+            // pause its activity timer while sending the NPC back and forth.
+            this.farmCampArrivalComplete = true;
+            this.returnPositionAi.stop();
+        }
+        boolean atPersistentCamp = this.farmingCamp && this.isWithinFarmCamp()
+                || this.persistentBaseCamp && this.isWithinPersistentBaseCamp();
+        if (atPersistentCamp
+                && ManageHomeBaseGoal.hasPendingCampBaseNightlyDeposit(this.playerNpc, serverLevel)) {
+            // A worker may have been away from base when night began. End camp once it has
+            // escorted the worker back, allowing the same one-pass handoff used at dusk.
+            this.playerNpc.setCurrentAiDetail("ready for nightly base-chest deposit");
+            this.finished = true;
+            return;
+        }
         if (!shouldPauseMiningForNightCamp(this.playerNpc, serverLevel)) {
             CampFurnaceRef ownedFurnace = this.resolveOwnedCampFurnace();
             if (ownedFurnace == null || !ownedFurnace.level().hasChunkAt(ownedFurnace.pos())) {
@@ -411,7 +446,7 @@ public class MiningNightCampGoal extends Goal {
             return;
         }
         boolean activeFarmFenceLight = this.hasActiveFarmFenceLightAction();
-        if (this.farmingCamp && !this.isWithinFarmCamp() && !activeFarmFenceLight) {
+        if (this.farmingCamp && !this.farmCampArrivalComplete && !activeFarmFenceLight) {
             this.returnPositionAi.tickFarmCampReturn(
                     serverLevel,
                     this.campCenter,
@@ -502,6 +537,10 @@ public class MiningNightCampGoal extends Goal {
         if (this.furnaceCooldownTicks > 0) {
             return false;
         }
+        // With no actionable furnace, the old loop scanned the complete 13x5x13 local volume on
+        // every goal tick. One-second polling is still prompt for smelting while removing the
+        // repeated 845-block scan from ordinary camp walking/looking ticks.
+        this.furnaceCooldownTicks = FURNACE_IDLE_SCAN_INTERVAL_TICKS;
 
         BlockPos workFurnace = this.findWorkFurnace(serverLevel);
         if (workFurnace != null && this.planFurnaceInteraction(serverLevel, workFurnace)) {
@@ -876,7 +915,11 @@ public class MiningNightCampGoal extends Goal {
         }
         BlockPos anchor = this.campCenter != null ? this.campCenter : this.playerNpc.blockPosition();
         int radius = this.reusableCampAnchor ? CAMP_WALK_RADIUS : RESOURCELESS_NIGHT_ROAM_RADIUS;
-        Path path = this.playerNpc.getNavigation().createPath(target, 0);
+        Path path = PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                target,
+                CAMP_WALK_PATH_NODE_MULTIPLIER
+        );
         if (path == null
                 || !path.canReach()
                 || path.getEndNode() == null
@@ -975,7 +1018,11 @@ public class MiningNightCampGoal extends Goal {
             return;
         }
         this.repathTicks = WALK_REPATH_TICKS;
-        Path path = this.playerNpc.getNavigation().createPath(this.walkTarget, 0);
+        Path path = PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                this.walkTarget,
+                CAMP_WALK_PATH_NODE_MULTIPLIER
+        );
         if (path == null || !path.canReach()) {
             this.walkTarget = null;
             return;
@@ -1590,8 +1637,9 @@ public class MiningNightCampGoal extends Goal {
         }
 
         candidates.sort(Comparator.comparingDouble(pos -> pos.distSqr(this.playerNpc.blockPosition())));
-        int checks = 0;
-        while (!candidates.isEmpty() && checks++ < 32) {
+        int candidateChecks = 0;
+        int pathChecks = 0;
+        while (!candidates.isEmpty() && candidateChecks++ < CAMP_WALK_CANDIDATE_CHECKS) {
             BlockPos candidate = candidates.remove(this.playerNpc.getRandom().nextInt(candidates.size())).immutable();
             if (!PathNavigationAi.canStandAt(serverLevel, candidate)
                     || (keepUnderground && serverLevel.canSeeSky(candidate.above()))
@@ -1600,7 +1648,14 @@ public class MiningNightCampGoal extends Goal {
                     && horizontalDistanceSqr(candidate, this.campCenter) > FARM_CAMP_REACHED_SQR) {
                 continue;
             }
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            if (pathChecks++ >= CAMP_WALK_PATH_CHECKS) {
+                break;
+            }
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    CAMP_WALK_PATH_NODE_MULTIPLIER
+            );
             if (path != null
                     && path.canReach()
                     && path.getEndNode() != null
@@ -1683,20 +1738,28 @@ public class MiningNightCampGoal extends Goal {
                 .distinct()
                 .filter(pos -> this.isSafeFarmExteriorStand(serverLevel, plan, pos))
                 .map(BlockPos::immutable)
+                .sorted(Comparator.comparingDouble(this.playerNpc.blockPosition()::distSqr))
                 .toList();
         if (safeCandidates.isEmpty()) {
             return null;
         }
 
         int pathChecks = 0;
+        float pathNodeMultiplier = PlayerNpcPerformanceMonitor.isAiWorkOverloaded()
+                ? OVERLOADED_FARM_CAMP_SELECTION_PATH_NODE_MULTIPLIER
+                : FARM_CAMP_SELECTION_PATH_NODE_MULTIPLIER;
         for (BlockPos candidate : safeCandidates) {
             if (this.playerNpc.blockPosition().equals(candidate)) {
                 return candidate.immutable();
             }
-            if (pathChecks++ >= 24) {
+            if (pathChecks++ >= FARM_CAMP_SELECTION_PATH_CHECKS) {
                 break;
             }
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = PathNavigationAi.createBoundedPath(
+                    this.playerNpc,
+                    candidate,
+                    pathNodeMultiplier
+            );
             if (path != null
                     && path.canReach()
                     && path.getEndNode() != null
@@ -2170,6 +2233,7 @@ public class MiningNightCampGoal extends Goal {
         this.returnTemporaryMainHandOnRestore = false;
         this.reusableCampAnchor = false;
         this.resourcelessNightWalkActive = false;
+        this.farmCampArrivalComplete = false;
         this.cachedContinueContext = true;
         this.nextContinueContextCheckTick = 0;
     }

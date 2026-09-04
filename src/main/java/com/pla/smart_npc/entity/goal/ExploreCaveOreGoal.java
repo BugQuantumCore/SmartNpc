@@ -12,6 +12,7 @@ import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcAdaptiveSearchScope;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
@@ -72,6 +73,9 @@ public class ExploreCaveOreGoal extends Goal {
     private static final int LOCAL_ROUTE_HORIZONTAL_RADIUS = 8;
     private static final int LOCAL_ROUTE_VERTICAL_DOWN = 5;
     private static final int LOCAL_ROUTE_VERTICAL_UP = 6;
+    private static final int MAX_LOCAL_ROUTE_PATH_CHECKS = 2;
+    private static final float ACTIVE_ROUTE_PATH_NODE_MULTIPLIER = 0.05F;
+    private static final float OVERLOADED_ROUTE_PATH_NODE_MULTIPLIER = 0.01F;
     private static final int CLEAR_OBSTRUCTION_TICKS = 28;
     private static final int HIGH_ORE_MIN_VERTICAL_GAP = 3;
     private static final int HIGH_ORE_MAX_HORIZONTAL_RADIUS = 4;
@@ -1166,6 +1170,9 @@ public class ExploreCaveOreGoal extends Goal {
             return false;
         }
 
+        float pathNodeMultiplier = PlayerNpcPerformanceMonitor.isAiWorkOverloaded()
+                ? OVERLOADED_ROUTE_PATH_NODE_MULTIPLIER
+                : ACTIVE_ROUTE_PATH_NODE_MULTIPLIER;
         return this.pathNavigationAi.moveToWithLocalFallback(
                 serverLevel,
                 this.standPos,
@@ -1173,7 +1180,9 @@ public class ExploreCaveOreGoal extends Goal {
                 MAX_SAFE_DROP_BLOCKS,
                 LOCAL_ROUTE_HORIZONTAL_RADIUS,
                 LOCAL_ROUTE_VERTICAL_DOWN,
-                LOCAL_ROUTE_VERTICAL_UP);
+                LOCAL_ROUTE_VERTICAL_UP,
+                MAX_LOCAL_ROUTE_PATH_CHECKS,
+                pathNodeMultiplier);
     }
 
     private boolean tryStartPathObstructionMining(ServerLevel serverLevel) {

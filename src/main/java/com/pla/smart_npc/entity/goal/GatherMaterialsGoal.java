@@ -11,6 +11,7 @@ import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
@@ -1549,6 +1550,10 @@ public class GatherMaterialsGoal extends Goal {
     }
 
     private boolean beginLogPillarStep(ServerLevel serverLevel, BlockPos feet) {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.playerNpc.getNavigation().stop();
+            return false;
+        }
         boolean replaceable = serverLevel.getBlockState(feet).canBeReplaced();
         boolean openBodySpace = this.hasOpenBodySpace(serverLevel, feet);
         boolean otherEntity = this.hasOtherEntityInBlock(serverLevel, feet);
@@ -1569,6 +1574,10 @@ public class GatherMaterialsGoal extends Goal {
 
     private void tickLogPillarPlacement(ServerLevel serverLevel) {
         if (this.logPillarPlacePos == null) {
+            return;
+        }
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.playerNpc.getNavigation().stop();
             return;
         }
 

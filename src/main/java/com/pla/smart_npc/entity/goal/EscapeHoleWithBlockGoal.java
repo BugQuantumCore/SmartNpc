@@ -14,6 +14,7 @@ import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcCollisionUtil;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -26,7 +27,6 @@ import net.minecraft.tags.ItemTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.BlockItem;
@@ -72,6 +72,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int MAX_GOAL_TICKS = 20 * 120;
     private static final int SEARCH_RADIUS = 5;
     private static final List<BlockPos> ESCAPE_MATERIAL_OFFSETS = createEscapeMaterialOffsets();
+    private static final List<BlockPos> PILLAR_PLAN_OFFSETS = createPillarPlanOffsets();
     private static final double BREAK_DISTANCE_SQR = 3.0D * 3.0D;
     private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int MAX_FAILED_PATH_TICKS = 20 * 3;
@@ -80,6 +81,18 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int GATHER_PATH_FALLBACK_FAILED_COOLDOWN_TICKS = 20 * 30;
     private static final int PILLAR_SEARCH_RADIUS = 5;
     private static final int MAX_PILLAR_PLAN_CANDIDATES = 2;
+    private static final int LOCAL_TRAP_SEARCH_RADIUS = 2;
+    private static final int MAX_LOCAL_TRAP_STANDS = 24;
+    private static final int LOCAL_TRAP_CACHE_TICKS = 5;
+    private static final int OPEN_SHAFT_COMPONENT_RADIUS = 3;
+    private static final int MAX_OPEN_SHAFT_COMPONENT_STANDS = 6;
+    private static final int MAX_OPEN_SHAFT_BOUNDARY_COLUMNS = 24;
+    private static final int OPEN_SHAFT_MIN_RIM_GAIN = 3;
+    private static final int OPEN_SHAFT_MAX_RIM_GAIN = 48;
+    private static final int OPEN_SHAFT_PROBE_CACHE_TICKS = 10;
+    private static final int OPEN_SHAFT_REQUEST_TICKS = 20 * 120;
+    private static final int[] OPEN_SHAFT_STEP_OFFSETS = {0, 1, -1};
+    private static final int TRAPPED_CAVE_MIN_SURFACE_GAIN = 3;
     private static final int PILLAR_PLAN_RETRY_TICKS = 20;
     private static final int PILLAR_SURFACE_SCAN_UP = 96;
     private static final double PILLAR_BASE_REACHED_SQR = 1.2D * 1.2D;
@@ -106,6 +119,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private static final int EXPLORATION_CLIMB_CLEAR_TICKS = 24;
     private static final int EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS = 20 * 20;
     private static final int FAILED_EXPLORATION_CLIMB_RETRY_TICKS = 20 * 30;
+    // More than one complete eight-slice StartupWorkGatedGoal selector sweep. This gives the
+    // higher-priority crafting goal a bounded chance to acquire and validate its concrete table
+    // plan before an exploration-owned climb starts changing blocks.
+    private static final int CRAFTING_PRIORITY_HANDOFF_TICKS = 40;
     private static final double EXPLORATION_CLIMB_CLEAR_DISTANCE_SQR = 6.0D * 6.0D;
     private static final int EXPLORATION_CLIMB_STEP_OFF_STUCK_TICKS = PILLAR_STUCK_MIN_TICKS;
     private static final int EXPLORATION_CLIMB_STEP_OFF_TICKS = 40;
@@ -209,12 +226,26 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private int pillarClearReturnNoProgressTicks;
     private int explorationClimbStepOffWatchStartTick;
     private int explorationClimbStepOffTicks;
+    private BlockPos localTrapCacheFeet;
+    private int localTrapCacheUntilTick;
+    private boolean localTrapCacheResult;
+    private BlockPos openShaftProbeCacheFeet;
+    private int openShaftProbeCacheUntilTick;
+    private BlockPos openShaftProbeCacheTarget;
+    private int openShaftProbeComponentSize;
+    private int openShaftProbeRimGain;
+    private BlockPos directOpenShaftRequestTarget;
+    private int directOpenShaftRequestUntilTick;
+    private BlockPos trappedCaveRequestTarget;
+    private BlockPos craftingPriorityHandoffTarget;
+    private int craftingPriorityHandoffUntilTick;
     private boolean explorationClimbStepOffCompleted;
     private final Set<BlockPos> placedPillarSupports = new LinkedHashSet<>();
     private boolean usingTemporaryPickaxe;
     private boolean protectedPillarReplanPending;
     private boolean usingTemporaryBlock;
     private boolean explorationClimbEpisode;
+    private boolean workerSlotPaused;
     private boolean finished;
 
     public EscapeHoleWithBlockGoal(PlayerNpcEntity playerNpc) {
@@ -274,6 +305,24 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (farmEgressDecision == FarmEgressDecision.BLOCK) {
             return false;
         }
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            // Farm-gate egress above is a non-pillar safety movement. Every remaining mode can
+            // lead to pillar preparation or placement and therefore requires an existing slot;
+            // this read-only check never queues a turn during entity join/load.
+            return false;
+        }
+        if (requestedTarget != null && !serverLevel.hasChunkAt(requestedTarget)) {
+            // Escape requests are local recovery hints. Only their current worker holder may
+            // invalidate one; a non-holder (especially immediately after join/load) is read-only.
+            // Never synchronously load terrain through heightmap or path queries from canUse().
+            this.playerNpc.clearUpwardEscapeTarget();
+            this.playerNpc.setHoleEscapeCooldown(COOLDOWN_TICKS);
+            return false;
+        }
+        if (this.shouldYieldExplorationClimbToCrafting(serverLevel, requestedTarget)) {
+            return false;
+        }
+        this.workerSlotPaused = false;
         if (requestedTarget != null
                 && this.playerNpc.isExplorationUpwardEscapeRequested()
                 && requestedTarget.equals(this.failedExplorationClimbTarget)
@@ -296,6 +345,119 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.playerNpc.clearUpwardEscapeTarget();
             return false;
         }
+        if (this.playerNpc.tickCount >= this.directOpenShaftRequestUntilTick) {
+            this.directOpenShaftRequestTarget = null;
+            this.directOpenShaftRequestUntilTick = 0;
+        }
+        if (this.trappedCaveRequestTarget != null
+                && (requestedTarget == null || !requestedTarget.equals(this.trappedCaveRequestTarget))) {
+            this.trappedCaveRequestTarget = null;
+        }
+        // CraftBasicGear only creates this exact two-block local request after three admitted
+        // crafting-table route failures. Capture that provenance before the optional shaft probe
+        // can replace the request with a rim target. It is a direct MOVE handoff, not a generic
+        // surface-origin climb request, so an adjacent walkable cell inside the hole must not
+        // cause the generic cliff guard to clear it.
+        boolean boundedCraftingHandoff = this.isBoundedCraftingEscapeHandoff(feet, requestedTarget);
+        // Terraform deliberately hands support filling to this goal when the builder is below the
+        // build origin. Preserve that exact request through the generic exposed-side rejection;
+        // the retained Terraform handoff resumes the fill after this bounded climb completes.
+        boolean terraformSupportFillHandoff = requestedTarget != null
+                && this.playerNpc.isTerraformSupportUpwardEscapeRequested();
+        // Crafting-table travel may already have requested a short local climb. Still run the
+        // cached confined-component proof for that explicit handoff: otherwise an adjacent cell
+        // inside a 1x3 shaft is mistaken for a walkable surface side and the request is rejected.
+        // Other existing forced requests retain the cheap surface/cliff guard without this scan.
+        BlockPos openShaftTarget = requestedTarget == null || this.playerNpc.isCraftingUpwardEscapeRequested()
+                ? this.findConfinedOpenShaftSurfaceTarget(serverLevel, feet)
+                : null;
+        if (openShaftTarget != null) {
+            int maxBlocks = Math.min(
+                    MAX_ROUTE_ESCAPE_BLOCKS,
+                    Math.max(1, openShaftTarget.getY() - feet.getY() + 2)
+            );
+            this.playerNpc.requestForcedUpwardEscapeTo(
+                    openShaftTarget,
+                    OPEN_SHAFT_REQUEST_TICKS,
+                    maxBlocks
+            );
+            requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+            this.directOpenShaftRequestTarget = openShaftTarget.immutable();
+            this.directOpenShaftRequestUntilTick = this.playerNpc.tickCount + OPEN_SHAFT_REQUEST_TICKS;
+        }
+        boolean directOpenShaftEscape = requestedTarget != null
+                && requestedTarget.equals(this.directOpenShaftRequestTarget)
+                && this.playerNpc.tickCount < this.directOpenShaftRequestUntilTick;
+        boolean retainedExplorationStallEscape = requestedTarget != null
+                && ExploreAroundGoal.isRetainedStallEscapeRequest(this.playerNpc, requestedTarget);
+        boolean trapped = this.hasOpenBodySpace(serverLevel, feet)
+                && this.isWalkableFloor(serverLevel, feet.below())
+                && this.isActuallyTrapped(serverLevel, feet);
+        if (requestedTarget == null && trapped) {
+            BlockPos caveSurfaceTarget = this.findTrappedCaveSurfaceTarget(serverLevel, feet);
+            if (caveSurfaceTarget != null) {
+                int maxBlocks = Math.min(
+                        MAX_ROUTE_ESCAPE_BLOCKS,
+                        Math.max(1, caveSurfaceTarget.getY() - feet.getY() + 2)
+                );
+                // Treat the cave roof as a surface-directed escape episode rather than the
+                // legacy one-block generic trap nudge. Exploration-style completion deliberately
+                // keeps MOVE through the final step-off, so DescendHighColumn cannot dismantle the
+                // unfinished column while the NPC is still beneath/on the cave opening.
+                this.playerNpc.requestExplorationUpwardEscapeTo(
+                        caveSurfaceTarget,
+                        OPEN_SHAFT_REQUEST_TICKS,
+                        maxBlocks
+                );
+                requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+                this.trappedCaveRequestTarget = caveSurfaceTarget.immutable();
+                this.playerNpc.setIdleTraceDetail("pillar request admitted: trapped cave surface gain="
+                        + (caveSurfaceTarget.getY() - feet.getY())
+                        + " -> " + posText(caveSurfaceTarget), 60);
+            }
+        }
+        boolean trappedCaveEscape = requestedTarget != null
+                && requestedTarget.equals(this.trappedCaveRequestTarget);
+        String surfaceRequestRejection = requestedTarget != null
+                && !trapped
+                && !directOpenShaftEscape
+                && !trappedCaveEscape
+                && !retainedExplorationStallEscape
+                && !boundedCraftingHandoff
+                && !terraformSupportFillHandoff
+                ? this.undergroundSurfaceRecoveryRejection(serverLevel, feet, requestedTarget)
+                : null;
+        if (surfaceRequestRejection != null) {
+            // A high destination beside a cliff/mountain is a navigation/reselection problem, not
+            // proof that the NPC is underground. Release the request so its owner can repath or
+            // choose a different route without leaving a vertical column in open terrain.
+            this.playerNpc.clearUpwardEscapeTarget();
+            this.playerNpc.setHoleEscapeCooldown(COOLDOWN_TICKS);
+            this.playerNpc.setIdleTraceDetail("pillar request rejected: " + surfaceRequestRejection
+                    + " @ " + posText(feet), 40);
+            return false;
+        }
+        if (retainedExplorationStallEscape) {
+            // This request carries three same-position, no-path failures plus a completed bounded
+            // surface scan. It is the below-surface/open-shaft equivalent of legacy trapped
+            // admission and deliberately bypasses surface-origin sky/overhang rejection.
+            this.playerNpc.setIdleTraceDetail("pillar request admitted: retained exploration stall -> "
+                    + posText(requestedTarget), 40);
+        }
+        if (directOpenShaftEscape) {
+            this.playerNpc.setIdleTraceDetail("pillar request admitted: confined open shaft"
+                    + " component=" + this.openShaftProbeComponentSize
+                    + " rimGain=" + this.openShaftProbeRimGain
+                    + " -> " + posText(requestedTarget), 60);
+        } else if (boundedCraftingHandoff) {
+            this.playerNpc.setIdleTraceDetail("pillar request admitted: crafting-table route handoff"
+                    + " max=" + this.playerNpc.getUpwardEscapeMaxPillarBlocks()
+                    + " -> " + posText(requestedTarget), 60);
+        } else if (terraformSupportFillHandoff) {
+            this.playerNpc.setIdleTraceDetail("pillar request admitted: terraform support-fill handoff"
+                    + " max=" + this.playerNpc.getUpwardEscapeMaxPillarBlocks()
+                    + " -> " + posText(requestedTarget), 60);
+        }
         boolean hasRequestedEscape = requestedTarget != null;
         boolean forceRequestedClimb = this.playerNpc.isForcedUpwardEscape()
                 && hasRequestedEscape
@@ -304,9 +466,6 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 && hasRequestedEscape
                 && requestedTarget.getY() > feet.getY();
         boolean requestedClimb = forceRequestedClimb || explorationRequestedClimb;
-        boolean trapped = this.hasOpenBodySpace(serverLevel, feet)
-                && this.isWalkableFloor(serverLevel, feet.below())
-                && this.isActuallyTrapped(serverLevel, feet);
         BlockPos routeTarget = this.getUpwardRouteTarget(serverLevel, feet);
         boolean hasUpwardRouteTarget = routeTarget != null && this.isUsableUpwardRouteTarget(serverLevel, feet, routeTarget);
         if (requestedClimb && !hasUpwardRouteTarget) {
@@ -334,7 +493,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
 
-        boolean routeNeedsClimb = requestedClimb || hasUpwardRouteTarget && this.routeNeedsClimb(serverLevel, feet, routeTarget);
+        boolean routeNeedsClimb = requestedClimb
+                || hasUpwardRouteTarget && this.routeNeedsClimbWithoutPathProbe(serverLevel, feet, routeTarget);
 
         if (!trapped && !routeNeedsClimb) {
             return false;
@@ -417,8 +577,22 @@ public class EscapeHoleWithBlockGoal extends Goal {
         return true;
     }
 
+    private boolean isBoundedCraftingEscapeHandoff(BlockPos feet, @Nullable BlockPos requestedTarget) {
+        return requestedTarget != null
+                && this.playerNpc.isCraftingUpwardEscapeRequested()
+                && requestedTarget.getX() == feet.getX()
+                && requestedTarget.getZ() == feet.getZ()
+                && requestedTarget.getY() == feet.getY() + 2
+                && this.playerNpc.getUpwardEscapeMaxPillarBlocks() == 2;
+    }
+
     @Override
     public boolean canContinueToUse() {
+        if (this.mode != EscapeMode.FARM_GATE_EGRESS
+                && !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = this.mode != EscapeMode.NONE;
+            return false;
+        }
         if (this.mode == EscapeMode.NONE
                 || this.finished
                 || this.goalTicks >= MAX_GOAL_TICKS
@@ -504,6 +678,13 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     @Override
     public void start() {
+        if (this.mode != EscapeMode.FARM_GATE_EGRESS
+                && !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            this.playerNpc.getNavigation().stop();
+            return;
+        }
+        this.workerSlotPaused = false;
         this.goalTicks = 0;
         this.placeDelayTicks = 0;
         this.placeWaitTicks = 0;
@@ -567,6 +748,12 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             return;
         }
+        if (this.mode != EscapeMode.FARM_GATE_EGRESS
+                && !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            this.pauseForWorkerSlotLoss();
+            return;
+        }
 
         this.goalTicks++;
         if (this.mode == EscapeMode.NAVIGATE_ROUTE) {
@@ -586,6 +773,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     @Override
     public void stop() {
+        if (this.mode != EscapeMode.FARM_GATE_EGRESS
+                && (this.workerSlotPaused || !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc))) {
+            this.pauseForWorkerSlotLoss();
+            return;
+        }
         BlockPos failedExplorationTarget = this.explorationClimbEpisode && this.climbTargetPos != null
                 ? this.climbTargetPos.immutable()
                 : null;
@@ -613,12 +805,41 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (this.shouldClearUpwardEscapeTargetOnStop()) {
             this.playerNpc.clearUpwardEscapeTarget();
         }
+        if (this.playerNpc.getUpwardEscapeTarget() != null
+                && this.mode != EscapeMode.FARM_GATE_EGRESS) {
+            // A retained request used to bypass holeEscapeCooldown and immediately repeat the
+            // complete activation plan after a short/failed pillar episode. Keep the request, but
+            // bound retries to once per normal escape cooldown.
+            this.nextPillarPlanTick = Math.max(
+                    this.nextPillarPlanTick,
+                    this.playerNpc.tickCount + COOLDOWN_TICKS
+            );
+        }
         if (failedExplorationTarget != null && explorationRequestEnded && !explorationClimbCompleted) {
             ExploreAroundGoal.requestSafeWalkAfterFailedClimb(this.playerNpc, failedExplorationTarget);
         }
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
         this.resetPlan();
+    }
+
+    private void pauseForWorkerSlotLoss() {
+        this.playerNpc.clearBlockBreakProgress(this.minePos);
+        this.playerNpc.clearBlockBreakProgress(this.pillarClearPos);
+        this.playerNpc.clearBlockBreakProgress(this.exitClearPos);
+        this.playerNpc.getNavigation().stop();
+        this.clearBlockAi.stop();
+        this.gatherPathStuckFallbackAi.stop();
+        this.protectedPillarPathStuckFallbackAi.stop();
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
+        this.restorePreviousMainHand();
+        this.restorePreviousPillarMainHand();
+        this.workerSlotPaused = true;
+        this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+        this.playerNpc.setCurrentAiDetail("");
+        // Deliberately retain mode/plan, the upward request, and persisted support ownership. A
+        // later holder revalidates/replans them; a non-holder never clears recovery evidence.
     }
 
     private boolean shouldClearUpwardEscapeTargetOnStop() {
@@ -727,6 +948,46 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.resetFarmEgressNavigation();
         this.resetFarmEgressClearContext();
         this.farmEgressRouteFailureTicks = 0;
+        return true;
+    }
+
+    private boolean shouldYieldExplorationClimbToCrafting(
+            ServerLevel serverLevel,
+            @Nullable BlockPos requestedTarget
+    ) {
+        if (requestedTarget == null || !this.playerNpc.isExplorationUpwardEscapeRequested()) {
+            this.craftingPriorityHandoffTarget = null;
+            this.craftingPriorityHandoffUntilTick = 0;
+            return false;
+        }
+
+        if (CraftBasicGearGoal.isCraftingTableWorkActive(this.playerNpc)) {
+            // CraftBasicGearGoal already owns MOVE/LOOK and has a concrete admitted table plan.
+            // Let it finish before beginning a new exploration clear/pillar episode, especially
+            // when it is preparing the pickaxe needed for the ceiling. This is intentionally a
+            // canUse-only gate: an escape already in a jump/placement step is never interrupted.
+            this.playerNpc.setIdleTraceDetail("exploration climb waiting for active crafting-table work", 40);
+            return true;
+        }
+
+        if (!requestedTarget.equals(this.craftingPriorityHandoffTarget)) {
+            this.craftingPriorityHandoffTarget = requestedTarget.immutable();
+            this.craftingPriorityHandoffUntilTick = CraftBasicGearGoal.shouldPrioritizeGearCrafting(
+                    this.playerNpc,
+                    serverLevel
+            )
+                    ? this.playerNpc.tickCount + CRAFTING_PRIORITY_HANDOFF_TICKS
+                    : 0;
+        }
+        if (this.playerNpc.tickCount >= this.craftingPriorityHandoffUntilTick) {
+            return false;
+        }
+
+        int seconds = Math.max(1, (this.craftingPriorityHandoffUntilTick - this.playerNpc.tickCount + 19) / 20);
+        this.playerNpc.setIdleTraceDetail(
+                "exploration climb waiting " + seconds + "s for priority crafting-table admission",
+                40
+        );
         return true;
     }
 
@@ -2999,37 +3260,38 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private PillarPlan findPillarPlan(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
-        List<BlockPos> candidates = new ArrayList<>();
-        for (BlockPos pos : BlockPos.betweenClosed(
-                feet.offset(-PILLAR_SEARCH_RADIUS, -1, -PILLAR_SEARCH_RADIUS),
-                feet.offset(PILLAR_SEARCH_RADIUS, 2, PILLAR_SEARCH_RADIUS))) {
-            candidates.add(pos.immutable());
-        }
-
-        // The current column and its cardinal neighbours are already the nearest entries in this
-        // ordering. Previously findDirectPillarPlan synchronously inspected all five of them and
-        // this loop then inspected four more, so one unwrapped canUse pass could scan nine tall
-        // pillar corridors. Keep the documented two-candidate atomic bound and retain the cursor;
-        // a failed pass resumes at the next nearby columns after the normal retry cooldown.
-        candidates.sort(Comparator
-                .comparingDouble(feet::distSqr)
-                .thenComparingDouble(pos -> routeTarget == null ? 0.0D : routeTarget.distSqr(pos)));
-        int start = candidates.isEmpty() ? 0 : Math.floorMod(this.pillarPlanCandidateCursor, candidates.size());
+        // Offset order is immutable and cached. canUse() now allocates no 11x4x11 candidate list
+        // and performs no sort; it still inspects only two retained candidates per activation.
+        int start = Math.floorMod(this.pillarPlanCandidateCursor, PILLAR_PLAN_OFFSETS.size());
         int inspected = 0;
-        for (int offset = 0; offset < candidates.size()
+        for (int offset = 0; offset < PILLAR_PLAN_OFFSETS.size()
                 && inspected < MAX_PILLAR_PLAN_CANDIDATES; offset++, inspected++) {
-            BlockPos base = candidates.get((start + offset) % candidates.size());
+            BlockPos base = feet.offset(PILLAR_PLAN_OFFSETS.get((start + offset) % PILLAR_PLAN_OFFSETS.size()));
             PillarPlan plan = this.createPillarPlan(serverLevel, base, routeTarget);
             if (plan != null) {
                 this.pillarPlanCandidateCursor = 0;
                 return plan;
             }
         }
-        if (!candidates.isEmpty()) {
-            this.pillarPlanCandidateCursor = (start + inspected) % candidates.size();
-        }
+        this.pillarPlanCandidateCursor = (start + inspected) % PILLAR_PLAN_OFFSETS.size();
 
         return null;
+    }
+
+    private static List<BlockPos> createPillarPlanOffsets() {
+        List<BlockPos> offsets = new ArrayList<>();
+        for (int dx = -PILLAR_SEARCH_RADIUS; dx <= PILLAR_SEARCH_RADIUS; dx++) {
+            for (int dy = -1; dy <= 2; dy++) {
+                for (int dz = -PILLAR_SEARCH_RADIUS; dz <= PILLAR_SEARCH_RADIUS; dz++) {
+                    offsets.add(new BlockPos(dx, dy, dz));
+                }
+            }
+        }
+        offsets.sort(Comparator
+                .comparingDouble((BlockPos offset) -> offset.distSqr(BlockPos.ZERO))
+                .thenComparingInt(offset -> Math.abs(offset.getY()))
+                .thenComparingInt(BlockPos::getY));
+        return List.copyOf(offsets);
     }
 
     private PillarPlan createPillarPlan(ServerLevel serverLevel, BlockPos base, BlockPos routeTarget) {
@@ -3539,7 +3801,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || this.hasStepExitToward(serverLevel, feet, this.climbTargetPos));
     }
 
-    private boolean routeNeedsClimb(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
+    private boolean routeNeedsClimbWithoutPathProbe(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
         if (routeTarget == null) {
             return false;
         }
@@ -3553,17 +3815,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return false;
         }
 
-        Path path = this.createBoundedDiagnosticPath(routeTarget);
-        if (requestedSurfaceRoute && (path == null || !path.canReach())) {
-            return true;
-        }
-
         if (targetIsHigher && this.hasStepExitToward(serverLevel, feet, routeTarget)) {
             return false;
-        }
-
-        if (path == null || !path.canReach()) {
-            return true;
         }
 
         if (requestedSurfaceRoute && !targetIsHigher) {
@@ -3585,28 +3838,48 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (requestedTarget != null && this.isUsableUpwardRouteTarget(serverLevel, feet, requestedTarget)) {
             return requestedTarget.immutable();
         }
-
-        BlockPos combatTarget = this.getUnreachableHighCombatTarget(feet);
-        if (combatTarget != null && this.isUsableUpwardRouteTarget(serverLevel, feet, combatTarget)) {
-            return combatTarget;
-        }
-
         return null;
     }
 
-    private BlockPos getUnreachableHighCombatTarget(BlockPos feet) {
-        LivingEntity target = this.playerNpc.getTarget();
-        if (target == null || !target.isAlive() || target.isRemoved() || this.playerNpc.isAlliedTo(target)) {
-            return null;
+    /**
+     * Pillaring is a last-resort underground-to-surface recovery. Requiring sky occlusion in the
+     * current cell and every cardinal neighbor rejects exposed cliff faces, mountain slopes and
+     * shallow overhangs that normal navigation can walk around. The destination itself must be a
+     * loaded open-sky surface cell; no path or broad world scan is performed from canUse().
+     */
+    @Nullable
+    private String undergroundSurfaceRecoveryRejection(
+            ServerLevel serverLevel,
+            BlockPos feet,
+            BlockPos routeTarget
+    ) {
+        if (routeTarget.getY() <= feet.getY() + 1) {
+            return "target is not above origin";
         }
-
-        BlockPos targetPos = target.blockPosition();
-        if (targetPos.getY() <= feet.getY() + 2 || this.horizontalDistanceSqr(feet, targetPos) > 12.0D * 12.0D) {
-            return null;
+        if (!serverLevel.hasChunkAt(routeTarget)) {
+            return "target chunk is not loaded";
         }
-
-        Path path = this.createBoundedDiagnosticPath(targetPos);
-        return path == null || !path.canReach() ? targetPos.immutable() : null;
+        if (!serverLevel.canSeeSky(routeTarget.above())) {
+            return "target is not an exterior surface";
+        }
+        if (this.playerNpc.isTemporaryPillarSupport(feet.below())) {
+            return "origin is already on a temporary pillar";
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            for (int dy = -1; dy <= 1; dy++) {
+                BlockPos adjacent = feet.relative(direction).offset(0, dy, 0);
+                if (!serverLevel.hasChunkAt(adjacent)) {
+                    return "adjacent origin chunk is not loaded";
+                }
+                if (serverLevel.canSeeSky(adjacent.above()) && this.canStandAt(serverLevel, adjacent)) {
+                    // This is a real walkable exterior beside the NPC, unlike an open vertical
+                    // shaft whose sky-visible neighboring columns are solid walls. Only the real
+                    // surface-origin case is rejected as a hill/cliff navigation problem.
+                    return "surface-origin request has a walkable exposed side";
+                }
+            }
+        }
+        return null;
     }
 
     /** Bounds speculative route/reachability probes without changing normal navigation. */
@@ -3636,6 +3909,35 @@ public class EscapeHoleWithBlockGoal extends Goal {
         BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
         return requestedTarget != null
                 && requestedTarget.equals(routeTarget);
+    }
+
+    @Nullable
+    private BlockPos findTrappedCaveSurfaceTarget(ServerLevel serverLevel, BlockPos feet) {
+        if (!serverLevel.hasChunkAt(feet) || serverLevel.canSeeSky(feet.above())) {
+            return null;
+        }
+
+        // MOTION_BLOCKING_NO_LEAVES is a chunk-local heightmap lookup. It gives the first feet
+        // cell above the solid roof without a path search or a vertical world scan.
+        int surfaceY = serverLevel.getHeight(
+                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                feet.getX(),
+                feet.getZ()
+        );
+        int gain = surfaceY - feet.getY();
+        if (gain < TRAPPED_CAVE_MIN_SURFACE_GAIN || gain > MAX_ROUTE_ESCAPE_BLOCKS) {
+            return null;
+        }
+
+        BlockPos surfaceFeet = new BlockPos(feet.getX(), surfaceY, feet.getZ());
+        BlockPos roof = surfaceFeet.below();
+        if (!serverLevel.hasChunkAt(surfaceFeet)
+                || !serverLevel.canSeeSky(surfaceFeet.above())
+                || !this.canStandAt(serverLevel, surfaceFeet)
+                || !this.isClearablePillarObstruction(serverLevel, roof, serverLevel.getBlockState(roof))) {
+            return null;
+        }
+        return surfaceFeet;
     }
 
     private boolean hasReachedOpenSky(ServerLevel serverLevel, BlockPos feet) {
@@ -4085,19 +4387,226 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 && this.hasBlockingCollision(serverLevel, lower.above());
     }
 
-    private boolean isActuallyTrapped(ServerLevel serverLevel, BlockPos feet) {
+    /**
+     * Recognizes the small open shafts that cannot produce exploration-stall evidence because a
+     * job goal already owns movement. This is deliberately a tiny connected-component probe, not
+     * a path query: internal one-block steps stay in the component, and only a continuous walking
+     * route reaching its horizontal boundary counts as an exit. A valid shaft must be open to the
+     * sky, collision-enclosed on every side, and have a materially higher loaded rim.
+     */
+    @Nullable
+    private BlockPos findConfinedOpenShaftSurfaceTarget(ServerLevel serverLevel, BlockPos feet) {
+        if (this.openShaftProbeCacheFeet != null
+                && this.openShaftProbeCacheFeet.equals(feet)
+                && this.playerNpc.tickCount < this.openShaftProbeCacheUntilTick) {
+            return this.openShaftProbeCacheTarget;
+        }
+
+        this.openShaftProbeCacheFeet = feet.immutable();
+        this.openShaftProbeCacheUntilTick = this.playerNpc.tickCount + OPEN_SHAFT_PROBE_CACHE_TICKS;
+        this.openShaftProbeComponentSize = 0;
+        this.openShaftProbeRimGain = 0;
+        BlockPos target = this.computeConfinedOpenShaftSurfaceTarget(serverLevel, feet);
+        this.openShaftProbeCacheTarget = target == null ? null : target.immutable();
+        return this.openShaftProbeCacheTarget;
+    }
+
+    @Nullable
+    private BlockPos computeConfinedOpenShaftSurfaceTarget(ServerLevel serverLevel, BlockPos feet) {
+        if (!serverLevel.hasChunkAt(feet)
+                || !this.canStandAt(serverLevel, feet)
+                || !serverLevel.canSeeSky(feet.above())
+                || this.playerNpc.isTemporaryPillarSupport(feet.below())
+                || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, feet)
+                || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, feet.below())) {
+            return null;
+        }
+        int blockedSides = 0;
         for (Direction direction : Direction.Plane.HORIZONTAL) {
-            if (!this.hasBlockingCollision(serverLevel, feet.relative(direction))) {
-                // Four blocked horizontal sides are required regardless of the local walking
-                // search result. Reject ordinary terrain before entering the bounded flood scan.
-                return false;
+            if (this.hasBlockingCollision(serverLevel, feet.relative(direction))) {
+                blockedSides++;
             }
         }
-        // With all four cardinal body-space cells blocked there is no legal first walking step
-        // from the current cell. The former radius-four flood could therefore only confirm the
-        // same answer while performing hundreds of collision/shape reads inside vanilla
-        // GoalSelector time (reported as unwrapped super.tick).
-        return true;
+        if (blockedSides < 2) {
+            // Ordinary open ground and a single cliff face never allocate the component scan.
+            return null;
+        }
+
+        Queue<BlockPos> open = new ArrayDeque<>();
+        Set<BlockPos> chamber = new HashSet<>();
+        BlockPos start = feet.immutable();
+        open.add(start);
+        chamber.add(start);
+
+        while (!open.isEmpty()) {
+            BlockPos stand = open.poll();
+            for (Direction direction : Direction.Plane.HORIZONTAL) {
+                BlockPos adjacent = stand.relative(direction);
+                for (int dy : OPEN_SHAFT_STEP_OFFSETS) {
+                    BlockPos candidate = adjacent.offset(0, dy, 0);
+                    if (candidate.getY() < feet.getY() - 2
+                            || candidate.getY() > feet.getY() + OPEN_SHAFT_COMPONENT_RADIUS
+                            || !serverLevel.hasChunkAt(candidate)) {
+                        return null;
+                    }
+                    if (!this.canStandAt(serverLevel, candidate)) {
+                        continue;
+                    }
+                    if (Math.abs(candidate.getX() - feet.getX()) >= OPEN_SHAFT_COMPONENT_RADIUS
+                            || Math.abs(candidate.getZ() - feet.getZ()) >= OPEN_SHAFT_COMPONENT_RADIUS) {
+                        // A real sequence of level/one-step stands leaves the local chamber.
+                        return null;
+                    }
+                    BlockPos immutable = candidate.immutable();
+                    if (chamber.add(immutable)) {
+                        if (chamber.size() > MAX_OPEN_SHAFT_COMPONENT_STANDS) {
+                            return null;
+                        }
+                        open.add(immutable);
+                    }
+                }
+            }
+        }
+
+        Set<BlockPos> checkedBoundaryColumns = new HashSet<>();
+        int elevatedWallDirections = 0;
+        BlockPos bestTarget = null;
+        int bestGain = Integer.MAX_VALUE;
+        double bestDistance = Double.MAX_VALUE;
+        for (BlockPos stand : chamber) {
+            for (Direction direction : Direction.Plane.HORIZONTAL) {
+                if (this.hasChamberNeighbor(chamber, stand, direction)) {
+                    continue;
+                }
+
+                BlockPos wall = stand.relative(direction);
+                if (!serverLevel.hasChunkAt(wall)) {
+                    return null;
+                }
+                if (!this.hasBlockingCollision(serverLevel, wall)
+                        && !this.hasBlockingCollision(serverLevel, wall.above())) {
+                    // An open ledge/drop is not a shaft wall and must not authorize surface
+                    // pillaring beside a cliff.
+                    return null;
+                }
+
+                BlockPos column = new BlockPos(wall.getX(), 0, wall.getZ());
+                if (!checkedBoundaryColumns.add(column)) {
+                    continue;
+                }
+                if (checkedBoundaryColumns.size() > MAX_OPEN_SHAFT_BOUNDARY_COLUMNS) {
+                    return null;
+                }
+
+                int surfaceY = serverLevel.getHeight(
+                        Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                        wall.getX(),
+                        wall.getZ()
+                );
+                int gain = surfaceY - feet.getY();
+                if (gain < OPEN_SHAFT_MIN_RIM_GAIN || gain > OPEN_SHAFT_MAX_RIM_GAIN) {
+                    continue;
+                }
+                elevatedWallDirections |= horizontalDirectionBit(direction);
+
+                BlockPos candidate = new BlockPos(wall.getX(), surfaceY, wall.getZ());
+                if (!this.isSafeOpenShaftRimTarget(serverLevel, candidate)) {
+                    continue;
+                }
+                double distance = horizontalDistanceSqr(feet, candidate);
+                if (bestTarget == null || gain < bestGain || gain == bestGain && distance < bestDistance) {
+                    bestTarget = candidate.immutable();
+                    bestGain = gain;
+                    bestDistance = distance;
+                }
+            }
+        }
+
+        if (elevatedWallDirections != 0b1111 || bestTarget == null) {
+            return null;
+        }
+        this.openShaftProbeComponentSize = chamber.size();
+        this.openShaftProbeRimGain = bestGain;
+        return bestTarget;
+    }
+
+    private boolean hasChamberNeighbor(Set<BlockPos> chamber, BlockPos stand, Direction direction) {
+        BlockPos adjacent = stand.relative(direction);
+        for (int dy = -1; dy <= 1; dy++) {
+            if (chamber.contains(adjacent.offset(0, dy, 0))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isSafeOpenShaftRimTarget(ServerLevel serverLevel, BlockPos candidate) {
+        if (!serverLevel.hasChunkAt(candidate)
+                || !this.canStandAt(serverLevel, candidate)
+                || !serverLevel.getFluidState(candidate).isEmpty()
+                || !serverLevel.getFluidState(candidate.above()).isEmpty()
+                || !serverLevel.canSeeSky(candidate.above())
+                || serverLevel.getBlockEntity(candidate.below()) != null
+                || serverLevel.getBlockState(candidate.below()).is(BlockTags.LOGS)
+                || serverLevel.getBlockState(candidate.below()).is(BlockTags.LEAVES)
+                || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, candidate)
+                || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, candidate.below())) {
+            return false;
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            for (int dy = -1; dy <= 1; dy++) {
+                BlockPos walkOff = candidate.relative(direction).offset(0, dy, 0);
+                if (serverLevel.hasChunkAt(walkOff)
+                        && this.canStandAt(serverLevel, walkOff)
+                        && serverLevel.getFluidState(walkOff).isEmpty()
+                        && serverLevel.getFluidState(walkOff.above()).isEmpty()
+                        && serverLevel.canSeeSky(walkOff.above())
+                        && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, walkOff)
+                        && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, walkOff.below())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static int horizontalDirectionBit(Direction direction) {
+        return switch (direction) {
+            case EAST -> 1;
+            case WEST -> 1 << 1;
+            case SOUTH -> 1 << 2;
+            case NORTH -> 1 << 3;
+            default -> 0;
+        };
+    }
+
+    private boolean isActuallyTrapped(ServerLevel serverLevel, BlockPos feet) {
+        if (this.localTrapCacheFeet != null
+                && this.localTrapCacheFeet.equals(feet)
+                && this.playerNpc.tickCount < this.localTrapCacheUntilTick) {
+            return this.localTrapCacheResult;
+        }
+        this.localTrapCacheFeet = feet.immutable();
+        this.localTrapCacheUntilTick = this.playerNpc.tickCount + LOCAL_TRAP_CACHE_TICKS;
+        this.localTrapCacheResult = this.computeActuallyTrapped(serverLevel, feet);
+        return this.localTrapCacheResult;
+    }
+
+    private boolean computeActuallyTrapped(ServerLevel serverLevel, BlockPos feet) {
+        int blockedSides = 0;
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            if (this.hasBlockingCollision(serverLevel, feet.relative(direction))) {
+                blockedSides++;
+            }
+        }
+        if (blockedSides == 4) {
+            return true;
+        }
+        // One exposed wall or cliff is ordinary navigation terrain. Two or more enclosing sides
+        // admit a tiny loaded-only flood so 1x2/2x2 village shafts are recognized without the old
+        // radius-four scan. Reaching the radius boundary or exhausting the cap is treated as a
+        // walking escape (conservative no-pillar decision).
+        return blockedSides >= 2 && !this.hasLocalWalkingEscape(serverLevel, feet);
     }
 
     private boolean hasLocalWalkingEscape(ServerLevel serverLevel, BlockPos feet) {
@@ -4110,6 +4619,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         while (!open.isEmpty()) {
             BlockPos pos = open.poll();
             if (!pos.equals(feet) && this.isLocalEscapeStandPos(feet, pos)) {
+                return true;
+            }
+            if (seen.size() >= MAX_LOCAL_TRAP_STANDS) {
                 return true;
             }
 
@@ -4125,16 +4637,19 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean isLocalEscapeStandPos(BlockPos feet, BlockPos pos) {
-        return pos.getY() > feet.getY()
-                || feet.distSqr(pos) > 3.0D * 3.0D;
+        // A one-block rise inside a stepped shaft is still part of the same confined floor. Only
+        // a connected horizontal route out of the local component proves that walking can escape.
+        return Math.abs(pos.getX() - feet.getX()) >= LOCAL_TRAP_SEARCH_RADIUS
+                || Math.abs(pos.getZ() - feet.getZ()) >= LOCAL_TRAP_SEARCH_RADIUS;
     }
 
     private void queueReachableStand(ServerLevel serverLevel, BlockPos origin, BlockPos candidate, Queue<BlockPos> open, Set<BlockPos> seen) {
-        if (Math.abs(candidate.getX() - origin.getX()) > 4
-                || Math.abs(candidate.getZ() - origin.getZ()) > 4
+        if (Math.abs(candidate.getX() - origin.getX()) > LOCAL_TRAP_SEARCH_RADIUS
+                || Math.abs(candidate.getZ() - origin.getZ()) > LOCAL_TRAP_SEARCH_RADIUS
                 || candidate.getY() < origin.getY() - 1
                 || candidate.getY() > origin.getY() + 2
                 || seen.contains(candidate)
+                || !serverLevel.hasChunkAt(candidate)
                 || !this.canStandAt(serverLevel, candidate)) {
             return;
         }

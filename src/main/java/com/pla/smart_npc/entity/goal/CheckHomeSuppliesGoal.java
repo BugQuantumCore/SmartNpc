@@ -97,7 +97,8 @@ public class CheckHomeSuppliesGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
-                || this.playerNpc.getTarget() != null) {
+                || this.playerNpc.getTarget() != null
+                || serverLevel.isNight()) {
             return false;
         }
         if (this.playerNpc.isStoneAccessClearing()) {
@@ -207,7 +208,9 @@ public class CheckHomeSuppliesGoal extends Goal {
                 && !this.playerNpc.isNoAi()
                 && !this.playerNpc.isPassenger()
                 && !this.playerNpc.isHealing()
-                && this.playerNpc.getTarget() == null;
+                && this.playerNpc.getTarget() == null
+                && this.playerNpc.level() instanceof ServerLevel serverLevel
+                && !serverLevel.isNight();
     }
 
     @Override

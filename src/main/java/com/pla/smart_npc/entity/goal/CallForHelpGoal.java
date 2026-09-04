@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.ChatUtil;
 import com.pla.smart_npc.util.PlayerNpcAlertManager;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
@@ -17,9 +18,10 @@ import java.util.EnumSet;
 public class CallForHelpGoal extends Goal {
     private static final double SEARCH_RADIUS = 18.0D;
     private static final int COOLDOWN_TICKS = 20 * 20;
+    private static final int PROACTIVE_SCAN_INTERVAL_TICKS = 20;
 
     private final PlayerNpcEntity playerNpc;
-    private final CanUseThrottle canUseThrottle = new CanUseThrottle(10);
+    private final CanUseThrottle canUseThrottle = new CanUseThrottle(PROACTIVE_SCAN_INTERVAL_TICKS);
     private LivingEntity threat;
 
     public CallForHelpGoal(PlayerNpcEntity playerNpc) {
@@ -36,11 +38,30 @@ public class CallForHelpGoal extends Goal {
                 || this.playerNpc.getHelpAlertCooldown() > 0) {
             return false;
         }
+        // Preserve immediate reaction to a mob that has actually hurt this NPC. The broad inverse
+        // target lookup below is only proactive discovery and can safely run at a lower cadence.
+        LivingEntity recentAttacker = this.playerNpc.getLastHurtByMob();
+        if (recentAttacker instanceof Mob attackingMob && this.isChasingThisNpc(attackingMob)) {
+            this.threat = attackingMob;
+            if (this.shouldAvoidInsteadOfFight(this.threat)) {
+                return true;
+            }
+            this.threat = null;
+        }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
         }
 
-        this.threat = this.findChasingThreat();
+        long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
+        try {
+            this.threat = this.findChasingThreat();
+        } finally {
+            PlayerNpcPerformanceMonitor.recordGoalWork(
+                    this.playerNpc,
+                    this.getClass().getSimpleName() + ".proactiveScan",
+                    timing
+            );
+        }
         return this.threat != null && this.shouldAvoidInsteadOfFight(this.threat);
     }
 

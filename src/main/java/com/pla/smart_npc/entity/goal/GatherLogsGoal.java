@@ -18,6 +18,8 @@ import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcAdaptiveSearchScope;
+import com.pla.smart_npc.util.PlayerNpcFarmPlan;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -27,6 +29,7 @@ import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.ShovelItem;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.FenceBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Node;
@@ -66,6 +69,8 @@ public class GatherLogsGoal extends Goal {
     // Eligibility only needs a cheap reachability signal. A successful retained path is still
     // followed normally, but a hostile distant chunk must not spend a full tick proving a miss.
     private static final float LOCAL_SELECTION_PATH_NODE_MULTIPLIER = 0.03F;
+    private static final float ACTIVE_LOG_PATH_NODE_MULTIPLIER = 0.05F;
+    private static final float OVERLOADED_LOG_PATH_NODE_MULTIPLIER = 0.01F;
     private static final int MAX_GATHER_TICKS = 20 * 30;
     private static final int REQUIRED_BREAK_TICKS = 60;
     private static final int LEAF_CLEAR_TICKS = 12;
@@ -75,6 +80,7 @@ public class GatherLogsGoal extends Goal {
     // Relocation usually needs only an adjacent usable column. Inspect near rings first and stop
     // on success, while retaining the original radius-three recovery reach for difficult terrain.
     private static final int PILLAR_BASE_SEARCH_RADIUS = 3;
+    private static final int MAX_PILLAR_BASE_COLUMNS_PER_SEARCH_PASS = 8;
     private static final int DESCENT_SEARCH_RADIUS = 8;
     private static final int MAX_DESCENT_TICKS = 20 * 10;
     private static final int MAX_PILLAR_SAFE_DROP_BLOCKS = 5;
@@ -83,11 +89,14 @@ public class GatherLogsGoal extends Goal {
     private static final int MAX_IGNORED_CLEAR_BLOCKS = 32;
     private static final int MAX_IGNORED_LOG_TARGETS = 32;
     private static final int MAX_SAME_LEAF_CLEAR_TICKS = 40;
+    private static final int MAX_STAND_ROUTE_FAILURES_PER_TARGET = 3;
+    private static final int MAX_STAND_FALLBACK_ATTEMPTS_PER_TARGET = 1;
     private static final double BREAK_DISTANCE_SQR = 4.5D * 4.5D;
     private static final double STAND_REACHED_DISTANCE_SQR = 1.5D * 1.5D;
     private static final double STAND_CENTER_CORRECTION_DISTANCE_SQR = 0.35D * 0.35D;
     private static final double PILLAR_APPROACH_HORIZONTAL_DISTANCE_SQR = 2.5D * 2.5D;
     private static final List<ColumnOffset> DIRT_SEARCH_COLUMN_OFFSETS = createDirtSearchColumnOffsets();
+    private static final List<ColumnOffset> PILLAR_BASE_COLUMN_OFFSETS = createPillarBaseColumnOffsets();
 
     private final PlayerNpcEntity playerNpc;
     private final double speed;
@@ -95,6 +104,7 @@ public class GatherLogsGoal extends Goal {
     private final Set<BlockPos> protectedPillarBlocks = new LinkedHashSet<>();
     private final Set<BlockPos> ignoredClearBlocks = new LinkedHashSet<>();
     private final Set<BlockPos> ignoredLogTargets = new LinkedHashSet<>();
+    private final Set<BlockPos> failedStandRoutes = new LinkedHashSet<>();
     private final ToolAi toolAi;
     private final BreakingBlockAi breakingBlockAi;
     private final ClearBlockAi clearBlockAi;
@@ -122,6 +132,8 @@ public class GatherLogsGoal extends Goal {
     private int nextDirtSearchTick;
     private int dirtSearchColumnCursor;
     private int nextPillarBaseSearchTick;
+    private int pillarBaseSearchColumnCursor;
+    private BlockPos pillarBaseSearchTarget;
     private boolean continueEligibilityAllowed = true;
     private boolean nearbyUsableLogTargetCacheResult;
     private BlockPos nearbyUsableLogTargetCachePos;
@@ -134,6 +146,7 @@ public class GatherLogsGoal extends Goal {
     private boolean logQueueScanDeferred;
     private boolean logQueueSearchPending;
     private boolean targetSelectionDeferred;
+    private boolean workerSlotPaused;
     private BlockPos logQueueSearchOrigin;
     private int logQueueSearchColumnIndex;
     private int logQueueSearchRadius;
@@ -143,8 +156,15 @@ public class GatherLogsGoal extends Goal {
     private int nextDetailProgressRefreshTick;
     private int lastExpensiveWorkAdmissionTick = Integer.MIN_VALUE;
     private int standPathNotBeforeTick;
+    private int standFallbackAttempts;
     private BlockPos lastDetailSubject;
     private String lastDetailStructuralText = "";
+    private BlockPos pendingFailedStandPos;
+    private boolean pendingPillarBaseRecovery;
+    private boolean pillarBaseSearchExhaustedForTarget;
+    private boolean pillarBaseSearchPending;
+    private boolean pillarRouteAuthorized;
+    private boolean clearingOutboundFarmFence;
 
     public GatherLogsGoal(PlayerNpcEntity playerNpc, double speed) {
         this.playerNpc = playerNpc;
@@ -154,31 +174,52 @@ public class GatherLogsGoal extends Goal {
         this.clearBlockAi = new ClearBlockAi(playerNpc, this.breakingBlockAi);
         this.pathNavigationAi = new PathNavigationAi(playerNpc);
         this.pathStuckFallbackAi = new PathStuckFallbackAi(playerNpc);
-        this.pillarUpAi = new PillarUpAi(playerNpc, this.toolAi, Items.DIRT, Blocks.DIRT.defaultBlockState());
+        this.pillarUpAi = new PillarUpAi(
+                playerNpc,
+                this.toolAi,
+                Items.DIRT,
+                Blocks.DIRT.defaultBlockState(),
+                true
+        );
         this.waterEscapeAi = new WaterEscapeAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
     public boolean hasNearbyUsableLogTarget(ServerLevel serverLevel) {
+        if (this.hasAuthoritativeLocalLogSelectionPending()) {
+            return true;
+        }
         BlockPos feet = this.playerNpc.blockPosition();
+        if (this.targetPos != null
+                && this.isValidLog(serverLevel, this.targetPos)
+                && (canMineFromCurrentPosition(this.playerNpc, this.targetPos)
+                || this.hasAuthorizedPillarPlanForTarget()
+                || this.standPos != null && canMineFromStandPosition(this.standPos, this.targetPos))) {
+            return true;
+        }
         if (this.nearbyUsableLogTargetCachePos != null
                 && this.playerNpc.tickCount < this.nearbyUsableLogTargetCacheUntilTick
                 && this.nearbyUsableLogTargetCachePos.distSqr(feet) <= 4.0D * 4.0D) {
             return this.nearbyUsableLogTargetCacheResult;
         }
+        // Do not launch a second full TreeAi scan from an arbitration proxy. The authoritative
+        // canUse selector owns the incremental cursor and publishes pending/selected state.
+        return false;
+    }
 
-        LogSearchResult search = findNearbyLogTarget(
-                this.playerNpc,
-                serverLevel,
-                this::isIgnoredLogTarget,
-                NEARBY_LOG_TARGET_SEARCH_RADIUS,
-                MAX_NEARBY_LOG_PATH_CHECKS);
-        boolean result = search.usable();
-        this.nearbyUsableLogTargetCachePos = feet.immutable();
-        this.nearbyUsableLogTargetCacheResult = result;
-        this.nearbyLogCandidates = search.logs();
-        this.nearbyUsableLogTargetCacheUntilTick = this.playerNpc.tickCount + NEARBY_LOG_TARGET_CACHE_TICKS;
-        return result;
+    /**
+     * Cheap arbitration signal backed by this goal's own incremental selector. Exploration may
+     * wait while a bounded local TreeAi slice is unfinished, but must not run an independent broad
+     * proximity scan whose answer can disagree with the target this goal can actually claim.
+     */
+    public boolean hasAuthoritativeLocalLogSelectionPending() {
+        return this.logQueueSearchPending || this.logQueueSearchDeferredForAdmission();
+    }
+
+    private boolean logQueueSearchDeferredForAdmission() {
+        return this.logQueueSearchOrigin != null
+                && this.logQueueSearchRadius > 0
+                && this.logQueueSearchColumnIndex > 0;
     }
 
     public static boolean hasNearbyLogTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
@@ -243,6 +284,7 @@ public class GatherLogsGoal extends Goal {
     @Override
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || !PlayerNpcAiWorkBudget.hasWorkerSlot(this.playerNpc)
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
@@ -252,6 +294,12 @@ public class GatherLogsGoal extends Goal {
                 || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.playerNpc.getGatherCooldown() > 0) {
             return false;
+        }
+        if (this.workerSlotPaused
+                && (this.pillarUpAi.isRunning()
+                || this.descendingFromPillar
+                || this.isStandingOnProtectedPillar())) {
+            return true;
         }
         if (!this.canUseThrottle.canCheck(this.playerNpc)) {
             return false;
@@ -280,7 +328,7 @@ public class GatherLogsGoal extends Goal {
                 this.traceCanUseBlocked("gather logs blocked: terraform work ready");
                 return false;
             }
-            if (BuildHouseGoal.hasReadyHomeBuildWork(this.playerNpc, serverLevel)) {
+            if (BuildHouseGoal.shouldYieldSupplyWorkForBuild(this.playerNpc, serverLevel)) {
                 this.traceCanUseBlocked("gather logs blocked: build work ready");
                 return false;
             }
@@ -326,12 +374,18 @@ public class GatherLogsGoal extends Goal {
             this.cacheNearbyUsableLogTarget(false);
             this.resetLogQueueSearch();
             this.traceCanUseBlocked("gather logs blocked: no immediate local log; explore for logs");
+        } else {
+            this.cacheNearbyUsableLogTarget(true);
         }
         return selected;
     }
 
     @Override
     public boolean canContinueToUse() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            return false;
+        }
         if ((this.targetPos == null && !this.descendingFromPillar && !this.targetSelectionDeferred)
                 || !this.descendingFromPillar
                 && this.gatherTicks >= MAX_GATHER_TICKS
@@ -349,10 +403,13 @@ public class GatherLogsGoal extends Goal {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             return false;
         }
-        if (!this.isSupplyLogJob()
-                && TerraformBuildSiteGoal.hasActionablePrepWork(this.playerNpc, serverLevel)) {
-            return false;
-        }
+        // Building prep wins before this route starts in canUse(). Once an actionable log route
+        // has been admitted, however, let it finish. Terraform's short-lived footprint cache can
+        // expire while foliage is being cleared; treating the conservative cache miss as new prep
+        // work here stopped GatherLogs, while Terraform itself correctly refused to start until
+        // the active log episode ended. That produced a clear/cooldown/reselect loop on one leaf.
+        // Safety guards remain immediate; weather, return-home, and live material-demand checks
+        // retain their existing bounded continuation cadence below.
 
         // GoalSelector asks this every server tick. Farm/home/material predicates can inspect
         // persisted plans and many world blocks, so retain the last decision between one-second
@@ -366,6 +423,7 @@ public class GatherLogsGoal extends Goal {
             )
                     && !this.shouldStayHomeForWeather(serverLevel)
                     && !ReturnHomeGoal.shouldSuppressExplorationForHome(this.playerNpc, serverLevel)
+                    && !BuildHouseGoal.shouldYieldSupplyWorkForBuild(this.playerNpc, serverLevel)
                     && this.needsLogs(serverLevel);
         }
         return this.continueEligibilityAllowed;
@@ -373,6 +431,12 @@ public class GatherLogsGoal extends Goal {
 
     @Override
     public void start() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            this.playerNpc.getNavigation().stop();
+            return;
+        }
+        this.workerSlotPaused = false;
         this.playerNpc.beginLogSupplyGatheringEpisode();
         setLogGatheringEpisodeActive(this.playerNpc, true);
         this.gatherTicks = 0;
@@ -384,14 +448,33 @@ public class GatherLogsGoal extends Goal {
         this.toolAi.equipTool(AxeItem.class);
         this.resetDetailRefresh();
         this.updateDetail();
-        if (this.targetPos != null) {
-            this.moveToStandPos();
-        }
+        this.applyActiveNavigationBudget();
+        // canUse may just have consumed this tick's bounded TreeAi slice. Route construction is
+        // deferred to tick() so search and synchronous PathFinder work never stack in one tick.
     }
 
     @Override
     public void tick() {
+        try {
+            this.tickActive();
+        } finally {
+            // Pillar placement and foliage clearing invalidate nodes beside retained routes.
+            // Keep vanilla's delayed recomputation bounded for the entire MOVE-owning episode,
+            // including ticks after a helper temporarily restores PathNavigation's default.
+            this.applyActiveNavigationBudget();
+        }
+    }
+
+    private void tickActive() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            return;
+        }
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            this.playerNpc.getNavigation().stop();
+            this.breakingBlockAi.stop();
+            this.clearBlockAi.stop();
+            this.clearingOutboundFarmFence = false;
             return;
         }
 
@@ -447,6 +530,12 @@ public class GatherLogsGoal extends Goal {
                 30.0F
         );
 
+        if (this.pendingPillarBaseRecovery) {
+            this.tickPendingPillarBaseRecovery(serverLevel);
+            this.updateDetail();
+            return;
+        }
+
         boolean pillarRouteNeeded = this.shouldPillarTowardLog(serverLevel);
         // Dirt is a prerequisite for this route. Give its bounded search the NPC's expensive-work
         // slice before foliage probing; otherwise an unsuccessful obstruction probe can consume
@@ -494,9 +583,17 @@ public class GatherLogsGoal extends Goal {
                     return;
                 }
                 if (!this.moveToStandPos()) {
-                    if (!this.gatheringDirt
-                            && this.tryMoveToBetterPillarBase(serverLevel, this.playerNpc.blockPosition(), "stand path failed")) {
+                    if (!this.gatheringDirt && this.isValidLog(serverLevel, this.targetPos)) {
+                        BlockPos failedStand = this.standPos == null
+                                ? this.playerNpc.blockPosition().immutable()
+                                : this.standPos.immutable();
+                        this.rememberFailedStandRoute(failedStand);
+                        this.pendingFailedStandPos = failedStand;
+                        this.pendingPillarBaseRecovery = true;
+                        this.pillarBaseSearchExhaustedForTarget = false;
                         this.repathTicks = REPATH_INTERVAL_TICKS;
+                        this.pillarTraceDetail = "normal log stand route failed; evaluating pillar last resort @ "
+                                + posText(failedStand);
                         this.updateDetail();
                         return;
                     }
@@ -522,6 +619,29 @@ public class GatherLogsGoal extends Goal {
 
     @Override
     public void stop() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)
+                && (this.workerSlotPaused
+                || this.pillarUpAi.isRunning()
+                || this.descendingFromPillar
+                || this.isStandingOnProtectedPillar())) {
+            this.playerNpc.endLogSupplyGatheringEpisode();
+            setLogGatheringEpisodeActive(this.playerNpc, false);
+            this.playerNpc.clearBlockBreakProgress(this.targetPos);
+            this.toolAi.restoreMainHand();
+            this.clearBlockAi.stop();
+            this.clearingOutboundFarmFence = false;
+            this.breakingBlockAi.stop();
+            this.pathStuckFallbackAi.stop();
+            this.waterEscapeAi.stop();
+            this.playerNpc.getNavigation().stop();
+            this.playerNpc.getNavigation().resetMaxVisitedNodesMultiplier();
+            this.workerSlotPaused = true;
+            this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+            this.playerNpc.setCurrentAiDetail("");
+            // Keep the selected target, PillarUpAi placement/settlement state, descent target,
+            // and exact entity-owned support ledger for the next worker holder.
+            return;
+        }
         this.playerNpc.endLogSupplyGatheringEpisode();
         setLogGatheringEpisodeActive(this.playerNpc, false);
         if (!this.gatheringDirt
@@ -529,12 +649,14 @@ public class GatherLogsGoal extends Goal {
                 && this.targetPos != null
                 && !this.isStandingOnProtectedPillar()
                 && this.playerNpc.level() instanceof ServerLevel serverLevel
-                && this.isValidLog(serverLevel, this.targetPos)) {
+                && this.isValidLog(serverLevel, this.targetPos)
+                && !this.hasAuthorizedPillarPlanForTarget()) {
             this.ignoreLogTarget(this.targetPos);
         }
         this.playerNpc.clearBlockBreakProgress(this.targetPos);
         this.toolAi.restoreMainHand();
         this.clearBlockAi.stop();
+        this.clearingOutboundFarmFence = false;
         this.breakingBlockAi.stop();
         this.pathStuckFallbackAi.stop();
         this.pillarUpAi.clear();
@@ -566,10 +688,26 @@ public class GatherLogsGoal extends Goal {
         this.clearingPillarCollision = false;
         this.foliageRelocationAttempted = false;
         this.targetSelectionDeferred = false;
+        this.resetTargetRouteRecovery();
         this.pillarTraceDetail = "";
         this.pathFallbackDetailPrefix = "gathering logs";
+        // Never leave a route dirtied by pillar/foliage block updates for a later goal to
+        // recompute at the default 48-block budget.
+        this.playerNpc.getNavigation().stop();
+        this.playerNpc.getNavigation().resetMaxVisitedNodesMultiplier();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
+    }
+
+    private void applyActiveNavigationBudget() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.playerNpc.getNavigation().resetMaxVisitedNodesMultiplier();
+            return;
+        }
+        float multiplier = PlayerNpcPerformanceMonitor.isAiWorkOverloaded()
+                ? OVERLOADED_LOG_PATH_NODE_MULTIPLIER
+                : ACTIVE_LOG_PATH_NODE_MULTIPLIER;
+        this.playerNpc.getNavigation().setMaxVisitedNodesMultiplier(multiplier);
     }
 
     private void resetLogQueueSearch() {
@@ -612,6 +750,9 @@ public class GatherLogsGoal extends Goal {
     }
 
     private boolean tickPathStuckFallback(ServerLevel serverLevel) {
+        if (this.tryStartBlockedOutboundFarmFenceClear(serverLevel)) {
+            return true;
+        }
         if (!this.pathStuckFallbackAi.tick(serverLevel, this.pathFallbackDetailPrefix)) {
             return false;
         }
@@ -619,11 +760,96 @@ public class GatherLogsGoal extends Goal {
         return true;
     }
 
-    private boolean watchStandPathFallback(ServerLevel serverLevel) {
-        if (this.standPos == null || this.gatheringDirt) {
+    private boolean tryStartBlockedOutboundFarmFenceClear(ServerLevel serverLevel) {
+        if (!this.pathStuckFallbackAi.isRunning()
+                || !"gathering logs".equals(this.pathFallbackDetailPrefix)
+                || !this.playerNpc.isDailyJobActive(PlayerNpcInterest.FARMING)
+                || !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)
+                || this.targetPos == null
+                || this.gatheringDirt
+                || !this.isValidLog(serverLevel, this.targetPos)) {
             return false;
         }
-        return this.watchPathStuckFallback(serverLevel, this.standPos, this.standPos, "gathering logs");
+
+        BlockPos fencePos = this.playerNpc.blockPosition();
+        BlockState fenceState = serverLevel.getBlockState(fencePos);
+        Optional<PlayerNpcFarmPlan.Plan> plan = FarmAi.getPlan(this.playerNpc, serverLevel);
+        if (!(fenceState.getBlock() instanceof FenceBlock)
+                || plan.isEmpty()
+                || !plan.get().isFencePosition(fencePos)) {
+            return false;
+        }
+
+        // Only an outside log route may temporarily open the owned perimeter. A stuck fallback is
+        // retained proof that ordinary navigation made no progress; the active GatherLogs episode
+        // keeps FarmSetup from immediately replacing the fence before the NPC steps through.
+        BlockPos outboundDestination = this.standPos == null ? this.targetPos : this.standPos;
+        if (!isOutsideFarmGround(plan.get(), this.targetPos)
+                || !isOutsideFarmGround(plan.get(), outboundDestination)) {
+            return false;
+        }
+
+        if (!this.clearBlockAi.start(
+                serverLevel,
+                fencePos,
+                state -> state.getBlock() instanceof FenceBlock,
+                "clearing farm fence for outbound log route",
+                REQUIRED_BREAK_TICKS,
+                BREAK_DISTANCE_SQR,
+                false,
+                true
+        )) {
+            return false;
+        }
+        this.pathStuckFallbackAi.stop();
+        this.clearingOutboundFarmFence = true;
+        this.pillarTraceDetail = "clearing owned farm fence for outbound log route @ "
+                + posText(fencePos);
+        return true;
+    }
+
+    private boolean isStillOwnedOutboundFarmFence(ServerLevel serverLevel, BlockPos pos) {
+        if (pos == null
+                || this.targetPos == null
+                || !this.isValidLog(serverLevel, this.targetPos)
+                || !this.playerNpc.isDailyJobActive(PlayerNpcInterest.FARMING)
+                || !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            return false;
+        }
+        Optional<PlayerNpcFarmPlan.Plan> plan = FarmAi.getPlan(this.playerNpc, serverLevel);
+        if (plan.isEmpty()
+                || !plan.get().isFencePosition(pos)
+                || !(serverLevel.getBlockState(pos).getBlock() instanceof FenceBlock)) {
+            return false;
+        }
+        BlockPos outboundDestination = this.standPos == null ? this.targetPos : this.standPos;
+        return isOutsideFarmGround(plan.get(), this.targetPos)
+                && isOutsideFarmGround(plan.get(), outboundDestination);
+    }
+
+    private static boolean isOutsideFarmGround(PlayerNpcFarmPlan.Plan plan, BlockPos pos) {
+        if (plan == null || pos == null) {
+            return false;
+        }
+        return !plan.containsGround(new BlockPos(pos.getX(), plan.origin().getY(), pos.getZ()));
+    }
+
+    private boolean watchStandPathFallback(ServerLevel serverLevel) {
+        if (this.standPos == null
+                || this.gatheringDirt
+                || this.standFallbackAttempts >= MAX_STAND_FALLBACK_ATTEMPTS_PER_TARGET) {
+            return false;
+        }
+        boolean started = this.watchPathStuckFallback(
+                serverLevel,
+                this.standPos,
+                this.standPos,
+                "gathering logs"
+        );
+        if (started) {
+            this.standFallbackAttempts++;
+        }
+        return started;
     }
 
     private boolean watchPathStuckFallback(
@@ -655,6 +881,10 @@ public class GatherLogsGoal extends Goal {
         if (directionTarget == null) {
             return false;
         }
+        boolean standFallback = "gathering logs".equals(detailPrefix);
+        if (standFallback && this.standFallbackAttempts >= MAX_STAND_FALLBACK_ATTEMPTS_PER_TARGET) {
+            return false;
+        }
 
         this.pathFallbackDetailPrefix = detailPrefix;
         if (!this.pathStuckFallbackAi.start(
@@ -667,6 +897,9 @@ public class GatherLogsGoal extends Goal {
         }
 
         this.pillarTraceDetail = this.pathStuckFallbackAi.detail(detailPrefix);
+        if (standFallback) {
+            this.standFallbackAttempts++;
+        }
         return true;
     }
 
@@ -674,6 +907,15 @@ public class GatherLogsGoal extends Goal {
         if (this.clearBlockAi.isRunning()) {
             BlockPos clearTarget = this.clearBlockAi.targetPos();
             boolean clearingFoliage = this.clearBlockAi.detail().startsWith("clearing foliage");
+            if (this.clearingOutboundFarmFence
+                    && !this.isStillOwnedOutboundFarmFence(serverLevel, clearTarget)) {
+                this.breakingBlockAi.stop();
+                this.clearBlockAi.stop();
+                this.clearingOutboundFarmFence = false;
+                this.pillarTraceDetail = "outbound farm fence clear no longer valid @ "
+                        + posText(clearTarget);
+                return true;
+            }
             if (this.clearingPillarCollision
                     && !this.isSafePillarCollisionClearTarget(serverLevel, clearTarget)) {
                 this.breakingBlockAi.stop();
@@ -700,6 +942,7 @@ public class GatherLogsGoal extends Goal {
             }
             if (!this.gatheringDirt
                     && !this.clearingPillarCollision
+                    && !this.clearingOutboundFarmFence
                     && this.sameClearTargetTicks > MAX_SAME_LEAF_CLEAR_TICKS) {
                 if (clearingFoliage
                         && !this.foliageRelocationAttempted
@@ -729,6 +972,7 @@ public class GatherLogsGoal extends Goal {
             ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
             if (result == ClearBlockAi.TickResult.DONE || result == ClearBlockAi.TickResult.FAILED) {
                 this.breakingBlockAi.stop();
+                this.clearingOutboundFarmFence = false;
                 this.clearingPillarCollision = false;
                 if (clearingFoliage && result == ClearBlockAi.TickResult.DONE) {
                     this.pathStuckFallbackAi.stop();
@@ -894,22 +1138,25 @@ public class GatherLogsGoal extends Goal {
                 BlockPos feet = this.playerNpc.blockPosition();
                 boolean currentStandProtected = isProtectedHomeStandPos(this.playerNpc, feet);
                 boolean canMineHere = !currentStandProtected && canMineFromCurrentPosition(this.playerNpc, candidate);
-                boolean canPillarHere = !currentStandProtected && canPillarTowardFrom(feet, candidate);
                 Optional<BlockPos> geometricStand = Optional.empty();
-                if (!canMineHere && !canPillarHere) {
+                if (!canMineHere) {
                     geometricStand = findGeometricStandPos(this.playerNpc, serverLevel, candidate);
                 }
-                if (geometricStand.isEmpty() && !canMineHere && !canPillarHere) {
+                if (geometricStand.isEmpty() && !canMineHere) {
                     continue;
                 }
 
                 this.targetPos = candidate.immutable();
+                this.resetTargetRouteRecovery();
                 if (geometricStand.isPresent()) {
                     this.standPos = geometricStand.get();
                     this.plannedStandPath = null;
-                } else if (canMineHere || canPillarHere) {
+                } else if (canMineHere) {
                     this.standPos = this.playerNpc.blockPosition().immutable();
                 }
+                this.pillarRouteAuthorized = this.standPos != null
+                        && !canMineFromStandPosition(this.standPos, this.targetPos)
+                        && canPillarTowardFrom(this.standPos, this.targetPos);
                 this.toolAi.equipTool(AxeItem.class);
                 return true;
             }
@@ -1048,18 +1295,143 @@ public class GatherLogsGoal extends Goal {
                 || state.is(Blocks.SNOW);
     }
 
-    private boolean shouldPillarTowardLog(ServerLevel serverLevel) {
+    private void tickPendingPillarBaseRecovery(ServerLevel serverLevel) {
         if (this.gatheringDirt || this.targetPos == null || !this.isValidLog(serverLevel, this.targetPos)) {
+            this.pendingPillarBaseRecovery = false;
+            this.pendingFailedStandPos = null;
+            return;
+        }
+
+        BlockPos failedStand = this.pendingFailedStandPos == null
+                ? this.playerNpc.blockPosition().immutable()
+                : this.pendingFailedStandPos;
+        if (this.authorizeCurrentPillarBaseAfterRouteFailure(serverLevel, failedStand)) {
+            this.pendingPillarBaseRecovery = false;
+            this.pendingFailedStandPos = null;
+            return;
+        }
+
+        if (!this.pillarBaseSearchExhaustedForTarget
+                && this.failedStandRoutes.size() < MAX_STAND_ROUTE_FAILURES_PER_TARGET) {
+            if (this.playerNpc.tickCount < this.nextPillarBaseSearchTick) {
+                this.pillarTraceDetail = "pillar base recovery waiting "
+                        + (this.nextPillarBaseSearchTick - this.playerNpc.tickCount)
+                        + "t before next bounded scan";
+                return;
+            }
+            if (!this.tryAcquireExpensiveWork(serverLevel)) {
+                this.pillarTraceDetail = "pillar base recovery queued for shared expensive-work slice";
+                return;
+            }
+            if (this.tryMoveToBetterPillarBase(serverLevel, failedStand, "normal stand route failed", true)) {
+                if (!this.pillarBaseSearchPending) {
+                    this.pendingPillarBaseRecovery = false;
+                    this.pendingFailedStandPos = null;
+                }
+                return;
+            }
+            // Do not stack PathStuckFallbackAi's radius scan behind the pillar-base heightmap scan
+            // in this same server tick. The next tick performs the single capped fallback attempt.
+            this.pillarBaseSearchExhaustedForTarget = true;
+            this.pillarTraceDetail = "no reachable pillar base; path fallback deferred to next tick";
+            return;
+        } else {
+            this.pendingPillarBaseRecovery = false;
+            this.pendingFailedStandPos = null;
+        }
+
+        if (this.tryStartPathStuckFallback(serverLevel, failedStand, "gathering logs")) {
+            this.repathTicks = REPATH_INTERVAL_TICKS;
+            return;
+        }
+
+        BlockPos exhaustedTarget = this.targetPos.immutable();
+        this.ignoreLogTarget(exhaustedTarget);
+        this.pillarTraceDetail = "log route exhausted after normal stand and pillar-base retries @ "
+                + posText(exhaustedTarget);
+        this.targetPos = null;
+        this.standPos = null;
+        this.selectNextTargetOrDescendFromPillar(serverLevel);
+    }
+
+    private boolean authorizeCurrentPillarBaseAfterRouteFailure(ServerLevel serverLevel, BlockPos failedStand) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (isProtectedHomeStandPos(this.playerNpc, feet)
+                || !canStandAt(serverLevel, feet)
+                || !canPillarTowardFrom(feet, this.targetPos)
+                || distanceFromStandToTargetSqr(feet, this.targetPos) <= BREAK_DISTANCE_SQR) {
+            return false;
+        }
+
+        this.standPos = feet.immutable();
+        this.plannedStandPath = null;
+        this.pillarRouteAuthorized = true;
+        this.pathStuckFallbackAi.stop();
+        this.playerNpc.getNavigation().stop();
+        this.pillarTraceDetail = "normal stand unreachable; pillar last resort authorized @ "
+                + posText(feet)
+                + " after failed stand "
+                + posText(failedStand);
+        return true;
+    }
+
+    private void rememberFailedStandRoute(BlockPos stand) {
+        if (stand != null) {
+            this.failedStandRoutes.add(stand.immutable());
+        }
+    }
+
+    private boolean hasAuthorizedPillarPlanForTarget() {
+        if (!this.pillarRouteAuthorized || this.targetPos == null) {
+            return false;
+        }
+        BlockPos base = this.standPos == null ? this.playerNpc.blockPosition() : this.standPos;
+        return canPillarTowardFrom(base, this.targetPos);
+    }
+
+    private void resetTargetRouteRecovery() {
+        this.failedStandRoutes.clear();
+        this.standFallbackAttempts = 0;
+        this.pendingFailedStandPos = null;
+        this.pendingPillarBaseRecovery = false;
+        this.pillarBaseSearchExhaustedForTarget = false;
+        this.pillarBaseSearchPending = false;
+        this.pillarBaseSearchTarget = null;
+        this.pillarBaseSearchColumnCursor = 0;
+        this.pillarRouteAuthorized = false;
+    }
+
+    private boolean shouldPillarTowardLog(ServerLevel serverLevel) {
+        if (this.gatheringDirt
+                || !this.pillarRouteAuthorized
+                || this.targetPos == null
+                || !this.isValidLog(serverLevel, this.targetPos)) {
             return false;
         }
 
         BlockPos feet = this.playerNpc.blockPosition();
+        if (this.standPos != null
+                && this.playerNpc.distanceToSqr(
+                this.standPos.getX() + 0.5D,
+                this.standPos.getY(),
+                this.standPos.getZ() + 0.5D
+        ) > STAND_REACHED_DISTANCE_SQR) {
+            // Finish the selected normal walking route before considering a vertical shortcut.
+            // Without this guard an NPC merely passing beneath a tall log began a dirt tower even
+            // though a usable side stand had already been selected.
+            return false;
+        }
         return distanceFromStandToTargetSqr(feet, this.targetPos) > BREAK_DISTANCE_SQR
                 && canPillarTowardFrom(feet, this.targetPos)
                 && !isProtectedHomeStandPos(this.playerNpc, feet);
     }
 
     private boolean tryPillarStep(ServerLevel serverLevel) {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.playerNpc.getNavigation().stop();
+            this.pillarTraceDetail = "pillar paused: worker slot not held";
+            return true;
+        }
         BlockPos feet = this.playerNpc.blockPosition();
         if (this.tryRecoverProtectedLogStand(serverLevel, feet)) {
             return true;
@@ -1230,6 +1602,7 @@ public class GatherLogsGoal extends Goal {
         if (blockerState.is(BlockTags.LOGS) && !this.isProtectedHomeLogTarget(blockerPos)) {
             this.targetPos = blockerPos.immutable();
             this.standPos = this.playerNpc.blockPosition().immutable();
+            this.resetTargetRouteRecovery();
             this.breakingBlockAi.stop();
             this.clearBlockAi.stop();
             this.toolAi.equipTool(AxeItem.class);
@@ -1289,36 +1662,55 @@ public class GatherLogsGoal extends Goal {
     }
 
     private boolean tryMoveToBetterPillarBase(ServerLevel serverLevel, BlockPos blockedFeet, String blocker) {
+        return this.tryMoveToBetterPillarBase(serverLevel, blockedFeet, blocker, false);
+    }
+
+    private boolean tryMoveToBetterPillarBase(
+            ServerLevel serverLevel,
+            BlockPos blockedFeet,
+            String blocker,
+            boolean admissionHeld
+    ) {
+        this.pillarBaseSearchPending = false;
         if (this.standPos != null
                 && this.pillarTraceDetail.startsWith("pillar relocating from blocked base")) {
             if (this.playerNpc.tickCount < this.standPathNotBeforeTick) {
                 return true;
             }
-            if (this.moveToStandPos()) {
-                return true;
-            }
+            this.rememberFailedStandRoute(this.standPos);
             this.standPos = null;
         }
         if (this.playerNpc.tickCount < this.nextPillarBaseSearchTick) {
             return false;
         }
-        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+        if (!admissionHeld && !this.tryAcquireExpensiveWork(serverLevel)) {
             this.nextPillarBaseSearchTick = this.playerNpc.tickCount
                     + 1
                     + this.playerNpc.getRandom().nextInt(4);
             this.pillarTraceDetail = "pillar base search queued for shared expensive-work slice";
             return false;
         }
+        PillarBaseSearchResult search = this.findBetterPillarBase(serverLevel, blockedFeet);
+        if (!search.complete()) {
+            this.pillarBaseSearchPending = true;
+            this.nextPillarBaseSearchTick = this.playerNpc.tickCount
+                    + 1
+                    + this.playerNpc.getRandom().nextInt(3);
+            this.pillarTraceDetail = "pillar base scan "
+                    + this.pillarBaseSearchColumnCursor + "/" + PILLAR_BASE_COLUMN_OFFSETS.size()
+                    + "; continuing in bounded passes";
+            return true;
+        }
         this.nextPillarBaseSearchTick = this.playerNpc.tickCount
                 + PILLAR_RECOVERY_SCAN_INTERVAL_TICKS
                 + this.playerNpc.getRandom().nextInt(11);
-        Optional<StandSearchResult> betterBase = this.findBetterPillarBase(serverLevel, blockedFeet);
-        if (betterBase.isEmpty()) {
+        if (search.stand().isEmpty()) {
             return false;
         }
 
-        this.standPos = betterBase.get().stand();
-        this.plannedStandPath = betterBase.get().path();
+        this.standPos = search.stand().get().stand();
+        this.plannedStandPath = search.stand().get().path();
+        this.pillarRouteAuthorized = true;
         this.standPathNotBeforeTick = this.playerNpc.tickCount + 1;
         this.breakingBlockAi.stop();
         this.clearBlockAi.stop();
@@ -1334,60 +1726,81 @@ public class GatherLogsGoal extends Goal {
         return true;
     }
 
-    private Optional<StandSearchResult> findBetterPillarBase(ServerLevel serverLevel, BlockPos blockedFeet) {
+    private PillarBaseSearchResult findBetterPillarBase(ServerLevel serverLevel, BlockPos blockedFeet) {
         if (this.targetPos == null) {
-            return Optional.empty();
+            return new PillarBaseSearchResult(Optional.empty(), true);
         }
 
-        for (int ring = 1; ring <= PILLAR_BASE_SEARCH_RADIUS; ring++) {
-            LinkedHashSet<BlockPos> candidates = new LinkedHashSet<>();
-            for (int dx = -ring; dx <= ring; dx++) {
-                for (int dz = -ring; dz <= ring; dz++) {
-                    if (Math.max(Math.abs(dx), Math.abs(dz)) != ring) {
-                        continue;
-                    }
+        if (this.pillarBaseSearchTarget == null || !this.pillarBaseSearchTarget.equals(this.targetPos)) {
+            this.pillarBaseSearchTarget = this.targetPos.immutable();
+            this.pillarBaseSearchColumnCursor = 0;
+        }
 
-                    int x = this.targetPos.getX() + dx;
-                    int z = this.targetPos.getZ() + dz;
-                    if (!isColumnLoaded(serverLevel, x, z)) {
-                        continue;
-                    }
-                    int surfaceY = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-                    candidates.add(new BlockPos(x, surfaceY, z));
-                    candidates.add(new BlockPos(x, surfaceY - 1, z));
-                    candidates.add(new BlockPos(x, surfaceY + 1, z));
-                    addVerticalStandCandidates(
-                            this.playerNpc,
-                            serverLevel,
-                            candidates,
-                            new BlockPos(x, this.playerNpc.blockPosition().getY(), z)
-                    );
-                }
+        int end = Math.min(
+                PILLAR_BASE_COLUMN_OFFSETS.size(),
+                this.pillarBaseSearchColumnCursor + MAX_PILLAR_BASE_COLUMNS_PER_SEARCH_PASS
+        );
+        BlockPos npcFeet = this.playerNpc.blockPosition();
+        for (; this.pillarBaseSearchColumnCursor < end; this.pillarBaseSearchColumnCursor++) {
+            ColumnOffset offset = PILLAR_BASE_COLUMN_OFFSETS.get(this.pillarBaseSearchColumnCursor);
+            int x = this.targetPos.getX() + offset.dx();
+            int z = this.targetPos.getZ() + offset.dz();
+            if (!isColumnLoaded(serverLevel, x, z)) {
+                continue;
             }
-
-            List<BlockPos> orderedBases = candidates.stream()
-                    .map(BlockPos::immutable)
-                    .distinct()
-                    .filter(pos -> !pos.equals(blockedFeet))
-                    .filter(pos -> !isProtectedHomeStandPos(this.playerNpc, pos))
-                    .filter(pos -> distanceFromStandToTargetSqr(pos, this.targetPos) > BREAK_DISTANCE_SQR)
-                    .filter(pos -> canPillarTowardFrom(pos, this.targetPos))
-                    .filter(pos -> canStandAt(serverLevel, pos))
-                    .sorted(Comparator
-                            .comparingDouble((BlockPos pos) -> horizontalDistanceToTargetColumnSqr(pos, this.targetPos))
-                            .thenComparingDouble(pos -> pos.distSqr(this.playerNpc.blockPosition())))
-                    .toList();
-            for (BlockPos candidate : orderedBases) {
-                if (!this.pillarUpAi.startBlocker(serverLevel, candidate).isBlank()) {
+            LinkedHashSet<BlockPos> candidates = new LinkedHashSet<>();
+            int surfaceY = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+            candidates.add(new BlockPos(x, surfaceY, z));
+            candidates.add(new BlockPos(x, surfaceY - 1, z));
+            candidates.add(new BlockPos(x, surfaceY + 1, z));
+            addVerticalStandCandidates(
+                    this.playerNpc,
+                    serverLevel,
+                    candidates,
+                    new BlockPos(x, npcFeet.getY(), z)
+            );
+            for (BlockPos candidate : candidates) {
+                if (candidate.equals(blockedFeet)
+                        || this.failedStandRoutes.contains(candidate)
+                        || isProtectedHomeStandPos(this.playerNpc, candidate)
+                        || distanceFromStandToTargetSqr(candidate, this.targetPos) <= BREAK_DISTANCE_SQR
+                        || !canPillarTowardFrom(candidate, this.targetPos)
+                        || !canStandAt(serverLevel, candidate)
+                        || !this.pillarUpAi.startBlocker(serverLevel, candidate).isBlank()) {
                     continue;
                 }
-                // Selection is geometric and loaded-only. Route construction is deliberately
-                // deferred to the following goal tick so the base scan and PathFinder region are
-                // never paid in one 50 ms server tick.
-                return Optional.of(new StandSearchResult(candidate.immutable(), null));
+                this.pillarBaseSearchColumnCursor = 0;
+                this.pillarBaseSearchTarget = null;
+                // Selection remains geometric; path construction is deferred to a later tick.
+                return new PillarBaseSearchResult(
+                        Optional.of(new StandSearchResult(candidate.immutable(), null)),
+                        true
+                );
             }
         }
-        return Optional.empty();
+        boolean complete = this.pillarBaseSearchColumnCursor >= PILLAR_BASE_COLUMN_OFFSETS.size();
+        if (complete) {
+            this.pillarBaseSearchColumnCursor = 0;
+            this.pillarBaseSearchTarget = null;
+        }
+        return new PillarBaseSearchResult(Optional.empty(), complete);
+    }
+
+    private static List<ColumnOffset> createPillarBaseColumnOffsets() {
+        List<ColumnOffset> offsets = new ArrayList<>();
+        for (int dx = -PILLAR_BASE_SEARCH_RADIUS; dx <= PILLAR_BASE_SEARCH_RADIUS; dx++) {
+            for (int dz = -PILLAR_BASE_SEARCH_RADIUS; dz <= PILLAR_BASE_SEARCH_RADIUS; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                offsets.add(new ColumnOffset(dx, dz));
+            }
+        }
+        offsets.sort(Comparator
+                .comparingInt((ColumnOffset offset) -> offset.dx() * offset.dx() + offset.dz() * offset.dz())
+                .thenComparingInt(ColumnOffset::dx)
+                .thenComparingInt(ColumnOffset::dz));
+        return List.copyOf(offsets);
     }
 
     private void lookDownAt(BlockPos pos) {
@@ -1524,6 +1937,11 @@ public class GatherLogsGoal extends Goal {
         if (!this.isStandingOnProtectedPillar()) {
             return false;
         }
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.playerNpc.getNavigation().stop();
+            this.pillarTraceDetail = "pillar descent paused: worker slot not held";
+            return true;
+        }
         if (!admissionHeld && !PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
             // Returning true keeps the active gather episode alive without pretending that the
             // bounded descent search was exhausted. The next goal tick retries admission.
@@ -1568,6 +1986,12 @@ public class GatherLogsGoal extends Goal {
     }
 
     private void tickDescendFromPillar(ServerLevel serverLevel) {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.playerNpc.getNavigation().stop();
+            this.clearBlockAi.stop();
+            this.pillarTraceDetail = "pillar descent paused: worker slot not held";
+            return;
+        }
         this.descentTicks++;
         if (this.descentTargetPos == null
                 || this.descentTicks > MAX_DESCENT_TICKS
@@ -1929,7 +2353,7 @@ public class GatherLogsGoal extends Goal {
         BlockPos feet = playerNpc.blockPosition();
         if (!isProtectedHomeStandPos(playerNpc, feet)
                 && canStandAt(serverLevel, feet)
-                && (canMineFromStandPosition(feet, target) || canPillarTowardFrom(feet, target))) {
+                && canMineFromStandPosition(feet, target)) {
             return Optional.of(new StandSearchResult(feet.immutable(), null));
         }
 
@@ -1940,13 +2364,19 @@ public class GatherLogsGoal extends Goal {
             addVerticalStandCandidates(playerNpc, serverLevel, candidates, side);
         }
         addNearbySurfaceStandCandidates(serverLevel, candidates, target);
+        if (!isProtectedHomeStandPos(playerNpc, feet)
+                && canStandAt(serverLevel, feet)
+                && canPillarTowardFrom(feet, target)) {
+            candidates.add(feet.immutable());
+        }
 
         List<BlockPos> viableCandidates = candidates.stream()
                 .filter(pos -> !isProtectedHomeStandPos(playerNpc, pos))
                 .filter(pos -> canStandAt(serverLevel, pos))
                 .filter(pos -> canMineFromStandPosition(pos, target) || canPillarTowardFrom(pos, target))
                 .sorted(Comparator
-                        .comparingDouble((BlockPos pos) -> horizontalDistanceToTargetColumnSqr(pos, target))
+                        .comparingInt((BlockPos pos) -> canMineFromStandPosition(pos, target) ? 0 : 1)
+                        .thenComparingDouble(pos -> horizontalDistanceToTargetColumnSqr(pos, target))
                         .thenComparingDouble(pos -> pos.distSqr(playerNpc.blockPosition())))
                 .toList();
         for (BlockPos candidate : viableCandidates) {
@@ -1981,7 +2411,7 @@ public class GatherLogsGoal extends Goal {
         BlockPos feet = playerNpc.blockPosition();
         if (!isProtectedHomeStandPos(playerNpc, feet)
                 && canStandAt(serverLevel, feet)
-                && (canMineFromStandPosition(feet, target) || canPillarTowardFrom(feet, target))) {
+                && canMineFromStandPosition(feet, target)) {
             return Optional.of(feet.immutable());
         }
         LinkedHashSet<BlockPos> candidates = new LinkedHashSet<>();
@@ -1991,12 +2421,18 @@ public class GatherLogsGoal extends Goal {
             addVerticalStandCandidates(playerNpc, serverLevel, candidates, side);
         }
         addNearbySurfaceStandCandidates(serverLevel, candidates, target);
+        if (!isProtectedHomeStandPos(playerNpc, feet)
+                && canStandAt(serverLevel, feet)
+                && canPillarTowardFrom(feet, target)) {
+            candidates.add(feet.immutable());
+        }
         return candidates.stream()
                 .filter(pos -> !isProtectedHomeStandPos(playerNpc, pos))
                 .filter(pos -> canStandAt(serverLevel, pos))
                 .filter(pos -> canMineFromStandPosition(pos, target) || canPillarTowardFrom(pos, target))
                 .min(Comparator
-                        .comparingDouble((BlockPos pos) -> horizontalDistanceToTargetColumnSqr(pos, target))
+                        .comparingInt((BlockPos pos) -> canMineFromStandPosition(pos, target) ? 0 : 1)
+                        .thenComparingDouble(pos -> horizontalDistanceToTargetColumnSqr(pos, target))
                         .thenComparingDouble(pos -> pos.distSqr(feet)))
                 .map(BlockPos::immutable);
     }
@@ -2008,6 +2444,9 @@ public class GatherLogsGoal extends Goal {
     }
 
     private record StandSearchResult(BlockPos stand, Path path) {
+    }
+
+    private record PillarBaseSearchResult(Optional<StandSearchResult> stand, boolean complete) {
     }
 
     private record DirtSearchResult(BlockPos target, BlockPos stand, Path path, boolean complete) {

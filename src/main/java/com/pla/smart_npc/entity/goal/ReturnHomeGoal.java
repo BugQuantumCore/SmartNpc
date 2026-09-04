@@ -9,6 +9,7 @@ import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -77,10 +78,11 @@ public class ReturnHomeGoal extends Goal {
         }
         if (!serverLevel.isNight()
                 && !serverLevel.isThundering()
-                && (GatherMissingBuildMaterialGoal.needsMissingBuildMaterial(playerNpc, serverLevel)
+                && (PlayerNpcBuildMaterialUtil.findMissingBuildMaterialNeed(serverLevel, playerNpc).isPresent()
                 || PlayerNpcBuildMaterialUtil.isMissingBuildMaterialSearchPending(playerNpc))) {
-            // A ready structure with a missing non-primary input is daytime gathering work, not a
-            // reason for the higher-priority return goal to suppress its exploration/harvest route.
+            // Any earliest-phase missing input is daytime gathering work.  Restricting this
+            // release to non-primary materials made ReturnHome suppress GatherLogs while
+            // ReturnHome.canUse simultaneously yielded to that same log shortage.
             return false;
         }
         if (miningShelterOnly && MiningNightCampGoal.shouldPauseMiningForNightCamp(playerNpc, serverLevel)) {
@@ -523,12 +525,20 @@ public class ReturnHomeGoal extends Goal {
             return false;
         }
         if (pos.getY() < homeArea.origin().getY()) {
-            return true;
+            // Being one block below the blueprint origin is not sufficient proof of an
+            // underground home. Terraform can intentionally expose or lower part of the site.
+            // If the NPC can step onto an adjacent sky-visible stand, normal navigation and
+            // construction/supply work must win instead of ReturnHome repeatedly requesting a
+            // pillar which EscapeHole correctly rejects as a surface-origin climb.
+            return !hasNearbySurfaceExitOrUnloadedNeighbor(serverLevel, pos);
         }
         if (pos.getY() != homeArea.origin().getY() || serverLevel.canSeeSky(pos.above())) {
             return false;
         }
         if (PathNavigationAi.canStandAt(serverLevel, pos)) {
+            return false;
+        }
+        if (hasNearbySurfaceExitOrUnloadedNeighbor(serverLevel, pos)) {
             return false;
         }
 
@@ -538,6 +548,25 @@ public class ReturnHomeGoal extends Goal {
                 pos.getZ()
         );
         return localSurfaceY > pos.getY() + 1;
+    }
+
+    private static boolean hasNearbySurfaceExitOrUnloadedNeighbor(ServerLevel serverLevel, BlockPos feet) {
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            for (int dy = -1; dy <= 1; dy++) {
+                BlockPos adjacent = feet.relative(direction).offset(0, dy, 0);
+                if (!serverLevel.hasChunkAt(adjacent)) {
+                    // Surface recovery must be proven from loaded local terrain. Conservatively
+                    // leave an incomplete neighborhood to ordinary goals instead of loading a
+                    // chunk or manufacturing a pillar request from partial evidence.
+                    return true;
+                }
+                if (serverLevel.canSeeSky(adjacent.above())
+                        && PathNavigationAi.canStandAt(serverLevel, adjacent)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private boolean hasReachedExplorationRecoveryHome(PlayerNpcHomeUtil.HomeArea homeArea) {

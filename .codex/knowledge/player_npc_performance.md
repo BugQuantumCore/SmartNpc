@@ -181,6 +181,50 @@ Nested candidate helpers must accept the caller's mutable total budget. An outer
 
 Maintain the general cadence and loaded-world rules in `smart_npc_common_rules.md` when extending these paths.
 
+The 2026-08-31 20:18 and 20:20 attachment contains two different signatures. At 20:18,
+SkySom owns 111.2 ms inside `super.tick()` while building `dirt_base.blueprint`; all measured goal
+phases total only 3.4 ms and the builder's custom post-work is 0.3 ms. BuildHouse changes blocks
+beside its MOVE route but formerly left vanilla's default 48-block node budget installed for delayed
+`PathNavigation.recomputePath()` work. It now keeps a 0.05 node multiplier for its complete active
+lifetime, reapplies it after helpers restore the default, and stops its retained route before
+restoring the default on teardown. At 20:20, only 22.2 of 272.1 ms is Player NPC entity work and
+249.6 ms is explicitly unmeasured chunks/block entities/other entities/mods/server tasks. That
+second tick is not assigned to the concurrent farming/camp/exploration state snapshot; the existing
+rolling-MSPT guard yields optional Smart NPC work while the server is above its target.
+
+The 2026-08-31 21:08 warning is distributed sustained load, not attribution to the concurrent
+farmer obstruction state. Player NPC entities account for 50.8 of 67.1 ms, but the hottest NPC is
+only 10.4 ms, all measured goal phases together are 10.7 ms, and 46.1 ms is spread through inherited
+`super.tick()` work across 16 NPCs. Six active explorers are the repeated source-backed risk because
+vanilla navigation and delayed recomputation execute in that super bucket. Exploration retains its
+normal 0.05 active node multiplier while the stable rolling window is below 50 MSPT, but tightens it
+to 0.01 while the server is already missing 20 TPS. The goal keeps its destination and chained local
+waypoints; only the synchronous node allowance is shed, and the ordinary budget returns when the
+rolling window recovers. FarmSetup obstruction mechanics are handled separately and the final
+`setting_up_farm` state is not treated as proof that it caused this distributed warning. Future
+TPS warning headers also include active/effective routine workers and queued demand, so concurrent
+state-string counts can be distinguished directly from scheduler ownership during overload.
+
+The 2026-09-01 23:54 warning supplies that missing scheduler evidence. The server spends 76.9 of
+98.0 ms in 16 Player NPC entity ticks, with 67.9 ms distributed through `super.tick`; the hottest
+Technoblade tick is only 16.9 ms, all 81 wrapped phases total 24.3 ms, and GatherStone's hottest
+phase is 6.3 ms. Four explorer state traces are therefore not one atomic hotspot. More importantly,
+the warning reports eight of eight routine worker leases occupied while seven NPCs wait, even though
+only four non-idle routine states are visible. A stopped delegate formerly left `runningGoals=0`
+but retained its lease for the full Minecraft-day shift; successful `canProbe` calls then refreshed
+that idle holder indefinitely and continued its distributed predicate sweep.
+
+Healthy day-shift continuity remains unchanged. While the stable rolling average is at least
+50 MSPT and queued demand exists, a zero-goal holder gets a two-second transition grace (longer than
+one complete eight-slice selector sweep), then releases and rejoins behind existing waiters. Worker
+growth now requires running rather than merely leased occupancy, so idle leases cannot prove a
+higher capacity safe. When overload lowers the limit, running holders are retained before idle
+holders. Reclaimed capacity admits at most one queued probe owner per overloaded server tick, so a
+handoff cannot replace four idle leases with four simultaneous selector slices. Resource commands,
+inspector text, and TPS warnings report running and idle worker counts separately. This is
+overload-only lease reclamation: ordinary cooldown gaps still keep the daily worker roster, and a
+released NPC remains queued for a later fair turn.
+
 Natural-spawn population admission is a separate control plane from routine AI scheduling. With `maxNaturalPlayerNpcs=-1`, `PlayerNpcNaturalSpawnCap` uses a CPU/heap exploration ceiling plus a rolling baseline that excludes only the highest five percent of tick samples. The arithmetic average and linear NPC-cost forecast remain diagnostics, but neither gates growth because capped routine-worker cost is not proportional to every passive NPC. A full/loaded cap at baseline <=40 grows by two after two five-second evaluations, only up to 10; baseline <=45 grows by one after three evaluations, including all growth above 10. Joins warm the monitor before another promotion. The 45-50 band holds and retracts unfilled probes; sustained >=50 targets one below the overloaded observed population and then waits for natural attrition. `LearnedAutoCap` persists tested <=45 populations but restart restore is bounded by current living count, so it cannot create a multi-slot burst. Startup/no-monitor remains at most four, reservations cover concurrent workers, and no reduction despawns an NPC.
 
 The 2026-08-28 22:28-23:07 four-NPC log proves its intermittent slow ticks are routine goal activation spikes, not passive population, force tickets, waiting stroll, combat, or general world work. ExploreAroundGoal.canUse measures 142.0-181.5 ms on SkySom; DigDownForStoneGoal.canUse measures 326.9-530.4 ms on SOTMead; FarmCropGoal.canUse measures 311.7 ms. In those ticks custom post-work is only 1.1-2.9 ms, waitingStroll and forceManager are 0.0 ms, and unmeasured server work is 8.1-15.2 ms. DigDown's radius-24 selection ended in an unbounded `canReachOrSafelyDropTo` path, FarmCrop allowed 64 owned-crop or 12 local raw paths, and Explore's single 0.15 path remained too large. Dig/Farm selection and repath probes now use a scoped 0.05 node multiplier, Explore uses 0.03, and FarmCrop shares one total path across the complete activation. These spikes must be fixed and trimmed from population baseline attribution rather than treated as proof that four lightweight NPCs saturate the server.

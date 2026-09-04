@@ -204,7 +204,8 @@ public final class PathNavigationAi {
                 horizontalRadius,
                 verticalDown,
                 verticalUp,
-                MAX_LOCAL_ROUTE_PATH_CHECKS
+                MAX_LOCAL_ROUTE_PATH_CHECKS,
+                1.0F
         );
     }
 
@@ -217,8 +218,31 @@ public final class PathNavigationAi {
             int verticalDown,
             int verticalUp,
             int maxLocalPathChecks) {
+        return this.moveToWithLocalFallback(
+                serverLevel,
+                target,
+                speed,
+                maxSafeDrop,
+                horizontalRadius,
+                verticalDown,
+                verticalUp,
+                maxLocalPathChecks,
+                1.0F
+        );
+    }
+
+    public boolean moveToWithLocalFallback(
+            ServerLevel serverLevel,
+            BlockPos target,
+            double speed,
+            int maxSafeDrop,
+            int horizontalRadius,
+            int verticalDown,
+            int verticalUp,
+            int maxLocalPathChecks,
+            float maxVisitedNodesMultiplier) {
         this.lastLocalRouteTarget = null;
-        if (this.moveTo(serverLevel, target, speed, maxSafeDrop)) {
+        if (this.moveTo(serverLevel, target, speed, maxSafeDrop, maxVisitedNodesMultiplier)) {
             return true;
         }
 
@@ -228,7 +252,8 @@ public final class PathNavigationAi {
                 horizontalRadius,
                 verticalDown,
                 verticalUp,
-                maxLocalPathChecks
+                maxLocalPathChecks,
+                maxVisitedNodesMultiplier
         );
         if (routeStep == null) {
             this.lastMoveFailureDetail = this.lastMoveFailureDetail
@@ -581,7 +606,8 @@ public final class PathNavigationAi {
             int horizontalRadius,
             int verticalDown,
             int verticalUp,
-            int maxPathChecks) {
+            int maxPathChecks,
+            float maxVisitedNodesMultiplier) {
         BlockPos feet = this.playerNpc.blockPosition();
         double currentTargetDistance = blockDistanceSqr(feet, target);
         List<BlockPos> candidates = new ArrayList<>();
@@ -616,7 +642,7 @@ public final class PathNavigationAi {
                 break;
             }
             this.lastLocalPathChecks = checks;
-            Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
+            Path path = createBoundedPath(this.playerNpc, candidate, maxVisitedNodesMultiplier);
             if (this.isValidPathTo(candidate, path)) {
                 return new RouteStep(candidate, path);
             }

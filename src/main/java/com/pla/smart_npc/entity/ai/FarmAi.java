@@ -10,6 +10,7 @@ import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Shape;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
+import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -56,6 +57,8 @@ public final class FarmAi {
     private static final int FARM_TORCH_LOW_LIGHT_LEVEL = 7;
     private static final int FARM_STONE_PROTECTION_BUFFER = 2;
     private static final int FARM_TORCH_CHARCOAL_LOG_TARGET = 3;
+    private static final float PLAN_ENTRY_PATH_NODE_MULTIPLIER = 0.03F;
+    private static final float OVERLOADED_PLAN_ENTRY_PATH_NODE_MULTIPLIER = 0.01F;
     private static final List<SiteOffset> NEARBY_SITE_OFFSETS = List.copyOf(createNearbySiteOffsets());
     private static final Map<PlayerNpcEntity, PlanSearchCursor> PLAN_SEARCH_CURSORS = new WeakHashMap<>();
 
@@ -756,7 +759,10 @@ public final class FarmAi {
                 <= 1.5D * 1.5D) {
             return true;
         }
-        Path path = playerNpc.getNavigation().createPath(entryStand, 0);
+        float pathBudget = PlayerNpcPerformanceMonitor.isAiWorkOverloaded()
+                ? OVERLOADED_PLAN_ENTRY_PATH_NODE_MULTIPLIER
+                : PLAN_ENTRY_PATH_NODE_MULTIPLIER;
+        Path path = PathNavigationAi.createBoundedPath(playerNpc, entryStand, pathBudget);
         Node end = path == null ? null : path.getEndNode();
         return path != null && path.canReach() && end != null && end.asBlockPos().equals(entryStand);
     }

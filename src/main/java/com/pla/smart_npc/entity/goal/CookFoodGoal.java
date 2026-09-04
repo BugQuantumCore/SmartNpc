@@ -10,6 +10,8 @@ import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
+import com.pla.smart_npc.util.PlayerNpcBuildLayout;
+import com.pla.smart_npc.util.PlayerNpcBuildLayoutLoader;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
@@ -34,6 +36,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Optional;
 
 public class CookFoodGoal extends Goal {
     private static final int COOLDOWN_TICKS = 20 * 20;
@@ -108,7 +111,17 @@ public class CookFoodGoal extends Goal {
         if (temporary != null) {
             if (serverLevel.getBlockState(temporary).is(Blocks.FURNACE)
                     && serverLevel.getBlockEntity(temporary) instanceof FurnaceBlockEntity furnace) {
-                if (this.isInsideOwnedFarmFurnaceExclusion(temporary)) {
+                boolean correctBlueprintFurnace = this.isCorrectBlueprintFurnace(serverLevel, temporary);
+                if (this.isInsideActiveBuildFootprint(temporary) && correctBlueprintFurnace) {
+                    // A later build pass may have adopted this block as the layout's real furnace.
+                    // Stop treating it as disposable so recovery can never remove correct work.
+                    this.clearTemporaryFurnace();
+                    if (this.furnaceAi.hasFurnaceWork(serverLevel, furnace)) {
+                        return this.planInteraction(serverLevel, temporary, false);
+                    }
+                    return false;
+                } else if (this.isInsideOwnedFarmFurnaceExclusion(temporary)
+                        || this.isInsideActiveBuildFootprint(temporary)) {
                     return this.planRecovery(serverLevel, temporary);
                 }
                 if (this.furnaceAi.hasFurnaceWork(serverLevel, furnace)) {
@@ -132,7 +145,7 @@ public class CookFoodGoal extends Goal {
 
             BlockPos placement = this.findHomeFurnacePlacement(serverLevel);
             if (placement != null && this.furnaceAi.shouldPlaceFurnaceForWork(serverLevel)) {
-                return this.planPlacement(serverLevel, placement, Mode.PLACE_HOME, false);
+                return this.planPlacement(serverLevel, placement, Mode.PLACE_TEMPORARY, true);
             }
         }
 
@@ -496,7 +509,8 @@ public class CookFoodGoal extends Goal {
         for (BlockPos pos : BlockPos.betweenClosed(
                 this.homeArea.origin(),
                 this.homeArea.origin().offset(this.homeArea.width() - 1, 3, this.homeArea.depth() - 1))) {
-            if (serverLevel.getBlockState(pos).is(Blocks.FURNACE)) {
+            if (serverLevel.getBlockState(pos).is(Blocks.FURNACE)
+                    && this.canUseExistingFurnace(serverLevel, pos)) {
                 return pos.immutable();
             }
         }
@@ -508,7 +522,8 @@ public class CookFoodGoal extends Goal {
         for (BlockPos pos : BlockPos.betweenClosed(
                 origin.offset(-FURNACE_SCAN_RADIUS, -2, -FURNACE_SCAN_RADIUS),
                 origin.offset(FURNACE_SCAN_RADIUS, 2, FURNACE_SCAN_RADIUS))) {
-            if (serverLevel.getBlockState(pos).is(Blocks.FURNACE)) {
+            if (serverLevel.getBlockState(pos).is(Blocks.FURNACE)
+                    && this.canUseExistingFurnace(serverLevel, pos)) {
                 return pos.immutable();
             }
         }
@@ -520,17 +535,32 @@ public class CookFoodGoal extends Goal {
             return null;
         }
 
-        BlockPos preferred = PlayerNpcHomeUtil.interiorPos(this.homeArea, this.homeArea.width() - 2, this.homeArea.depth() - 2);
-        if (this.canPlaceFurnaceAt(serverLevel, preferred)) {
-            return preferred;
+        List<BlockPos> candidates = new ArrayList<>();
+        BlockPos origin = this.homeArea.origin();
+        for (int margin = 1; margin <= 3; margin++) {
+            int minX = -margin;
+            int maxX = this.homeArea.width() - 1 + margin;
+            int minZ = -margin;
+            int maxZ = this.homeArea.depth() - 1 + margin;
+            for (int y = 0; y <= 1; y++) {
+                for (int x = minX; x <= maxX; x++) {
+                    candidates.add(origin.offset(x, y, minZ));
+                    candidates.add(origin.offset(x, y, maxZ));
+                }
+                for (int z = minZ + 1; z < maxZ; z++) {
+                    candidates.add(origin.offset(minX, y, z));
+                    candidates.add(origin.offset(maxX, y, z));
+                }
+            }
         }
 
-        for (int x = 1; x < this.homeArea.width() - 1; x++) {
-            for (int z = 1; z < this.homeArea.depth() - 1; z++) {
-                BlockPos pos = PlayerNpcHomeUtil.interiorPos(this.homeArea, x, z);
-                if (this.canPlaceFurnaceAt(serverLevel, pos)) {
-                    return pos;
-                }
+        BlockPos center = this.playerNpc.blockPosition();
+        candidates.sort(Comparator.comparingDouble(center::distSqr));
+        for (BlockPos candidate : candidates) {
+            BlockPos pos = candidate.immutable();
+            if (this.canPlaceFurnaceAt(serverLevel, pos)
+                    && this.findFurnaceStand(serverLevel, pos) != null) {
+                return pos;
             }
         }
         return null;
@@ -594,13 +624,45 @@ public class CookFoodGoal extends Goal {
         if (this.isInsideOwnedFarmFurnaceExclusion(pos)) {
             return false;
         }
-        if (this.homeArea != null && PlayerNpcHomeUtil.isInside(this.homeArea, pos)) {
-            return PlayerNpcHomeUtil.isReplaceableForNpcBuild(serverLevel, pos)
-                    && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+        if (this.isInsideActiveBuildFootprint(pos)) {
+            return false;
         }
         return serverLevel.getBlockState(pos).canBeReplaced()
                 && serverLevel.getFluidState(pos).isEmpty()
                 && serverLevel.getBlockState(pos.below()).isSolidRender(serverLevel, pos.below());
+    }
+
+    private boolean canUseExistingFurnace(ServerLevel serverLevel, BlockPos pos) {
+        return !this.isInsideActiveBuildFootprint(pos)
+                || this.isCorrectBlueprintFurnace(serverLevel, pos);
+    }
+
+    private boolean isInsideActiveBuildFootprint(BlockPos pos) {
+        return PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos);
+    }
+
+    private boolean isCorrectBlueprintFurnace(ServerLevel serverLevel, BlockPos pos) {
+        if (this.homeArea == null || pos == null || !this.isInsideActiveBuildFootprint(pos)) {
+            return false;
+        }
+
+        Optional<PlayerNpcBuildLayout> layout = PlayerNpcHomeUtil.getHomeLayoutId(this.playerNpc)
+                .flatMap(PlayerNpcBuildLayoutLoader::getLayout);
+        if (layout.isEmpty()
+                || layout.get().width() != this.homeArea.width()
+                || layout.get().depth() != this.homeArea.depth()) {
+            return false;
+        }
+
+        BlockState existing = serverLevel.getBlockState(pos);
+        for (PlayerNpcBuildLayout.RelativeBlock block : layout.get().blocks()) {
+            if (block.toWorld(this.homeArea.origin()).equals(pos)
+                    && block.state().is(Blocks.FURNACE)
+                    && PlayerNpcBuildMaterialUtil.matches(existing, block.state())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private BlockPos findFurnaceStand(ServerLevel serverLevel, BlockPos pos) {

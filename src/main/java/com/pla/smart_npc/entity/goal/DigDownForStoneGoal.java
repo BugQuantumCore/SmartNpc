@@ -22,6 +22,7 @@ import net.minecraft.world.item.PickaxeItem;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.pathfinder.Path;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -52,17 +53,18 @@ public class DigDownForStoneGoal extends Goal {
     // Heightmap reads can initialize/inspect substantial chunk data even when the chunk is
     // already loaded. Keep each admitted activation probe genuinely small; the retained cursor
     // eventually covers the same radius without a 64-column server-thread burst.
-    private static final int MAX_DIG_SITE_COLUMNS_PER_SLICE = 4;
+    private static final int MAX_DIG_SITE_COLUMNS_PER_SLICE = 1;
     // Origin discovery is a speculative activation check. A single 0.05 path still
     // measured above 100 ms in live worlds, so keep it substantially below movement
     // paths and let later admitted checks try another candidate.
     private static final float DIG_SITE_PATH_NODE_MULTIPLIER = 0.01F;
-    private static final int NEARBY_STONE_ACTIVATION_STAGE_TICKS = 8;
     private static final int CAVE_CHECK_INTERVAL_TICKS = 20;
     private static final int MAX_DIG_SITE_WALK_TICKS = 20 * 25;
     private static final int LOCAL_PROSPECT_STUCK_TICKS = 20 * 2;
     private static final int LOCAL_PROSPECT_CLEAR_STUCK_TICKS = 20 * 3;
     private static final int MAX_DIG_SITE_SAFE_DROP_BLOCKS = 3;
+    private static final int LOCAL_DIG_ROUTE_STEP_BLOCKS = 4;
+    private static final float LOCAL_DIG_ROUTE_PATH_NODE_MULTIPLIER = 0.10F;
     private static final int CLEAR_OBSTRUCTION_TICKS = 24;
     private static final double CLEAR_OBSTRUCTION_DISTANCE_SQR = 5.0D * 5.0D;
     private static final int IDLE_DIAGNOSTIC_TICKS = 20 * 20;
@@ -96,7 +98,6 @@ public class DigDownForStoneGoal extends Goal {
     private int nextContinueEligibilityCheckTick;
     private int localProspectStillTicks;
     private int activeClearTargetTicks;
-    private int nearbyStoneActivationStageUntilTick;
     private boolean minedStone;
     private boolean foundGatherStoneTarget;
     private boolean prospectingOre;
@@ -162,17 +163,9 @@ public class DigDownForStoneGoal extends Goal {
             this.canUseThrottle.retryIn(this.playerNpc, 1 + this.playerNpc.getRandom().nextInt(4));
             return false;
         }
-        if (stoneSupplyActive && this.playerNpc.tickCount >= this.nearbyStoneActivationStageUntilTick) {
-            if (GatherStoneGoal.hasNearbyStoneTarget(this.playerNpc, serverLevel)) {
-                this.nearbyStoneActivationStageUntilTick = 0;
-                this.traceCanUseBlocked("digdown blocked: nearby stone target; gather stone should run");
-                return false;
-            }
-            // Do not compound the nearby-stone scan/path with dig-origin discovery and route
-            // creation under one admission. The next short activation retry owns origin work.
-            this.nearbyStoneActivationStageUntilTick = this.playerNpc.tickCount
-                    + NEARBY_STONE_ACTIVATION_STAGE_TICKS;
-            this.canUseThrottle.retryIn(this.playerNpc, 1 + this.playerNpc.getRandom().nextInt(4));
+        if (stoneSupplyActive
+                && GatherStoneGoal.hasCachedNearbyStoneTarget(this.playerNpc, serverLevel)) {
+            this.traceCanUseBlocked("digdown blocked: nearby stone target; gather stone should run");
             return false;
         }
         if (miningProspecting) {
@@ -204,7 +197,6 @@ public class DigDownForStoneGoal extends Goal {
                     + " gatherCooldown=" + this.playerNpc.getGatherCooldown());
             return false;
         }
-        this.nearbyStoneActivationStageUntilTick = 0;
         this.digStepOffset = this.chooseDigStepOffset();
         return true;
     }
@@ -385,7 +377,8 @@ public class DigDownForStoneGoal extends Goal {
                     this.playerNpc.setCurrentAiDetail("walking to dig site; route queued for shared expensive-work slice");
                     return;
                 }
-                if (!this.moveTo(serverLevel, this.digOrigin)) {
+                boolean movementStarted = this.moveTo(serverLevel, this.digOrigin);
+                if (!movementStarted) {
                     if (this.prospectingOre) {
                         if (!this.startClearingDigRoute(serverLevel)) {
                             this.recoverFromProspectRouteFailure();
@@ -397,7 +390,15 @@ public class DigDownForStoneGoal extends Goal {
                         this.finish("dig origin unreachable");
                     }
                 }
-                this.repathTicks = REPATH_INTERVAL_TICKS;
+                // PathNavigationAi's safe-drop/local fallback deliberately drives MoveControl
+                // while navigation remains done.  That command needs refreshing every tick;
+                // applying the normal path repath delay turns a walk down ordinary terrain into
+                // one short movement pulse every 16 ticks (visible as ~0.2 block/second).  Keep
+                // the delay only while a real navigation path is active.  Worker ownership is
+                // unchanged because this running work goal already holds its scheduler slot.
+                this.repathTicks = movementStarted && this.playerNpc.getNavigation().isDone()
+                        ? 0
+                        : REPATH_INTERVAL_TICKS;
             }
             return;
         }
@@ -455,7 +456,6 @@ public class DigDownForStoneGoal extends Goal {
         this.nextPriorityTargetSearchTick = 0;
         this.nextContinueEligibilityCheckTick = 0;
         this.nextCaveCheckTick = 0;
-        this.nearbyStoneActivationStageUntilTick = 0;
         this.localProspectStillTicks = 0;
         this.activeClearTargetTicks = 0;
         this.minedStone = false;
@@ -508,6 +508,22 @@ public class DigDownForStoneGoal extends Goal {
             if (localOrigin != null) {
                 return localOrigin;
             }
+        }
+
+        // Prefer the already-loaded stand when the NPC is plainly on open surface away from
+        // protected work. This avoids asking a random neighbouring chunk to initialize a
+        // MOTION_BLOCKING_NO_LEAVES heightmap merely to choose an equivalent dig start. Keep the
+        // retained column search for roofs/holes, home-adjacent positions, and unsafe terrain so
+        // this cannot revive the old "dig farther down while trapped" behavior.
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.playerNpc.onGround()
+                && serverLevel.canSeeSky(feet.above())
+                && this.canStandAt(serverLevel, feet)
+                && this.isAwayFromHome(feet)
+                && !this.isProtectedStoneWorkPosition(feet)
+                && this.isInsideResourceRadius(feet)) {
+            this.resetDigOriginSearch();
+            return feet.immutable();
         }
 
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
@@ -938,11 +954,52 @@ public class DigDownForStoneGoal extends Goal {
         if (moved) {
             return true;
         }
+        if (this.stairSteps == 0 && this.moveToLocalDigWaypoint(serverLevel, pos)) {
+            return true;
+        }
         if (this.playerNpc.blockPosition().distSqr(pos) <= LOCAL_STEP_DISTANCE_SQR) {
             this.playerNpc.getMoveControl().setWantedPosition(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D, this.speed);
             return true;
         }
         return false;
+    }
+
+    /**
+     * The deliberately tiny full-route node budget protects the server from pathological
+     * 10-24-block path builds, but it cannot finish even an ordinary medium-distance surface
+     * route reliably.  Advance through one bounded four-block surface segment instead.  This is
+     * only used while approaching the initial dig site; stair excavation keeps its exact route.
+     */
+    private boolean moveToLocalDigWaypoint(ServerLevel serverLevel, BlockPos target) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        int dx = target.getX() - feet.getX();
+        int dz = target.getZ() - feet.getZ();
+        double horizontalDistance = Math.sqrt((double) dx * dx + (double) dz * dz);
+        if (horizontalDistance <= LOCAL_DIG_ROUTE_STEP_BLOCKS) {
+            return false;
+        }
+
+        int waypointX = feet.getX() + (int) Math.round(dx / horizontalDistance * LOCAL_DIG_ROUTE_STEP_BLOCKS);
+        int waypointZ = feet.getZ() + (int) Math.round(dz / horizontalDistance * LOCAL_DIG_ROUTE_STEP_BLOCKS);
+        if (!serverLevel.hasChunk(waypointX >> 4, waypointZ >> 4)) {
+            return false;
+        }
+
+        int waypointY = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, waypointX, waypointZ);
+        BlockPos waypoint = new BlockPos(waypointX, waypointY, waypointZ);
+        if (!this.canStandAt(serverLevel, waypoint)
+                || this.isProtectedStoneWorkPosition(waypoint)
+                || !this.isInsideResourceRadius(waypoint)) {
+            return false;
+        }
+
+        Path path = PathNavigationAi.createBoundedPath(
+                this.playerNpc,
+                waypoint,
+                LOCAL_DIG_ROUTE_PATH_NODE_MULTIPLIER
+        );
+        return this.pathNavigationAi.isValidPathTo(waypoint, path)
+                && this.playerNpc.getNavigation().moveTo(path, this.speed);
     }
 
     private boolean hasHealthyDigOriginPath() {
@@ -1103,10 +1160,18 @@ public class DigDownForStoneGoal extends Goal {
         if (this.hasReached(this.digOrigin)) {
             return true;
         }
-        if (!this.prospectingOre || this.digOrigin == null) {
+        if (!this.prospectingOre
+                || this.digOrigin == null
+                || this.stairSteps > 0) {
             return false;
         }
 
+        // The initial local prospect may safely start from the NPC's current stand instead of
+        // requiring an exact adjacent route endpoint. Once a stair step has been advanced, however,
+        // accepting another merely-nearby stand rewrites every new origin back to the unchanged
+        // feet position. Open cave air then consumes all MAX_STAIR_STEPS without any movement.
+        // Require exact arrival after the first advance so normal local-stall recovery can clear,
+        // re-anchor at a genuinely safe current stand, or end the attempt for a later retry.
         BlockPos feet = this.playerNpc.blockPosition();
         if (feet.distSqr(this.digOrigin) > LOCAL_STEP_DISTANCE_SQR
                 || !this.isValidLocalProspectingOrigin(serverLevel, feet)

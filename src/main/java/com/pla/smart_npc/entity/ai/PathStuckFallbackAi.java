@@ -1,9 +1,11 @@
 package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
@@ -17,12 +19,14 @@ public final class PathStuckFallbackAi {
     private static final int DEFAULT_STUCK_TICKS = 20 * 5;
     private static final int DEFAULT_ACTIVE_TICKS = 20 * 2;
     private static final int DEFAULT_RECHECK_TICKS = 20 * 3;
-    // Emergency nudge, not a route planner. Inspect near rings first so the usual recovery does
-    // not pay for the whole radius-five heightmap survey, while retaining the original reach when
-    // the NPC genuinely has no nearby safe first step.
     private static final int DEFAULT_SEARCH_RADIUS = 5;
+    // Heightmap initialization can be expensive in a newly loaded chunk. Keep the retained
+    // radius-five search responsive without allowing a dozen first-touch columns to cluster in
+    // one entity custom tick.
+    private static final int MAX_SEARCH_COLUMNS_PER_TICK = 4;
     private static final int DEFAULT_MAX_FALL = 16;
     private static final double DEFAULT_STEP_OFF_SPEED = 0.28D;
+    private static final List<BlockPos> STEP_OFF_COLUMN_OFFSETS = createStepOffColumnOffsets();
 
     private final PlayerNpcEntity playerNpc;
     private BlockPos watchFeetPos;
@@ -32,6 +36,11 @@ public final class PathStuckFallbackAi {
     private BlockPos stepOffStartPos;
     private BlockPos stepOffTargetPos;
     private int stepOffTicks;
+    private BlockPos searchFeetPos;
+    private BlockPos searchDirectionTarget;
+    private Predicate<BlockPos> searchAvoidedStand;
+    private BlockPos searchRelaxedTarget;
+    private int searchColumnCursor;
     private String detail = "";
 
     public PathStuckFallbackAi(PlayerNpcEntity playerNpc) {
@@ -39,12 +48,16 @@ public final class PathStuckFallbackAi {
     }
 
     public boolean isRunning() {
-        return this.stepOffStartPos != null && this.stepOffTargetPos != null && this.stepOffTicks > 0;
+        return this.searchFeetPos != null
+                || this.stepOffStartPos != null && this.stepOffTargetPos != null && this.stepOffTicks > 0;
     }
 
     public boolean tick(ServerLevel serverLevel, String detailPrefix) {
         if (!this.isRunning()) {
             return false;
+        }
+        if (this.searchFeetPos != null) {
+            return this.tickStepOffSearch(serverLevel, detailPrefix);
         }
 
         BlockPos feet = this.playerNpc.blockPosition();
@@ -86,10 +99,61 @@ public final class PathStuckFallbackAi {
         }
 
         BlockPos feet = this.playerNpc.blockPosition();
-        BlockPos stepOffTarget = this.findStepOffTarget(serverLevel, feet, directionTarget, avoidedStand);
+        this.beginStepOffSearch(feet, directionTarget, avoidedStand);
+        this.resetWatch();
+        return this.tickStepOffSearch(serverLevel, detailPrefix);
+    }
+
+    /**
+     * Starts one strictly validated nearby relocation step. Unlike the emergency fallback above,
+     * this variant never relaxes the rejected-position predicate and never falls back to an open
+     * horizontal push without a proven landing. It is intended for ordinary exploration retries,
+     * where failing cleanly is safer than stepping into an unloaded, protected, wet, or deep cell.
+     */
+    public boolean startValidatedNearby(
+            ServerLevel serverLevel,
+            BlockPos directionTarget,
+            String detailPrefix,
+            Predicate<BlockPos> rejectedStand,
+            int maxSafeFall
+    ) {
+        return this.startValidatedNearby(
+                serverLevel,
+                directionTarget,
+                detailPrefix,
+                rejectedStand,
+                maxSafeFall,
+                false
+        );
+    }
+
+    public boolean startValidatedNearby(
+            ServerLevel serverLevel,
+            BlockPos directionTarget,
+            String detailPrefix,
+            Predicate<BlockPos> rejectedStand,
+            int maxSafeFall,
+            boolean includeLeafCanopySurfaces
+    ) {
+        if (this.isRunning()) {
+            return this.tick(serverLevel, detailPrefix);
+        }
+        if (!this.playerNpc.onGround()) {
+            this.resetWatch();
+            return false;
+        }
+
+        BlockPos feet = this.playerNpc.blockPosition();
+        BlockPos stepOffTarget = this.findValidatedNearbyTarget(
+                serverLevel,
+                feet,
+                directionTarget,
+                rejectedStand,
+                Math.max(0, maxSafeFall),
+                includeLeafCanopySurfaces
+        );
         if (stepOffTarget == null) {
-            this.detail = detailPrefix + " path fallback blocked: no step off @ " + posText(feet);
-            this.recheckTicks = DEFAULT_RECHECK_TICKS;
+            this.detail = detailPrefix + " safe relocation blocked: no validated nearby stand @ " + posText(feet);
             this.resetWatch();
             return false;
         }
@@ -176,20 +240,8 @@ public final class PathStuckFallbackAi {
             return false;
         }
 
-        BlockPos stepOffTarget = this.findStepOffTarget(serverLevel, feet, directionTarget, avoidedStand);
-        if (stepOffTarget == null) {
-            this.detail = detailPrefix + " path fallback blocked: no step off @ " + posText(feet);
-            this.watchStartTick = this.playerNpc.tickCount;
-            this.recheckTicks = DEFAULT_RECHECK_TICKS;
-            return false;
-        }
-
-        this.stepOffStartPos = feet.immutable();
-        this.stepOffTargetPos = stepOffTarget.immutable();
-        this.stepOffTicks = DEFAULT_ACTIVE_TICKS;
-        this.playerNpc.getNavigation().stop();
-        this.forceHorizontalStepOff(detailPrefix);
-        return true;
+        this.beginStepOffSearch(feet, directionTarget, avoidedStand);
+        return this.tickStepOffSearch(serverLevel, detailPrefix);
     }
 
     public String detail(String fallback) {
@@ -198,72 +250,192 @@ public final class PathStuckFallbackAi {
 
     public void stop() {
         this.clearStepOff();
+        this.clearStepOffSearch();
         this.resetWatch();
         this.recheckTicks = 0;
         this.detail = "";
     }
 
-    private BlockPos findStepOffTarget(
-            ServerLevel serverLevel,
+    private void beginStepOffSearch(
             BlockPos feet,
             BlockPos directionTarget,
             Predicate<BlockPos> avoidedStand
     ) {
-        int radiusSqr = DEFAULT_SEARCH_RADIUS * DEFAULT_SEARCH_RADIUS;
-        for (int ring = 1; ring <= DEFAULT_SEARCH_RADIUS; ring++) {
-            List<BlockPos> candidates = new ArrayList<>();
-            List<BlockPos> relaxedCandidates = new ArrayList<>();
-            for (int dx = -ring; dx <= ring; dx++) {
-                for (int dz = -ring; dz <= ring; dz++) {
-                    if (Math.max(Math.abs(dx), Math.abs(dz)) != ring
-                            || dx * dx + dz * dz > radiusSqr) {
-                        continue;
-                    }
-
-                    int x = feet.getX() + dx;
-                    int z = feet.getZ() + dz;
-                    BlockPos loadedColumn = new BlockPos(x, feet.getY(), z);
-                    if (!serverLevel.hasChunkAt(loadedColumn)) {
-                        continue;
-                    }
-                    int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-                    int fall = feet.getY() - y;
-                    if (fall < 0 || fall > DEFAULT_MAX_FALL) {
-                        continue;
-                    }
-
-                    BlockPos candidate = new BlockPos(x, y, z);
-                    if (!PathNavigationAi.canStandAt(serverLevel, candidate)
-                            || !this.canStepOffToward(serverLevel, feet, candidate)) {
-                        continue;
-                    }
-
-                    if (avoidedStand.test(candidate)) {
-                        relaxedCandidates.add(candidate.immutable());
-                    } else {
-                        candidates.add(candidate.immutable());
-                    }
-                }
-            }
-
-            BlockPos selected = this.selectStepOffTarget(serverLevel, candidates, feet, directionTarget);
-            if (selected != null) {
-                return selected;
-            }
-            selected = this.selectStepOffTarget(serverLevel, relaxedCandidates, feet, directionTarget);
-            if (selected != null) {
-                return selected;
-            }
-        }
-        return this.findOpenPushTarget(serverLevel, feet, directionTarget);
+        this.searchFeetPos = feet.immutable();
+        this.searchDirectionTarget = directionTarget == null ? null : directionTarget.immutable();
+        this.searchAvoidedStand = avoidedStand == null ? pos -> false : avoidedStand;
+        this.searchRelaxedTarget = null;
+        this.searchColumnCursor = 0;
     }
 
-    private BlockPos selectStepOffTarget(ServerLevel serverLevel, List<BlockPos> candidates, BlockPos feet, BlockPos directionTarget) {
+    private boolean tickStepOffSearch(ServerLevel serverLevel, String detailPrefix) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.searchFeetPos == null || !feet.equals(this.searchFeetPos) || !this.playerNpc.onGround()) {
+            this.clearStepOffSearch();
+            return false;
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+            this.detail = detailPrefix + " path fallback queued for shared search slice";
+            return true;
+        }
+
+        int end = Math.min(
+                STEP_OFF_COLUMN_OFFSETS.size(),
+                this.searchColumnCursor + MAX_SEARCH_COLUMNS_PER_TICK
+        );
+        for (; this.searchColumnCursor < end; this.searchColumnCursor++) {
+            BlockPos offset = STEP_OFF_COLUMN_OFFSETS.get(this.searchColumnCursor);
+            int x = feet.getX() + offset.getX();
+            int z = feet.getZ() + offset.getZ();
+            BlockPos loadedColumn = new BlockPos(x, feet.getY(), z);
+            if (!serverLevel.hasChunkAt(loadedColumn)) {
+                continue;
+            }
+            int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+            int fall = feet.getY() - y;
+            if (fall < 0 || fall > DEFAULT_MAX_FALL) {
+                continue;
+            }
+
+            BlockPos candidate = new BlockPos(x, y, z);
+            if (!PathNavigationAi.canStandAt(serverLevel, candidate)
+                    || !this.canStepOffToward(serverLevel, feet, candidate)) {
+                continue;
+            }
+            if (this.searchAvoidedStand.test(candidate)) {
+                if (this.searchRelaxedTarget == null
+                        || this.stepOffScore(serverLevel, feet, this.searchDirectionTarget, candidate)
+                        < this.stepOffScore(serverLevel, feet, this.searchDirectionTarget, this.searchRelaxedTarget)) {
+                    this.searchRelaxedTarget = candidate.immutable();
+                }
+                continue;
+            }
+            this.startStepOff(feet, candidate, detailPrefix);
+            return true;
+        }
+
+        if (this.searchColumnCursor < STEP_OFF_COLUMN_OFFSETS.size()) {
+            this.detail = detailPrefix + " path fallback scanning "
+                    + this.searchColumnCursor + "/" + STEP_OFF_COLUMN_OFFSETS.size();
+            return true;
+        }
+
+        BlockPos selected = this.searchRelaxedTarget != null
+                ? this.searchRelaxedTarget.immutable()
+                : this.findOpenPushTarget(serverLevel, feet, this.searchDirectionTarget);
+        this.clearStepOffSearch();
+        if (selected == null) {
+            this.detail = detailPrefix + " path fallback blocked: no step off @ " + posText(feet);
+            this.watchStartTick = this.playerNpc.tickCount;
+            this.recheckTicks = DEFAULT_RECHECK_TICKS;
+            return false;
+        }
+        this.startStepOff(feet, selected, detailPrefix);
+        return true;
+    }
+
+    private void startStepOff(BlockPos feet, BlockPos target, String detailPrefix) {
+        this.clearStepOffSearch();
+        this.stepOffStartPos = feet.immutable();
+        this.stepOffTargetPos = target.immutable();
+        this.stepOffTicks = DEFAULT_ACTIVE_TICKS;
+        this.playerNpc.getNavigation().stop();
+        this.forceHorizontalStepOff(detailPrefix);
+    }
+
+    private void clearStepOffSearch() {
+        this.searchFeetPos = null;
+        this.searchDirectionTarget = null;
+        this.searchAvoidedStand = null;
+        this.searchRelaxedTarget = null;
+        this.searchColumnCursor = 0;
+    }
+
+    private static List<BlockPos> createStepOffColumnOffsets() {
+        List<BlockPos> offsets = new ArrayList<>();
+        int radiusSqr = DEFAULT_SEARCH_RADIUS * DEFAULT_SEARCH_RADIUS;
+        for (int dx = -DEFAULT_SEARCH_RADIUS; dx <= DEFAULT_SEARCH_RADIUS; dx++) {
+            for (int dz = -DEFAULT_SEARCH_RADIUS; dz <= DEFAULT_SEARCH_RADIUS; dz++) {
+                if ((dx == 0 && dz == 0) || dx * dx + dz * dz > radiusSqr) {
+                    continue;
+                }
+                offsets.add(new BlockPos(dx, 0, dz));
+            }
+        }
+        offsets.sort(Comparator
+                .comparingInt((BlockPos pos) -> pos.getX() * pos.getX() + pos.getZ() * pos.getZ())
+                .thenComparingInt(pos -> Math.max(Math.abs(pos.getX()), Math.abs(pos.getZ())))
+                .thenComparingInt(BlockPos::getX)
+                .thenComparingInt(BlockPos::getZ));
+        return List.copyOf(offsets);
+    }
+
+    private BlockPos findValidatedNearbyTarget(
+            ServerLevel serverLevel,
+            BlockPos feet,
+            BlockPos directionTarget,
+            Predicate<BlockPos> rejectedStand,
+            int maxSafeFall,
+            boolean includeLeafCanopySurfaces
+    ) {
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+
+                int x = feet.getX() + dx;
+                int z = feet.getZ() + dz;
+                BlockPos loadedColumn = new BlockPos(x, feet.getY(), z);
+                if (!serverLevel.hasChunkAt(loadedColumn)) {
+                    continue;
+                }
+                int y = serverLevel.getHeight(
+                        includeLeafCanopySurfaces
+                                ? Heightmap.Types.MOTION_BLOCKING
+                                : Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                        x,
+                        z
+                );
+                int fall = feet.getY() - y;
+                if (fall < 0 || fall > maxSafeFall) {
+                    continue;
+                }
+
+                BlockPos candidate = new BlockPos(x, y, z);
+                boolean validStand = includeLeafCanopySurfaces
+                        ? canStandOnGroundOrLeaves(serverLevel, candidate)
+                        : PathNavigationAi.canStandAt(serverLevel, candidate);
+                if (!validStand
+                        || !this.canStepOffToward(serverLevel, feet, candidate)
+                        || rejectedStand.test(candidate)) {
+                    continue;
+                }
+                candidates.add(candidate.immutable());
+            }
+        }
+
         candidates.sort(Comparator
                 .comparingDouble((BlockPos pos) -> this.stepOffScore(serverLevel, feet, directionTarget, pos))
                 .thenComparingDouble(pos -> horizontalDistanceSqr(feet, pos))
                 .thenComparingInt(pos -> Math.abs(feet.getY() - pos.getY())));
         return candidates.isEmpty() ? null : candidates.get(0).immutable();
+    }
+
+    private static boolean canStandOnGroundOrLeaves(ServerLevel serverLevel, BlockPos pos) {
+        if (!serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.hasChunkAt(pos)) {
+            return false;
+        }
+        BlockState support = serverLevel.getBlockState(pos.below());
+        return serverLevel.getBlockState(pos).getCollisionShape(serverLevel, pos).isEmpty()
+                && serverLevel.getBlockState(pos.above()).getCollisionShape(serverLevel, pos.above()).isEmpty()
+                && (support.isSolidRender(serverLevel, pos.below()) || support.is(BlockTags.LEAVES))
+                && !support.getCollisionShape(serverLevel, pos.below()).isEmpty()
+                && serverLevel.getFluidState(pos).isEmpty()
+                && serverLevel.getFluidState(pos.above()).isEmpty();
     }
 
     private double stepOffScore(ServerLevel serverLevel, BlockPos feet, BlockPos directionTarget, BlockPos candidate) {

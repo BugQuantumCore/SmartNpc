@@ -89,6 +89,8 @@ public final class PlayerNpcInspectorData {
         }
         text.append("Holders ").append(holders.size())
                 .append(" | active ").append(snapshot.activeWorkerCount())
+                .append(" | running ").append(snapshot.runningWorkerCount())
+                .append(" | idle ").append(snapshot.idleWorkerCount())
                 .append(" | waiting ").append(snapshot.waitingNpcCount())
                 .append(" | limit ").append(snapshot.effectiveWorkerLimit());
         String automaticWorkerStatus = PlayerNpcAiWorkBudget.automaticWorkerLimitStatus(server);

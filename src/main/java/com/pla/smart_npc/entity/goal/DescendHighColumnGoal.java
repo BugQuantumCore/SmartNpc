@@ -6,6 +6,7 @@ import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
 import net.minecraft.core.BlockPos;
@@ -29,6 +30,7 @@ public class DescendHighColumnGoal extends Goal {
     private static final int LOWER_TERRAIN_RADIUS = 6;
     private static final int MIN_COLUMN_DROP_BLOCKS = 3;
     private static final int MAX_SOLID_SIDE_SUPPORTS = 1;
+    private static final int MIN_ENCLOSED_BODY_SIDES = 2;
     private static final int LOWER_TERRAIN_COLUMNS_PER_PASS = 4;
     private static final List<BlockPos> LOWER_TERRAIN_OFFSETS = createLowerTerrainOffsets();
 
@@ -41,8 +43,10 @@ public class DescendHighColumnGoal extends Goal {
     private int goalTicks;
     private int descentSteps;
     private boolean finished;
+    private boolean floorTargetOwnedTemporary;
     private int lowerTerrainColumnCursor;
     private BlockPos lowerTerrainSearchOrigin;
+    private boolean workerSlotPaused;
 
     public DescendHighColumnGoal(PlayerNpcEntity playerNpc, TerraformBuildSiteGoal terraformBuildSiteGoal) {
         this.playerNpc = playerNpc;
@@ -55,6 +59,7 @@ public class DescendHighColumnGoal extends Goal {
     @Override
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
@@ -74,6 +79,7 @@ public class DescendHighColumnGoal extends Goal {
         long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
         try {
             this.floorTarget = this.findDescendFloor(serverLevel);
+            this.workerSlotPaused = false;
             return this.floorTarget != null;
         } finally {
             PlayerNpcPerformanceMonitor.recordGoalWork(
@@ -86,6 +92,10 @@ public class DescendHighColumnGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            return false;
+        }
         return !this.finished
                 && this.goalTicks < MAX_GOAL_TICKS
                 && this.descentSteps < MAX_DESCENT_STEPS
@@ -101,6 +111,12 @@ public class DescendHighColumnGoal extends Goal {
 
     @Override
     public void start() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            this.playerNpc.getNavigation().stop();
+            return;
+        }
+        this.workerSlotPaused = false;
         this.goalTicks = 0;
         this.descentSteps = 0;
         this.finished = false;
@@ -111,6 +127,11 @@ public class DescendHighColumnGoal extends Goal {
 
     @Override
     public void tick() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.workerSlotPaused = true;
+            this.pauseForWorkerSlotLoss();
+            return;
+        }
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             this.finished = true;
             return;
@@ -123,6 +144,21 @@ public class DescendHighColumnGoal extends Goal {
             return;
         }
 
+        BlockPos feet = this.playerNpc.blockPosition();
+        if (this.isInsideEnclosedBodyColumn(serverLevel, feet)) {
+            this.deferDescentInsideHole(feet);
+            this.finished = true;
+            return;
+        }
+
+        if (this.floorTarget != null
+                && this.floorTargetOwnedTemporary
+                && !this.playerNpc.isTemporaryPillarSupport(this.floorTarget)) {
+            // Ownership disappeared or the tracked block changed after admission. Never reinterpret
+            // that stale target as an ordinary natural column during the same descent episode.
+            this.finished = true;
+            return;
+        }
         if (this.floorTarget == null || !this.canBreakColumnBlock(serverLevel, this.floorTarget, serverLevel.getBlockState(this.floorTarget))) {
             this.floorTarget = this.findDescendFloor(serverLevel);
             if (this.floorTarget == null) {
@@ -143,9 +179,11 @@ public class DescendHighColumnGoal extends Goal {
             return;
         }
         if (result == BreakingBlockAi.TickResult.DONE) {
+            this.playerNpc.forgetTemporaryPillarSupport(this.floorTarget);
             this.descentSteps++;
             this.playerNpc.fallDistance = 0.0F;
             this.floorTarget = null;
+            this.floorTargetOwnedTemporary = false;
             this.updateDetail();
             return;
         }
@@ -155,14 +193,30 @@ public class DescendHighColumnGoal extends Goal {
 
     @Override
     public void stop() {
+        if (this.workerSlotPaused || !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+            this.pauseForWorkerSlotLoss();
+            return;
+        }
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
         this.floorTarget = null;
+        this.floorTargetOwnedTemporary = false;
         this.goalTicks = 0;
         this.descentSteps = 0;
         this.finished = false;
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
+    }
+
+    private void pauseForWorkerSlotLoss() {
+        this.playerNpc.getNavigation().stop();
+        this.breakingBlockAi.stop();
+        this.toolAi.restoreMainHand();
+        this.workerSlotPaused = true;
+        this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+        this.playerNpc.setCurrentAiDetail("");
+        // Keep floorTarget and the entity's persisted ownership ledger. Admission revalidates the
+        // exact block after this NPC earns a later worker slot.
     }
 
     private boolean shouldRunForCurrentState() {
@@ -179,26 +233,66 @@ public class DescendHighColumnGoal extends Goal {
     }
 
     private BlockPos findDescendFloor(ServerLevel serverLevel) {
+        this.floorTargetOwnedTemporary = false;
         if (!this.playerNpc.onGround()) {
             return null;
         }
 
         BlockPos feet = this.playerNpc.blockPosition();
+        if (this.isInsideEnclosedBodyColumn(serverLevel, feet)) {
+            this.deferDescentInsideHole(feet);
+            return null;
+        }
         BlockPos floor = feet.below();
         BlockState floorState = serverLevel.getBlockState(floor);
-        if (this.playerNpc.isTemporaryPillarSupport(floor)
-                || !this.canBreakColumnBlock(serverLevel, floor, floorState)
-                || !serverLevel.getBlockState(floor.below()).isSolidRender(serverLevel, floor.below())
-                || !this.isNarrowColumnTop(serverLevel, floor)
+        boolean ownedTemporarySupport = this.playerNpc.isTemporaryPillarSupport(floor);
+        if (!this.canBreakColumnBlock(serverLevel, floor, floorState)
+                || !serverLevel.getBlockState(floor.below()).isSolidRender(serverLevel, floor.below())) {
+            return null;
+        }
+        if (ownedTemporarySupport) {
+            // Stacked owned supports remain a valid interrupted-pillar descent. At the final
+            // support, however, prove that the landing cell has an ordinary same-level exterior
+            // exit. Merely finding a walkable cell beside the lower landing is insufficient: an
+            // irregular pocket inside the same shaft passes that test, then EscapeHole immediately
+            // replaces the removed dirt and produces an endless descend/pillar cooldown cycle.
+            boolean continuesOwnedColumn = this.playerNpc.isTemporaryPillarSupport(floor.below());
+            if (!continuesOwnedColumn && !this.hasSafeSurfaceExitAfterLanding(serverLevel, floor)) {
+                this.playerNpc.setIdleTraceDetail(
+                        "pillar descent deferred: final support still covers enclosed hole @ "
+                                + floor.getX() + " " + floor.getY() + " " + floor.getZ(),
+                        30
+                );
+                return null;
+            }
+            this.floorTargetOwnedTemporary = true;
+            return floor.immutable();
+        }
+
+        if (!this.isNarrowColumnTop(serverLevel, floor)
                 || !this.hasLowerWalkableTerrainNearby(serverLevel, feet)) {
             return null;
         }
         return floor.immutable();
     }
 
+    private boolean hasSafeSurfaceExitAfterLanding(ServerLevel serverLevel, BlockPos landingFeet) {
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos stepOff = landingFeet.relative(direction);
+            if (serverLevel.hasChunkAt(stepOff)
+                    && PathNavigationAi.canStandAt(serverLevel, stepOff)
+                    && serverLevel.getFluidState(stepOff).isEmpty()
+                    && serverLevel.getFluidState(stepOff.above()).isEmpty()
+                    && serverLevel.canSeeSky(stepOff.above())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private boolean canBreakColumnBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        // Completed pillar supports stay remembered for placement safety, but this goal only starts
-        // after the upward request and escape cooldown end and its narrow-column checks pass.
+        // Completed pillar supports stay remembered for placement safety. Admission separately
+        // requires either conservative natural-column evidence or an owned-support landing exit.
         return pos != null
                 && serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
@@ -224,6 +318,41 @@ public class DescendHighColumnGoal extends Goal {
             }
         }
         return solidSides <= MAX_SOLID_SIDE_SUPPORTS;
+    }
+
+    /**
+     * A descent support may look like an isolated pillar at its own Y level while the NPC's body
+     * is still surrounded by the higher rim of a 1x1, 1x2, or 2x2 shaft. In that situation,
+     * breaking downward only deepens the hole and can undo blocks just placed by hole escape.
+     */
+    private boolean isInsideEnclosedBodyColumn(ServerLevel serverLevel, BlockPos feet) {
+        int enclosedSides = 0;
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos side = feet.relative(direction);
+            if (!serverLevel.hasChunkAt(side)) {
+                return true;
+            }
+            if (hasBlockingCollision(serverLevel, side)
+                    || hasBlockingCollision(serverLevel, side.above())) {
+                enclosedSides++;
+                if (enclosedSides >= MIN_ENCLOSED_BODY_SIDES) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasBlockingCollision(ServerLevel serverLevel, BlockPos pos) {
+        return !serverLevel.getBlockState(pos).getCollisionShape(serverLevel, pos).isEmpty();
+    }
+
+    private void deferDescentInsideHole(BlockPos feet) {
+        this.playerNpc.setIdleTraceDetail(
+                "pillar descent deferred: NPC is inside an enclosed hole @ "
+                        + feet.getX() + " " + feet.getY() + " " + feet.getZ(),
+                40
+        );
     }
 
     private boolean hasLowerWalkableTerrainNearby(ServerLevel serverLevel, BlockPos feet) {

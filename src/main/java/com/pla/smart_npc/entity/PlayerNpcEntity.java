@@ -22,6 +22,7 @@ import com.pla.smart_npc.entity.goal.CautiousAvoidThreatGoal;
 import com.pla.smart_npc.entity.goal.CheckHomeSuppliesGoal;
 import com.pla.smart_npc.entity.goal.CombatFishingRodGoal;
 import com.pla.smart_npc.entity.goal.CookFoodGoal;
+import com.pla.smart_npc.entity.goal.CleanupTemporaryPillarGoal;
 import com.pla.smart_npc.entity.goal.CraftBasicGearGoal;
 import com.pla.smart_npc.entity.goal.CraftCropFoodGoal;
 import com.pla.smart_npc.entity.goal.CraftIronGearGoal;
@@ -78,6 +79,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Vec3i;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.Packet;
@@ -113,9 +115,11 @@ import net.minecraft.world.item.*;
 import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ServerLevelAccessor;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkHooks;
@@ -128,12 +132,14 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -154,6 +160,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int STARTUP_IDLE_WAKE_TICKS = 20 * 4;
     private static final int TASKLESS_IDLE_WAKE_TICKS = 20;
     private static final int TEMPORARY_PILLAR_SUPPORT_MEMORY_TICKS = 20 * 45;
+    private static final int MAX_TRACKED_TEMPORARY_PILLAR_SUPPORTS = 128;
+    private static final String TEMPORARY_PILLAR_SUPPORTS_TAG = "TemporaryPillarSupports";
     private static final int EXPLORATION_CLIMB_STUCK_TICKS = 20 * 5;
     private static final int EXPLORATION_CLIMB_SAFE_STAND_MIN_RADIUS = 4;
     private static final int EXPLORATION_CLIMB_SAFE_STAND_MAX_RADIUS = 5;
@@ -174,6 +182,24 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int IDLE_RESOURCE_CLEAR_TICKS = 24;
     private static final double IDLE_RESOURCE_CLEAR_DISTANCE_SQR = 4.5D * 4.5D;
     private static final int IDLE_RESOURCE_CLEAR_RANDOM_POOL = 8;
+    private static final int IDLE_RESOURCE_ELIGIBILITY_CHECK_INTERVAL_TICKS = 20;
+    private static final int IDLE_RESOURCE_SURFACE_COLUMNS_PER_SLICE = 2;
+    private static final int HIGH_IDLE_DESCENT_TRIGGER_TICKS = 20 * 8;
+    private static final int HIGH_IDLE_DESCENT_RECHECK_TICKS = 20 * 2;
+    private static final int HIGH_IDLE_DESCENT_RADIUS = 6;
+    private static final int HIGH_IDLE_DESCENT_MIN_HEIGHT = 4;
+    private static final int HIGH_IDLE_DESCENT_MAX_SAFE_DROP = 3;
+    private static final int HIGH_IDLE_DESCENT_PATH_CHECKS = 8;
+    private static final int HIGH_IDLE_DESCENT_COLUMNS_PER_SLICE = 2;
+    private static final int HIGH_IDLE_DESCENT_PATH_CHECKS_PER_SLICE = 1;
+    private static final float HIGH_IDLE_DESCENT_PATH_MULTIPLIER = 0.05F;
+    private static final List<BlockPos> HIGH_IDLE_DESCENT_COLUMN_OFFSETS = createHighIdleDescentColumnOffsets();
+    private static final List<BlockPos> HIGH_IDLE_DESCENT_EVIDENCE_OFFSETS = List.of(
+            new BlockPos(3, 0, 0), new BlockPos(-3, 0, 0),
+            new BlockPos(0, 0, 3), new BlockPos(0, 0, -3),
+            new BlockPos(6, 0, 0), new BlockPos(-6, 0, 0),
+            new BlockPos(0, 0, 6), new BlockPos(0, 0, -6)
+    );
     private static final Vec3i ITEM_PICKUP_REACH = new Vec3i(1, 1, 1);
     private static final double EXPERIENCE_PICKUP_RADIUS = 3.0D;
     private static final long DAY_LENGTH_TICKS = 24000L;
@@ -206,6 +232,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             Items.COBBLESTONE,
             Items.MOSSY_COBBLESTONE,
             Items.DIRT,
+            Items.OAK_LOG,
+            Items.BIRCH_LOG,
+            Items.SPRUCE_LOG,
             Items.OAK_PLANKS,
             Items.DARK_OAK_PLANKS,
             Items.STONE,
@@ -298,6 +327,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int upwardEscapeMaxPillarBlocks = 0;
     private boolean forcedUpwardEscape = false;
     private boolean explorationUpwardEscape = false;
+    private boolean craftingUpwardEscape = false;
+    private boolean terraformSupportUpwardEscape = false;
     @Nullable
     private BlockPos explorationClimbWatchPos;
     @Nullable
@@ -322,7 +353,24 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private BlockPos idleResourceSurfaceSearchOrigin;
     @Nullable
     private BlockPos cachedIdleResourceSurfaceEscapeTarget;
+    private final List<BlockPos> idleResourceSurfaceCandidates = new ArrayList<>();
+    private final List<BlockPos> idleResourceRelaxedSurfaceCandidates = new ArrayList<>();
+    private int idleResourceSurfaceSearchCursor = 0;
+    private boolean idleResourceSurfaceSearchPending = false;
     private int nextIdleResourceSurfaceSearchTick = 0;
+    private int nextIdleResourceEligibilityCheckTick = 0;
+    private boolean idleResourceEligibilityCached = false;
+    private final PathNavigationAi highIdleDescentNavigationAi = new PathNavigationAi(this);
+    private final PathStuckFallbackAi highIdleDescentFallbackAi = new PathStuckFallbackAi(this);
+    @Nullable
+    private BlockPos highIdleDescentNavigationTarget;
+    @Nullable
+    private BlockPos highIdleDescentSearchOrigin;
+    private final List<BlockPos> highIdleDescentCandidates = new ArrayList<>();
+    private int highIdleDescentTicks = 0;
+    private int highIdleDescentColumnCursor = 0;
+    private int highIdleDescentPathCursor = 0;
+    private int nextHighIdleDescentAttemptTick = 0;
     private double placeBlockToParryChance;
     private int placeBlockParryCooldown = 0;
     private int stunEscapeCooldown = 0;
@@ -340,7 +388,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     @Nullable
     private BlockPos animalLootPriorityPos;
     private int storedExperience = 0;
-    private final Map<BlockPos, Integer> temporaryPillarSupportTicks = new HashMap<>();
+    /**
+     * Exact positions and block identities placed by this NPC for temporary vertical support.
+     * This evidence is persisted and is the only authority used by automatic cleanup; terrain
+     * that merely resembles a pillar is never inferred to be NPC-owned.
+     */
+    private final Map<BlockPos, Block> temporaryPillarSupports = new HashMap<>();
+    /** Source proof for the subset placed by GatherLogs' dedicated PillarUpAi instance. */
+    private final Set<BlockPos> gatherLogsTemporaryPillarSupports = new HashSet<>();
 
     public int getPlayingIdleCooldown() {
         return playingIdleCooldown;
@@ -544,6 +599,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.upwardEscapeMaxPillarBlocks = Math.max(0, maxPillarBlocks);
         this.forcedUpwardEscape = false;
         this.explorationUpwardEscape = false;
+        this.craftingUpwardEscape = false;
+        this.terraformSupportUpwardEscape = false;
         this.resetExplorationClimbFallback();
         this.holeEscapeCooldown = 0;
     }
@@ -572,6 +629,28 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return this.getUpwardEscapeTarget() != null && this.forcedUpwardEscape;
     }
 
+    public void requestCraftingUpwardEscapeTo(@Nullable BlockPos target, int ticks, int maxPillarBlocks) {
+        this.requestForcedUpwardEscapeTo(target, ticks, maxPillarBlocks);
+        if (target != null && ticks > 0) {
+            this.craftingUpwardEscape = true;
+        }
+    }
+
+    public boolean isCraftingUpwardEscapeRequested() {
+        return this.getUpwardEscapeTarget() != null && this.craftingUpwardEscape;
+    }
+
+    public void requestTerraformSupportUpwardEscapeTo(@Nullable BlockPos target, int ticks, int maxPillarBlocks) {
+        this.requestForcedUpwardEscapeTo(target, ticks, maxPillarBlocks);
+        if (target != null && ticks > 0) {
+            this.terraformSupportUpwardEscape = true;
+        }
+    }
+
+    public boolean isTerraformSupportUpwardEscapeRequested() {
+        return this.getUpwardEscapeTarget() != null && this.terraformSupportUpwardEscape;
+    }
+
     public int getUpwardEscapeMaxPillarBlocks() {
         return this.getUpwardEscapeTarget() == null ? 0 : this.upwardEscapeMaxPillarBlocks;
     }
@@ -586,6 +665,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.upwardEscapeMaxPillarBlocks = 0;
         this.forcedUpwardEscape = false;
         this.explorationUpwardEscape = false;
+        this.craftingUpwardEscape = false;
+        this.terraformSupportUpwardEscape = false;
         this.resetExplorationClimbFallback();
     }
 
@@ -790,14 +871,83 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return;
         }
         BlockPos key = pos.immutable();
-        this.temporaryPillarSupportTicks.put(
-                key,
-                Math.max(this.temporaryPillarSupportTicks.getOrDefault(key, 0), normalizeCooldown(ticks))
-        );
+        Block placedBlock = this.level().getBlockState(key).getBlock();
+        if (placedBlock == Blocks.AIR) {
+            return;
+        }
+        this.temporaryPillarSupports.put(key, placedBlock);
+        // Generic callers (escape, exploration, pickup and terraform) are not eligible for the
+        // scheduled GatherLogs cleanup even when they happen to place the same material/shape.
+        this.gatherLogsTemporaryPillarSupports.remove(key);
+        while (this.temporaryPillarSupports.size() > MAX_TRACKED_TEMPORARY_PILLAR_SUPPORTS) {
+            Iterator<BlockPos> iterator = this.temporaryPillarSupports.keySet().iterator();
+            if (!iterator.hasNext()) {
+                break;
+            }
+            BlockPos evicted = iterator.next();
+            iterator.remove();
+            this.gatherLogsTemporaryPillarSupports.remove(evicted);
+        }
+    }
+
+    public void markGatherLogsTemporaryPillarSupport(@Nullable BlockPos pos) {
+        this.markTemporaryPillarSupport(pos, TEMPORARY_PILLAR_SUPPORT_MEMORY_TICKS);
+        if (pos != null && this.temporaryPillarSupports.containsKey(pos)) {
+            this.gatherLogsTemporaryPillarSupports.add(pos.immutable());
+        }
     }
 
     public boolean isTemporaryPillarSupport(@Nullable BlockPos pos) {
-        return pos != null && this.temporaryPillarSupportTicks.containsKey(pos.immutable());
+        if (pos == null) {
+            return false;
+        }
+        BlockPos key = pos.immutable();
+        Block expectedBlock = this.temporaryPillarSupports.get(key);
+        if (expectedBlock == null) {
+            return false;
+        }
+        if (this.level() instanceof ServerLevel serverLevel && serverLevel.hasChunkAt(key)) {
+            BlockState state = serverLevel.getBlockState(key);
+            if (state.getBlock() != expectedBlock
+                    || state.isAir()
+                    || state.getCollisionShape(serverLevel, key).isEmpty()) {
+                // A removed/replaced support invalidates ownership immediately. Goals must not
+                // act on a stale ledger entry during the ticks before the periodic cleanup pass.
+                this.temporaryPillarSupports.remove(key);
+                this.gatherLogsTemporaryPillarSupports.remove(key);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Source-aware ownership proof for the visible GatherLogs pillar-cleanup goal. Missing source
+     * metadata is deliberately treated as ineligible, even if generic ownership still exists.
+     */
+    public boolean isGatherLogsTemporaryPillarSupport(@Nullable BlockPos pos) {
+        if (pos == null || !this.gatherLogsTemporaryPillarSupports.contains(pos)) {
+            return false;
+        }
+        if (!this.isTemporaryPillarSupport(pos)) {
+            this.gatherLogsTemporaryPillarSupports.remove(pos.immutable());
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Bounded candidate snapshot; callers must revalidate source and exact identity immediately
+     * before breaking because a snapshot itself is never permission to alter the world.
+     */
+    public List<BlockPos> getGatherLogsTemporaryPillarSupportsSnapshot() {
+        if (this.gatherLogsTemporaryPillarSupports.isEmpty()) {
+            return List.of();
+        }
+        return this.gatherLogsTemporaryPillarSupports.stream()
+                .limit(MAX_TRACKED_TEMPORARY_PILLAR_SUPPORTS)
+                .map(BlockPos::immutable)
+                .toList();
     }
 
     public void setBiomeExploreCooldown(int ticks) {
@@ -1390,6 +1540,23 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             tag.putInt("OwnedChestY", this.ownedChestPos.getY());
             tag.putInt("OwnedChestZ", this.ownedChestPos.getZ());
         }
+        ListTag temporarySupports = new ListTag();
+        for (Map.Entry<BlockPos, Block> entry : this.temporaryPillarSupports.entrySet()) {
+            ResourceLocation blockId = ForgeRegistries.BLOCKS.getKey(entry.getValue());
+            if (blockId == null || entry.getValue() == Blocks.AIR) {
+                continue;
+            }
+            CompoundTag supportTag = new CompoundTag();
+            supportTag.putLong("Pos", entry.getKey().asLong());
+            supportTag.putString("Block", blockId.toString());
+            if (this.gatherLogsTemporaryPillarSupports.contains(entry.getKey())) {
+                supportTag.putString("Source", "GATHER_LOGS");
+            }
+            temporarySupports.add(supportTag);
+        }
+        if (!temporarySupports.isEmpty()) {
+            tag.put(TEMPORARY_PILLAR_SUPPORTS_TAG, temporarySupports);
+        }
         PlayerNpcHomeUtil.saveHomeToTag(this, tag);
         tag.putBoolean("MainWeaponDisarmed", this.mainWeaponDisarmed);
     }
@@ -1461,6 +1628,24 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.selectedDailyJobDay = tag.getLong("SelectedDailyJobDay");
         }
         this.selectedDailyJobInterest = parseSavedDailyJobInterest(tag.getString("SelectedDailyJobInterest")).orElse(null);
+        this.temporaryPillarSupports.clear();
+        this.gatherLogsTemporaryPillarSupports.clear();
+        if (tag.contains(TEMPORARY_PILLAR_SUPPORTS_TAG, Tag.TAG_LIST)) {
+            ListTag temporarySupports = tag.getList(TEMPORARY_PILLAR_SUPPORTS_TAG, Tag.TAG_COMPOUND);
+            int supportCount = Math.min(temporarySupports.size(), MAX_TRACKED_TEMPORARY_PILLAR_SUPPORTS);
+            for (int index = 0; index < supportCount; index++) {
+                CompoundTag supportTag = temporarySupports.getCompound(index);
+                ResourceLocation blockId = ResourceLocation.tryParse(supportTag.getString("Block"));
+                Block block = blockId == null ? null : ForgeRegistries.BLOCKS.getValue(blockId);
+                if (block != null && block != Blocks.AIR) {
+                    BlockPos supportPos = BlockPos.of(supportTag.getLong("Pos")).immutable();
+                    this.temporaryPillarSupports.put(supportPos, block);
+                    if ("GATHER_LOGS".equals(supportTag.getString("Source"))) {
+                        this.gatherLogsTemporaryPillarSupports.add(supportPos);
+                    }
+                }
+            }
+        }
         this.useBow = tag.getBoolean("UseBow");
         if (tag.contains("BlockProjectileChance", Tag.TAG_DOUBLE)) {
             this.placeBlockToParryChance = tag.getDouble("BlockProjectileChance");
@@ -1628,6 +1813,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.addWorkGoal(5, this.gated(terraformBuildSiteGoal, PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new MeleeAttackGoal(this, 1.0D, true));
         this.addWorkGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
+        this.addWorkGoal(4, new ManageHomeBaseGoal(this, true));
         this.addWorkGoal(4, new MiningNightCampGoal(this, 1.0D));
         this.addWorkGoal(5, new CookFoodGoal(this));
         this.addWorkGoal(5, this.gated(new FarmSetupGoal(this), PlayerNpcInterest.FARMING));
@@ -1665,11 +1851,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 level -> GatherLogsGoal.hasLogSupplyDemand(this, level)
                         && !TerraformBuildSiteGoal.hasActionablePrepWork(this, level)
                         && !GatherStoneGoal.isStoneSupplyPhaseActive(this, level)
+                        && !BuildHouseGoal.shouldYieldSupplyWorkForBuild(this, level)
                         && !FarmCropGoal.shouldExploreForFarmSupplies(this, level)
                         && this.canExploreForLogSupply(level)
                         && !this.shouldStayHomeForWeather(level)
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
-                gatherLogsGoal::hasNearbyUsableLogTarget,
+                // GatherLogs has higher priority and remains the authority for local tree work.
+                // This signal reads only its retained bounded-search/selected-target state; it does
+                // not run the old independent broad proxy that could cancel exploration without a
+                // successor. Pending slices resolve into GatherLogs or release exploration.
+                level -> BuildHouseGoal.shouldYieldSupplyWorkForBuild(this, level)
+                        || gatherLogsGoal.hasNearbyUsableLogTarget(level),
                 true,
                 true,
                 true
@@ -1779,6 +1971,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 true,
                 false
         ), PlayerNpcInterest.HUNT_MONSTERS));
+        // Once visible cleanup has selected an abandoned GatherLogs column, it must finish before
+        // priority-6 log gathering can start the next tree route. Higher-priority 1-4 safety,
+        // item, and return work still pre-empts it; equal-priority 5 work is not displaced.
+        this.addWorkGoal(5, new CleanupTemporaryPillarGoal(this, 1.0D));
         this.goalSelector.addGoal(9, new AiBudgetWaitingStrollGoal(this, 0.55D));
         this.addWorkGoal(4, this.gated(new BeingAtHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
@@ -1786,7 +1982,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         ((GroundPathNavigation) this.getNavigation()).setCanFloat(true);
         this.targetSelector.addGoal(1, new HurtByTargetGoal(this));
         this.targetSelector.addGoal(2, new RetargetCloserThreatGoal(this));
-        this.targetSelector.addGoal(3, new RespondToNpcAlertGoal(this));
+        // Alert avoidance owns MOVE/LOOK, so it belongs in the movement selector. Registering it
+        // in targetSelector let the interrupted ExploreAround goal keep ticking and repeatedly
+        // replace the escape route. Besides defeating the alert response, those competing
+        // synchronous paths were charged only to Mob.super.tick() and produced the 291 ms
+        // avoiding_alert spike seen in the TPS trace.
+        this.goalSelector.addGoal(1, new RespondToNpcAlertGoal(this));
         this.targetSelector.addGoal(4, this.gated(new PlayerNpcSmartTargetGoal(this), PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
     }
 
@@ -1811,6 +2012,15 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return true;
         }
         if (this.isDailyJobActive(PlayerNpcInterest.EXPLORING)) {
+            return true;
+        }
+        // A fisher without a rod can already have the starter string but still needs wood for
+        // sticks (and, when no table is available, the crafting table).  Treat that bootstrap
+        // supply route like the mining/exploring routes above.  Otherwise any roof or cave mouth
+        // makes this predicate false after GatherLogs finishes its bounded local pass, leaving
+        // the admitted fisher idle forever instead of roaming to a tree.  The priority-1 hole
+        // escape goal still pre-empts this lower-priority exploration when the NPC is trapped.
+        if (this.isDailyJobActive(PlayerNpcInterest.FISHING)) {
             return true;
         }
         if (this.hasInterest(PlayerNpcInterest.BUILDING) && this.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
@@ -1884,6 +2094,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public void shortPillarJump() {
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this)) return;
         if (!this.onGround()) return;
         Vec3 v = this.getDeltaMovement();
         double keepH = 0.02D;
@@ -2529,6 +2740,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.cleanupStaleCombatState();
         this.tickTasklessActivityWatchdog();
         this.tickExplorationClimbFallback(serverLevel);
+        this.tickHighIdleDescentRecovery(serverLevel);
         this.tickIdleResourceStuckFallback(serverLevel);
 
         // Contact pickup must not depend on routine-worker ownership or a global admission slot:
@@ -2572,7 +2784,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.farmCooldown = tickCooldown(this.farmCooldown);
         this.gatherCooldown = tickCooldown(this.gatherCooldown);
         this.stoneAccessClearCooldown = tickCooldown(this.stoneAccessClearCooldown);
-        this.tickTemporaryPillarSupports();
         this.biomeExploreCooldown = tickCooldown(this.biomeExploreCooldown);
         this.huntSheepCooldown = tickCooldown(this.huntSheepCooldown);
         this.ironGolemTrollCooldown = tickCooldown(this.ironGolemTrollCooldown);
@@ -2605,7 +2816,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (this.idleTraceDetailTicks <= 0) {
             this.idleTraceDetail = "";
         }
-        this.upwardEscapeRequestTicks = tickCooldown(this.upwardEscapeRequestTicks);
+        if (this.upwardEscapeRequestTicks > 0
+                && (this.upwardEscapeTarget == null || PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this))) {
+            this.upwardEscapeRequestTicks = tickCooldown(this.upwardEscapeRequestTicks);
+        }
         BlockPos feet = this.blockPosition();
         boolean wetForLandEscape = this.isInWaterOrBubble()
                 || this.level().getFluidState(feet).is(FluidTags.WATER)
@@ -2628,6 +2842,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.upwardEscapeMaxPillarBlocks = 0;
             this.forcedUpwardEscape = false;
             this.explorationUpwardEscape = false;
+            this.craftingUpwardEscape = false;
+            this.terraformSupportUpwardEscape = false;
             if (!hasExplorationClimbFallbackDetail) {
                 this.resetExplorationClimbFallback();
             }
@@ -2919,7 +3135,320 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.explorationClimbStuckTicks = 0;
     }
 
+    /**
+     * Gives a genuinely taskless NPC a conservative way off a canopy, roof, or other high
+     * perch. Complete navigation routes are preferred. The direct step-off fallback is limited
+     * to a three-block proven landing and never accepts a wet or one-cell dead-end stand.
+     */
+    private void tickHighIdleDescentRecovery(ServerLevel serverLevel) {
+        if (!this.canRunHighIdleDescentRecovery()) {
+            this.resetHighIdleDescentRecovery();
+            return;
+        }
+
+        if (this.highIdleDescentNavigationTarget != null) {
+            if (!this.getNavigation().isDone() && !this.getNavigation().isStuck()) {
+                this.setIdleTraceDetail("idle high-ground descent walking @ "
+                        + posText(this.highIdleDescentNavigationTarget), 20 * 3);
+                return;
+            }
+            this.highIdleDescentNavigationTarget = null;
+            this.highIdleDescentTicks = HIGH_IDLE_DESCENT_TRIGGER_TICKS;
+            this.nextHighIdleDescentAttemptTick = this.tickCount + HIGH_IDLE_DESCENT_RECHECK_TICKS;
+        }
+
+        boolean fallbackWasRunning = this.highIdleDescentFallbackAi.isRunning();
+        if (this.highIdleDescentFallbackAi.tick(serverLevel, "idle high-ground descent")) {
+            this.setIdleTraceDetail(
+                    this.highIdleDescentFallbackAi.detail("idle high-ground descent"),
+                    20 * 3
+            );
+            return;
+        }
+        if (fallbackWasRunning) {
+            this.highIdleDescentTicks = HIGH_IDLE_DESCENT_TRIGGER_TICKS;
+            this.nextHighIdleDescentAttemptTick = this.tickCount + HIGH_IDLE_DESCENT_RECHECK_TICKS;
+        }
+
+        if (this.tickCount < this.nextHighIdleDescentAttemptTick
+                || ++this.highIdleDescentTicks < HIGH_IDLE_DESCENT_TRIGGER_TICKS) {
+            return;
+        }
+
+        BlockPos feet = this.blockPosition();
+        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this)) {
+            this.nextHighIdleDescentAttemptTick = this.tickCount + 1;
+            return;
+        }
+
+        if (this.highIdleDescentSearchOrigin == null
+                && !this.hasHighIdleDescentEvidence(serverLevel, feet)) {
+            this.finishHighIdleDescentSearchCooldown();
+            return;
+        }
+
+        this.ensureHighIdleDescentSearch(feet);
+        if (!this.scanHighIdleDescentColumns(serverLevel)) {
+            this.nextHighIdleDescentAttemptTick = this.tickCount + 1;
+            return;
+        }
+        if (this.highIdleDescentCandidates.isEmpty()) {
+            this.finishHighIdleDescentSearchCooldown();
+            return;
+        }
+
+        int totalPathChecks = Math.min(
+                HIGH_IDLE_DESCENT_PATH_CHECKS,
+                this.highIdleDescentCandidates.size()
+        );
+        int checked = 0;
+        while (this.highIdleDescentPathCursor < totalPathChecks
+                && checked++ < HIGH_IDLE_DESCENT_PATH_CHECKS_PER_SLICE) {
+            BlockPos target = this.highIdleDescentCandidates.get(this.highIdleDescentPathCursor++);
+            Path path = PathNavigationAi.createBoundedPath(
+                    this,
+                    target,
+                    HIGH_IDLE_DESCENT_PATH_MULTIPLIER
+            );
+            if (!this.highIdleDescentNavigationAi.isValidPathTo(target, path)
+                    || !this.isSafeHighIdleDescentPath(serverLevel, path, target)) {
+                continue;
+            }
+            if (this.getNavigation().moveTo(path, 0.85D)) {
+                this.highIdleDescentNavigationTarget = target.immutable();
+                this.highIdleDescentTicks = 0;
+                this.clearHighIdleDescentSearch();
+                this.setIdleTraceDetail("idle high-ground descent route @ " + posText(target), 20 * 3);
+                return;
+            }
+        }
+        if (this.highIdleDescentPathCursor < totalPathChecks) {
+            this.nextHighIdleDescentAttemptTick = this.tickCount + 1;
+            return;
+        }
+
+        BlockPos directionTarget = this.highIdleDescentCandidates.get(0);
+        if (this.highIdleDescentFallbackAi.startValidatedNearby(
+                serverLevel,
+                directionTarget,
+                "idle high-ground descent",
+                pos -> pos.getY() >= feet.getY()
+                        || !this.isSafeHighIdleDescentStand(serverLevel, pos),
+                HIGH_IDLE_DESCENT_MAX_SAFE_DROP,
+                true
+        )) {
+            this.highIdleDescentTicks = 0;
+            this.clearHighIdleDescentSearch();
+            this.setIdleTraceDetail(
+                    this.highIdleDescentFallbackAi.detail("idle high-ground descent"),
+                    20 * 3
+            );
+            return;
+        }
+
+        this.finishHighIdleDescentSearchCooldown();
+        this.setIdleTraceDetail("idle high-ground descent blocked: no safe route @ "
+                + posText(feet), 20 * 3);
+    }
+
+    private boolean canRunHighIdleDescentRecovery() {
+        String state = this.getCurrentAiState();
+        return (AI_IDLE.equals(state) || "ai.player_npc.looking_for_work".equals(state))
+                && this.tasklessIdleTicks >= TASKLESS_IDLE_WAKE_TICKS
+                && !this.hasRunningAiGoals()
+                && this.isAlive()
+                && !this.isNoAi()
+                && !this.isPassenger()
+                && !this.isHealing()
+                && this.getTarget() == null
+                && !this.isSleeping()
+                && PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this)
+                && this.getUpwardEscapeTarget() == null
+                && this.getHoleEscapeCooldown() <= 0
+                && !this.explorationClimbClearBlockAi.isRunning()
+                && this.explorationClimbSafeStandTarget == null
+                && !this.idleResourceFallbackClearBlockAi.isRunning()
+                && !this.idleResourcePathStuckFallbackAi.isRunning()
+                && this.onGround()
+                && !this.isInWaterOrBubble();
+    }
+
+    /** Cheap proof that this is actually a raised perch, not ordinary idle ground. */
+    private boolean hasHighIdleDescentEvidence(ServerLevel serverLevel, BlockPos feet) {
+        BlockPos supportPos = feet.below();
+        if (serverLevel.getBlockState(supportPos).is(BlockTags.LEAVES)) {
+            return true;
+        }
+        for (BlockPos offset : HIGH_IDLE_DESCENT_EVIDENCE_OFFSETS) {
+            int x = feet.getX() + offset.getX();
+            int z = feet.getZ() + offset.getZ();
+            if (serverLevel.hasChunk(x >> 4, z >> 4)
+                    && feet.getY() - serverLevel.getHeight(
+                    Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                    x,
+                    z
+            ) >= HIGH_IDLE_DESCENT_MIN_HEIGHT) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void ensureHighIdleDescentSearch(BlockPos feet) {
+        if (this.highIdleDescentSearchOrigin != null
+                && this.highIdleDescentSearchOrigin.equals(feet)) {
+            return;
+        }
+        this.highIdleDescentSearchOrigin = feet.immutable();
+        this.highIdleDescentCandidates.clear();
+        this.highIdleDescentColumnCursor = 0;
+        this.highIdleDescentPathCursor = 0;
+    }
+
+    /**
+     * Advances only a small loaded-column slice. The old implementation inspected the complete
+     * radius before requesting the shared work budget, making every waiting idle NPC pay the
+     * heightmap cost and then allowing eight synchronous paths in the same tick.
+     */
+    private boolean scanHighIdleDescentColumns(ServerLevel serverLevel) {
+        BlockPos feet = this.highIdleDescentSearchOrigin;
+        if (feet == null) {
+            return false;
+        }
+        int end = Math.min(
+                HIGH_IDLE_DESCENT_COLUMN_OFFSETS.size(),
+                this.highIdleDescentColumnCursor + HIGH_IDLE_DESCENT_COLUMNS_PER_SLICE
+        );
+        for (; this.highIdleDescentColumnCursor < end; this.highIdleDescentColumnCursor++) {
+            BlockPos offset = HIGH_IDLE_DESCENT_COLUMN_OFFSETS.get(this.highIdleDescentColumnCursor);
+            int x = feet.getX() + offset.getX();
+            int z = feet.getZ() + offset.getZ();
+            if (!serverLevel.hasChunk(x >> 4, z >> 4)) {
+                continue;
+            }
+            int surfaceY = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+            if (feet.getY() - surfaceY < HIGH_IDLE_DESCENT_MIN_HEIGHT) {
+                continue;
+            }
+            BlockPos candidate = new BlockPos(x, surfaceY, z);
+            if (this.isSafeHighIdleDescentStand(serverLevel, candidate)) {
+                this.highIdleDescentCandidates.add(candidate.immutable());
+            }
+        }
+        if (this.highIdleDescentColumnCursor < HIGH_IDLE_DESCENT_COLUMN_OFFSETS.size()) {
+            return false;
+        }
+        if (this.highIdleDescentPathCursor == 0) {
+            this.highIdleDescentCandidates.sort(Comparator
+                    .comparingInt((BlockPos pos) -> serverLevel.canSeeSky(pos.above()) ? 0 : 1)
+                    .thenComparingInt(pos -> feet.getY() - pos.getY())
+                    .thenComparingDouble(feet::distSqr)
+                    .thenComparingInt(BlockPos::getX)
+                    .thenComparingInt(BlockPos::getZ));
+        }
+        return true;
+    }
+
+    private static List<BlockPos> createHighIdleDescentColumnOffsets() {
+        List<BlockPos> offsets = new ArrayList<>();
+        int radiusSqr = HIGH_IDLE_DESCENT_RADIUS * HIGH_IDLE_DESCENT_RADIUS;
+        for (int dx = -HIGH_IDLE_DESCENT_RADIUS; dx <= HIGH_IDLE_DESCENT_RADIUS; dx++) {
+            for (int dz = -HIGH_IDLE_DESCENT_RADIUS; dz <= HIGH_IDLE_DESCENT_RADIUS; dz++) {
+                if ((dx == 0 && dz == 0) || dx * dx + dz * dz > radiusSqr) {
+                    continue;
+                }
+                offsets.add(new BlockPos(dx, 0, dz));
+            }
+        }
+        offsets.sort(Comparator
+                .comparingInt((BlockPos pos) -> pos.getX() * pos.getX() + pos.getZ() * pos.getZ())
+                .thenComparingInt(BlockPos::getX)
+                .thenComparingInt(BlockPos::getZ));
+        return List.copyOf(offsets);
+    }
+
+    private void finishHighIdleDescentSearchCooldown() {
+        this.highIdleDescentTicks = 0;
+        this.nextHighIdleDescentAttemptTick = this.tickCount + HIGH_IDLE_DESCENT_RECHECK_TICKS;
+        this.clearHighIdleDescentSearch();
+    }
+
+    private void clearHighIdleDescentSearch() {
+        this.highIdleDescentSearchOrigin = null;
+        this.highIdleDescentCandidates.clear();
+        this.highIdleDescentColumnCursor = 0;
+        this.highIdleDescentPathCursor = 0;
+    }
+
+    private boolean isSafeHighIdleDescentPath(ServerLevel serverLevel, Path path, BlockPos target) {
+        if (path == null || path.getNodeCount() <= 0 || target.getY() >= this.blockPosition().getY()) {
+            return false;
+        }
+        BlockPos previous = this.blockPosition();
+        for (int index = 0; index < path.getNodeCount(); index++) {
+            BlockPos node = path.getNode(index).asBlockPos();
+            if (previous.getY() - node.getY() > HIGH_IDLE_DESCENT_MAX_SAFE_DROP
+                    || !serverLevel.getFluidState(node).isEmpty()
+                    || !serverLevel.getFluidState(node.above()).isEmpty()) {
+                return false;
+            }
+            previous = node;
+        }
+        return this.isSafeHighIdleDescentStand(serverLevel, target);
+    }
+
+    private boolean isSafeHighIdleDescentStand(ServerLevel serverLevel, BlockPos pos) {
+        if (!this.canStandOnHighIdleSurface(serverLevel, pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this, pos)
+                || !serverLevel.getFluidState(pos).isEmpty()
+                || !serverLevel.getFluidState(pos.above()).isEmpty()) {
+            return false;
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            for (int dy = -1; dy <= 1; dy++) {
+                BlockPos exit = pos.relative(direction).offset(0, dy, 0);
+                if (!PlayerNpcHomeUtil.isInsideBuildFootprint(this, exit)
+                        && this.canStandOnHighIdleSurface(serverLevel, exit)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean canStandOnHighIdleSurface(ServerLevel serverLevel, BlockPos pos) {
+        if (!serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.hasChunkAt(pos)) {
+            return false;
+        }
+        BlockState support = serverLevel.getBlockState(pos.below());
+        return serverLevel.getBlockState(pos).getCollisionShape(serverLevel, pos).isEmpty()
+                && serverLevel.getBlockState(pos.above()).getCollisionShape(serverLevel, pos.above()).isEmpty()
+                && (support.isSolidRender(serverLevel, pos.below()) || support.is(BlockTags.LEAVES))
+                && !support.getCollisionShape(serverLevel, pos.below()).isEmpty()
+                && serverLevel.getFluidState(pos).isEmpty()
+                && serverLevel.getFluidState(pos.above()).isEmpty();
+    }
+
+    private void resetHighIdleDescentRecovery() {
+        this.highIdleDescentFallbackAi.stop();
+        this.highIdleDescentNavigationTarget = null;
+        this.highIdleDescentTicks = 0;
+        this.nextHighIdleDescentAttemptTick = 0;
+        this.clearHighIdleDescentSearch();
+    }
+
     private void tickIdleResourceStuckFallback(ServerLevel serverLevel) {
+        // This custom fallback is advanced after Mob.super.tick(), so an ordinary goal may have
+        // started since the idle search was queued. Cancel retained heightmap/clear work before
+        // ticking it; otherwise it can keep scanning during crafting or another MOVE owner and
+        // charge a large spike to the entity's custom-tick bucket.
+        if (!this.canRunIdleResourceStuckFallback(serverLevel)) {
+            this.resetIdleResourceStuckFallback();
+            return;
+        }
+
         if (this.idleResourceFallbackClearBlockAi.isRunning()) {
             this.tickIdleResourceFallbackClearBlock(serverLevel);
             return;
@@ -2930,13 +3459,13 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return;
         }
 
-        if (!this.canRunIdleResourceStuckFallback(serverLevel)) {
-            this.resetIdleResourceStuckFallback();
-            return;
-        }
-
         BlockPos feet = this.blockPosition();
-        BlockPos navigationTarget = this.getNavigation().getTargetPos();
+        // PathNavigation retains its last target after a route completes. Treat it as directional
+        // evidence only for a genuinely stuck live route; otherwise a distant stale home/material
+        // target makes this idle fallback push the NPC a fraction of a block every retry cycle.
+        BlockPos navigationTarget = this.getNavigation().isStuck()
+                ? this.getNavigation().getTargetPos()
+                : null;
         BlockPos surfaceEscapeTarget = null;
         // A tree canopy also blocks canSeeSky. Only run the expensive radius surface search when
         // the NPC is materially below the terrain surface; a logger standing under leaves is not
@@ -2950,15 +3479,22 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (!serverLevel.canSeeSky(feet.above()) && materiallyBelowSurface) {
             boolean movedBeyondCachedSearch = this.idleResourceSurfaceSearchOrigin == null
                     || this.idleResourceSurfaceSearchOrigin.distSqr(feet) > 4.0D * 4.0D;
-            if (movedBeyondCachedSearch || this.tickCount >= this.nextIdleResourceSurfaceSearchTick) {
+            boolean searchDue = movedBeyondCachedSearch
+                    || this.tickCount >= this.nextIdleResourceSurfaceSearchTick;
+            if (searchDue && !this.idleResourceSurfaceSearchPending) {
+                this.beginIdleResourceSurfaceSearch(feet);
+            }
+            if (this.idleResourceSurfaceSearchPending) {
                 if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this)) {
                     this.nextIdleResourceSurfaceSearchTick = this.tickCount
                             + 1
                             + this.getRandom().nextInt(4);
                     return;
                 }
-                this.idleResourceSurfaceSearchOrigin = feet.immutable();
-                this.cachedIdleResourceSurfaceEscapeTarget = this.findIdleResourceSurfaceEscapeTarget(serverLevel, feet);
+                if (!this.advanceIdleResourceSurfaceSearch(serverLevel)) {
+                    return;
+                }
+                this.finishIdleResourceSurfaceSearch();
                 this.nextIdleResourceSurfaceSearchTick = this.tickCount
                         + IDLE_RESOURCE_STUCK_TICKS
                         + this.getRandom().nextInt(21);
@@ -2967,6 +3503,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         } else {
             this.idleResourceSurfaceSearchOrigin = null;
             this.cachedIdleResourceSurfaceEscapeTarget = null;
+            this.clearIdleResourceSurfaceSearch();
             this.nextIdleResourceSurfaceSearchTick = 0;
         }
         BlockPos routeTarget = navigationTarget == null
@@ -3220,62 +3757,117 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || this.isHealing()
                 || this.getTarget() != null
                 || this.isSleeping()
+                || !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this)
                 || this.getUpwardEscapeTarget() != null
                 || this.getHoleEscapeCooldown() > 0
+                || this.highIdleDescentFallbackAi.isRunning()
+                || this.highIdleDescentNavigationTarget != null
                 || !this.onGround()
                 || !this.getNavigation().isDone() && !this.getNavigation().isStuck()) {
             return false;
         }
 
-        return this.hasInterest(PlayerNpcInterest.BUILDING)
+        if (this.tickCount < this.nextIdleResourceEligibilityCheckTick) {
+            return this.idleResourceEligibilityCached;
+        }
+        this.nextIdleResourceEligibilityCheckTick = this.tickCount
+                + IDLE_RESOURCE_ELIGIBILITY_CHECK_INTERVAL_TICKS;
+
+        // This fallback exists to free an otherwise unschedulable resource route. It must not run
+        // while priority-4/5 construction handoff is already actionable or still resolving its
+        // bounded blueprint scan. Current-build demand describes the complete remaining layout;
+        // it can stay true while carried material is sufficient for another placement batch.
+        // Starting an exploration climb in that state adds a hole cooldown, blocking ReturnHome,
+        // Terraform and BuildHouse and creating the observed idle/half-step loop.
+        if (TerraformBuildSiteGoal.hasActionablePrepWork(this, serverLevel)
+                || BuildHouseGoal.shouldYieldSupplyWorkForBuild(this, serverLevel)
+                || BuildHouseGoal.isHomeBuildWorkSearchPending(this, serverLevel)) {
+            this.idleResourceEligibilityCached = false;
+            return this.idleResourceEligibilityCached;
+        }
+
+        this.idleResourceEligibilityCached = this.hasInterest(PlayerNpcInterest.BUILDING)
                 && this.isDailyJobActive(PlayerNpcInterest.BUILDING)
                 && (this.shouldPrioritizeLogGathering()
                 || this.shouldPrioritizeCobblestoneGathering()
                 || PlayerNpcBuildMaterialUtil.needsLogsForCurrentBuild(serverLevel, this)
                 || PlayerNpcBuildMaterialUtil.needsStoneForCurrentBuild(serverLevel, this));
+        return this.idleResourceEligibilityCached;
     }
 
-    @Nullable
-    private BlockPos findIdleResourceSurfaceEscapeTarget(ServerLevel serverLevel, BlockPos feet) {
-        List<BlockPos> candidates = new ArrayList<>();
-        List<BlockPos> relaxedCandidates = new ArrayList<>();
-        int radiusSqr = IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS * IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS;
-        for (int dx = -IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS; dx <= IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS; dx++) {
-            for (int dz = -IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS; dz <= IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS; dz++) {
-                if (dx == 0 && dz == 0 || dx * dx + dz * dz > radiusSqr) {
-                    continue;
-                }
+    private void beginIdleResourceSurfaceSearch(BlockPos feet) {
+        this.idleResourceSurfaceSearchOrigin = feet.immutable();
+        this.cachedIdleResourceSurfaceEscapeTarget = null;
+        this.idleResourceSurfaceCandidates.clear();
+        this.idleResourceRelaxedSurfaceCandidates.clear();
+        this.idleResourceSurfaceSearchCursor = 0;
+        this.idleResourceSurfaceSearchPending = true;
+    }
 
-                int x = feet.getX() + dx;
-                int z = feet.getZ() + dz;
-                if (!serverLevel.hasChunk(x >> 4, z >> 4)) {
-                    continue;
-                }
-                int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-                int climb = y - feet.getY();
-                if (climb <= 0 || climb > IDLE_RESOURCE_SURFACE_ESCAPE_MAX_BLOCKS) {
-                    continue;
-                }
-
-                BlockPos candidate = new BlockPos(x, y, z);
-                if (!PathNavigationAi.canStandAt(serverLevel, candidate)
-                        || PlayerNpcHomeUtil.isInsideBuildFootprint(this, candidate)) {
-                    continue;
-                }
-
-                if (serverLevel.canSeeSky(candidate.above())) {
-                    candidates.add(candidate.immutable());
-                } else {
-                    relaxedCandidates.add(candidate.immutable());
-                }
+    private boolean advanceIdleResourceSurfaceSearch(ServerLevel serverLevel) {
+        BlockPos feet = this.idleResourceSurfaceSearchOrigin;
+        if (feet == null) {
+            this.clearIdleResourceSurfaceSearch();
+            return true;
+        }
+        int end = Math.min(
+                HIGH_IDLE_DESCENT_COLUMN_OFFSETS.size(),
+                this.idleResourceSurfaceSearchCursor + IDLE_RESOURCE_SURFACE_COLUMNS_PER_SLICE
+        );
+        for (; this.idleResourceSurfaceSearchCursor < end; this.idleResourceSurfaceSearchCursor++) {
+            BlockPos offset = HIGH_IDLE_DESCENT_COLUMN_OFFSETS.get(this.idleResourceSurfaceSearchCursor);
+            if (offset.getX() * offset.getX() + offset.getZ() * offset.getZ()
+                    > IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS * IDLE_RESOURCE_SURFACE_ESCAPE_RADIUS) {
+                continue;
             }
+            int x = feet.getX() + offset.getX();
+            int z = feet.getZ() + offset.getZ();
+            if (!serverLevel.hasChunk(x >> 4, z >> 4)) {
+                continue;
+            }
+            int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+            int climb = y - feet.getY();
+            if (climb <= 0 || climb > IDLE_RESOURCE_SURFACE_ESCAPE_MAX_BLOCKS) {
+                continue;
+            }
+            BlockPos candidate = new BlockPos(x, y, z);
+            if (!PathNavigationAi.canStandAt(serverLevel, candidate)
+                    || PlayerNpcHomeUtil.isInsideBuildFootprint(this, candidate)) {
+                continue;
+            }
+            (serverLevel.canSeeSky(candidate.above())
+                    ? this.idleResourceSurfaceCandidates
+                    : this.idleResourceRelaxedSurfaceCandidates).add(candidate.immutable());
         }
+        return this.idleResourceSurfaceSearchCursor >= HIGH_IDLE_DESCENT_COLUMN_OFFSETS.size();
+    }
 
-        BlockPos selected = this.selectIdleResourceSurfaceEscapeTarget(candidates, feet);
-        if (selected != null) {
-            return selected;
+    private void finishIdleResourceSurfaceSearch() {
+        BlockPos feet = this.idleResourceSurfaceSearchOrigin;
+        if (feet == null) {
+            this.clearIdleResourceSurfaceSearch();
+            return;
         }
-        return this.selectIdleResourceSurfaceEscapeTarget(relaxedCandidates, feet);
+        BlockPos selected = this.selectIdleResourceSurfaceEscapeTarget(
+                this.idleResourceSurfaceCandidates,
+                feet
+        );
+        if (selected != null) {
+            this.cachedIdleResourceSurfaceEscapeTarget = selected;
+        } else {
+            this.cachedIdleResourceSurfaceEscapeTarget = this.selectIdleResourceSurfaceEscapeTarget(
+                    this.idleResourceRelaxedSurfaceCandidates,
+                    feet
+            );
+        }
+        this.idleResourceSurfaceSearchPending = false;
+    }
+
+    private void clearIdleResourceSurfaceSearch() {
+        this.idleResourceSurfaceCandidates.clear();
+        this.idleResourceRelaxedSurfaceCandidates.clear();
+        this.idleResourceSurfaceSearchCursor = 0;
+        this.idleResourceSurfaceSearchPending = false;
     }
 
     @Nullable
@@ -3294,6 +3886,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.idleResourceStuckWatchTarget = null;
         this.idleResourceStuckTicks = 0;
         this.idleResourceStuckRecheckTicks = 0;
+        this.clearIdleResourceSurfaceSearch();
     }
 
     private static String posTextOrNone(@Nullable BlockPos pos) {
@@ -3313,28 +3906,13 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 || detail.startsWith("exploration climb clear"));
     }
 
-    private void tickTemporaryPillarSupports() {
-        Iterator<Map.Entry<BlockPos, Integer>> iterator = this.temporaryPillarSupportTicks.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<BlockPos, Integer> entry = iterator.next();
-            int ticks = tickCooldown(entry.getValue());
-            if (ticks <= 0 || this.isTemporaryPillarSupportGone(entry.getKey())) {
-                iterator.remove();
-            } else {
-                entry.setValue(ticks);
-            }
+    /** Explicitly forget a support whose ownership was invalidated by another system. */
+    public void forgetTemporaryPillarSupport(@Nullable BlockPos pos) {
+        if (pos != null) {
+            BlockPos key = pos.immutable();
+            this.temporaryPillarSupports.remove(key);
+            this.gatherLogsTemporaryPillarSupports.remove(key);
         }
-    }
-
-    private boolean isTemporaryPillarSupportGone(BlockPos pos) {
-        if (!(this.level() instanceof ServerLevel serverLevel)) {
-            return false;
-        }
-        if (!serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
-            return true;
-        }
-        BlockState state = serverLevel.getBlockState(pos);
-        return state.isAir() || state.getCollisionShape(serverLevel, pos).isEmpty();
     }
 
     private void tickDailySupplyGoalReroll(ServerLevel serverLevel) {

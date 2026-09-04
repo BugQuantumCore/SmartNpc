@@ -77,7 +77,8 @@ public final class PlayerNpcBuildMaterialUtil {
             Items.BLACKSTONE,
             Items.SANDSTONE,
             Items.RED_SANDSTONE,
-            Items.PACKED_MUD
+            Items.PACKED_MUD,
+            Items.DEEPSLATE_TILES
     );
     private static final List<Item> LOOSE_FILL = List.of(
             Items.DIRT,
@@ -115,7 +116,8 @@ public final class PlayerNpcBuildMaterialUtil {
             Items.RED_SANDSTONE,
             Items.SMOOTH_RED_SANDSTONE,
             Items.CUT_RED_SANDSTONE,
-            Items.MUD_BRICKS
+            Items.MUD_BRICKS,
+            Items.DEEPSLATE_BRICKS
     );
     private static final List<Item> STONE_STAIRS = List.of(
             Items.COBBLESTONE_STAIRS,
@@ -484,6 +486,14 @@ public final class PlayerNpcBuildMaterialUtil {
                     playerNpc
             );
         }
+        if (search.lastSliceTick() == playerNpc.tickCount) {
+            // Active routine workers are allowed through the global work scheduler on every
+            // predicate call. Several goals ask for the same missing need in one selector pass,
+            // so without a per-search cadence those callers advance the entire blueprint in one
+            // tick despite the eight-block cursor bound.
+            MISSING_NEED_SEARCHES.put(playerNpc, search);
+            return cachedNeedWhileSearchPending(cache, home.get(), currentLayoutId);
+        }
         if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, playerNpc)) {
             MISSING_NEED_SEARCHES.put(playerNpc, search);
             return cachedNeedWhileSearchPending(cache, home.get(), currentLayoutId);
@@ -511,8 +521,9 @@ public final class PlayerNpcBuildMaterialUtil {
                     describeTarget(block.state())
             ));
         }
+        search = search.withNextBlockIndex(endIndex, playerNpc.tickCount);
         if (endIndex < blocks.size()) {
-            MISSING_NEED_SEARCHES.put(playerNpc, search.withNextBlockIndex(endIndex));
+            MISSING_NEED_SEARCHES.put(playerNpc, search);
             // Do not expose the new cursor's early candidate while a later slice may contain a
             // higher-priority primary material. Preserve the last completed answer until this
             // deterministic bounded refresh replaces it, so pending is never mistaken for none.
@@ -1596,6 +1607,7 @@ public final class PlayerNpcBuildMaterialUtil {
             String layoutId,
             int inventoryHash,
             int nextBlockIndex,
+            int lastSliceTick,
             MissingBuildMaterialNeed bestNeed,
             MissingMaterialLedger materialLedger
     ) {
@@ -1614,6 +1626,7 @@ public final class PlayerNpcBuildMaterialUtil {
                     layoutId,
                     inventoryHash,
                     0,
+                    Integer.MIN_VALUE,
                     null,
                     MissingMaterialLedger.create(playerNpc)
             );
@@ -1633,7 +1646,7 @@ public final class PlayerNpcBuildMaterialUtil {
                     && this.inventoryHash == currentInventoryHash;
         }
 
-        private MissingNeedSearch withNextBlockIndex(int nextBlockIndex) {
+        private MissingNeedSearch withNextBlockIndex(int nextBlockIndex, int lastSliceTick) {
             return new MissingNeedSearch(
                     this.dimension,
                     this.homeOrigin,
@@ -1642,6 +1655,7 @@ public final class PlayerNpcBuildMaterialUtil {
                     this.layoutId,
                     this.inventoryHash,
                     nextBlockIndex,
+                    lastSliceTick,
                     this.bestNeed,
                     this.materialLedger
             );
@@ -1650,7 +1664,7 @@ public final class PlayerNpcBuildMaterialUtil {
         private MissingNeedSearch withCandidate(MissingBuildMaterialNeed candidate) {
             if (candidate == null
                     || this.bestNeed != null
-                    && missingNeedPriority(this.bestNeed.kind()) <= missingNeedPriority(candidate.kind())) {
+                    && missingNeedPriority(this.bestNeed) <= missingNeedPriority(candidate)) {
                 return this;
             }
             return new MissingNeedSearch(
@@ -1661,6 +1675,7 @@ public final class PlayerNpcBuildMaterialUtil {
                     this.layoutId,
                     this.inventoryHash,
                     this.nextBlockIndex,
+                    this.lastSliceTick,
                     candidate,
                     this.materialLedger
             );
@@ -1751,13 +1766,67 @@ public final class PlayerNpcBuildMaterialUtil {
         }
     }
 
-    private static int missingNeedPriority(MissingBuildMaterialKind kind) {
-        return switch (kind) {
-            case LOG -> 0;
-            case STONE -> 1;
-            case BED -> 3;
-            default -> 2;
-        };
+    private static int missingNeedPriority(MissingBuildMaterialNeed need) {
+        return need == null ? Integer.MAX_VALUE : buildMaterialPhasePriority(need.targetState());
+    }
+
+    /**
+     * Shared construction/material phase order.  Acquisition, visible requirements and actual
+     * placement must agree on this order; otherwise a later craftable block can advertise ready
+     * build work while the earlier missing-material goal is trying to leave the site.
+     */
+    public static int buildMaterialPhasePriority(BlockState state) {
+        if (state == null) {
+            return 70;
+        }
+        MaterialFamily family = familyForState(state);
+        if (family == MaterialFamily.LOOSE_FILL) {
+            return 0;
+        }
+        if (family == MaterialFamily.LOGS
+                || family == MaterialFamily.PLANKS
+                || family == MaterialFamily.WOODEN_DOORS
+                || family == MaterialFamily.WOODEN_TRAPDOORS
+                || family == MaterialFamily.WOODEN_STAIRS
+                || family == MaterialFamily.WOODEN_SLABS) {
+            return 10;
+        }
+        if (isStoneSupplyFamily(family)) {
+            return 20;
+        }
+        if (family == MaterialFamily.BEDS
+                || state.is(Blocks.CHEST)
+                || state.is(Blocks.TRAPPED_CHEST)
+                || state.is(Blocks.CRAFTING_TABLE)
+                || state.is(Blocks.FURNACE)
+                || state.is(Blocks.BLAST_FURNACE)
+                || state.is(Blocks.SMOKER)) {
+            return 30;
+        }
+        if (family == MaterialFamily.FLOWERS
+                || family == MaterialFamily.FLOWER_POTS
+                || family == MaterialFamily.POTTED_FLOWERS) {
+            return 40;
+        }
+        if (family == MaterialFamily.WOODEN_FENCES
+                || family == MaterialFamily.WOODEN_FENCE_GATES
+                || family == MaterialFamily.WOODEN_BUTTONS
+                || family == MaterialFamily.WOODEN_PRESSURE_PLATES
+                || isTorchTarget(state)
+                || isCampfireTarget(state)) {
+            return 50;
+        }
+        if (family == MaterialFamily.GLASS_BLOCKS || family == MaterialFamily.GLASS_PANES) {
+            return 60;
+        }
+        return 35;
+    }
+
+    public static int buildMaterialPhasePriority(Item item) {
+        if (item instanceof BlockItem blockItem) {
+            return buildMaterialPhasePriority(blockItem.getBlock().defaultBlockState());
+        }
+        return 35;
     }
 
     private enum MaterialFamily {

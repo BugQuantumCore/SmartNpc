@@ -12,6 +12,10 @@ import net.minecraft.world.level.pathfinder.Path;
 public final class AiBudgetWaitingStrollGoal extends WaterAvoidingRandomStrollGoal {
     private static final int TRACE_DETAIL_TICKS = 20 * 10;
     private static final float STROLL_PATH_NODE_MULTIPLIER = 0.15F;
+    // createBoundedPath restores Navigation's normal multiplier after selecting the short stroll.
+    // Keep the lower budget installed while that optional route is followed so a terrain change
+    // cannot make PathfinderMob.super.tick rebuild the stroll at the full 48-block budget.
+    private static final float ACTIVE_STROLL_PATH_NODE_MULTIPLIER = 0.05F;
 
     private final PlayerNpcEntity playerNpc;
     private Path activeStrollPath;
@@ -85,6 +89,7 @@ public final class AiBudgetWaitingStrollGoal extends WaterAvoidingRandomStrollGo
         }
         this.activeStrollPath = this.playerNpc.getNavigation().getPath();
         this.activeStrollDestination = destination.immutable();
+        this.playerNpc.getNavigation().setMaxVisitedNodesMultiplier(ACTIVE_STROLL_PATH_NODE_MULTIPLIER);
 
         this.playerNpc.setIdleTraceDetail(
                 "waiting for AI worker turn; water-avoiding random stroll",
@@ -94,6 +99,11 @@ public final class AiBudgetWaitingStrollGoal extends WaterAvoidingRandomStrollGo
 
     @Override
     public void stop() {
+        // This is deliberately an optional visual route. Do not leave it in PathNavigation after
+        // the NPC earns a worker turn or loses its waiting status: otherwise vanilla continues
+        // ticking/recomputing a stale random path under Mob.super.tick().
+        this.playerNpc.getNavigation().stop();
+        this.playerNpc.getNavigation().resetMaxVisitedNodesMultiplier();
         super.stop();
         this.activeStrollPath = null;
         this.activeStrollDestination = null;
@@ -120,6 +130,11 @@ public final class AiBudgetWaitingStrollGoal extends WaterAvoidingRandomStrollGo
                 && !this.playerNpc.isHealing()
                 && this.playerNpc.getTarget() == null
                 && this.playerNpc.getUpwardEscapeTarget() == null
-                && PlayerNpcPerformanceMonitor.isOptionalAiWorkAllowed();
+                && PlayerNpcPerformanceMonitor.isOptionalAiWorkAllowed()
+                // A provisional probe is already this NPC's worker opportunity. Release MOVE as
+                // soon as it stops being a true waiter so retained canUse searches can complete
+                // and promote the probe to an active worker instead of being displaced by the
+                // decorative stroll that began on an earlier denied tick.
+                && PlayerNpcAiWorkBudget.isWaitingForTurn(this.playerNpc);
     }
 }

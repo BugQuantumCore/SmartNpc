@@ -120,6 +120,33 @@ public final class PlayerNpcCraftingUtil {
 
     public static Optional<ItemStack> craftItem(ServerLevel serverLevel, SimpleContainer inventory, ItemLike result, boolean craftingTable) {
         Optional<CraftingPlan> plan = findCraftingPlan(serverLevel, inventory, result, craftingTable);
+        return craftItem(serverLevel, inventory, plan);
+    }
+
+    public static boolean canCraftMatching(
+            ServerLevel serverLevel,
+            SimpleContainer inventory,
+            Predicate<ItemStack> resultMatcher,
+            boolean craftingTable
+    ) {
+        return findCraftingPlan(serverLevel, inventory, resultMatcher, craftingTable).isPresent();
+    }
+
+    public static Optional<ItemStack> craftItemMatching(
+            ServerLevel serverLevel,
+            SimpleContainer inventory,
+            Predicate<ItemStack> resultMatcher,
+            boolean craftingTable
+    ) {
+        Optional<CraftingPlan> plan = findCraftingPlan(serverLevel, inventory, resultMatcher, craftingTable);
+        return craftItem(serverLevel, inventory, plan);
+    }
+
+    private static Optional<ItemStack> craftItem(
+            ServerLevel serverLevel,
+            SimpleContainer inventory,
+            Optional<CraftingPlan> plan
+    ) {
         if (plan.isEmpty()) {
             return Optional.empty();
         }
@@ -177,13 +204,22 @@ public final class PlayerNpcCraftingUtil {
     }
 
     private static Optional<CraftingPlan> findCraftingPlan(ServerLevel serverLevel, SimpleContainer inventory, ItemLike result, boolean craftingTable) {
+        Item targetItem = result.asItem();
+        return findCraftingPlan(serverLevel, inventory, stack -> stack.is(targetItem), craftingTable);
+    }
+
+    private static Optional<CraftingPlan> findCraftingPlan(
+            ServerLevel serverLevel,
+            SimpleContainer inventory,
+            Predicate<ItemStack> resultMatcher,
+            boolean craftingTable
+    ) {
         int width = craftingTable ? 3 : 2;
         int height = craftingTable ? 3 : 2;
-        Item targetItem = result.asItem();
         for (CraftingRecipe recipe : serverLevel.getRecipeManager().getAllRecipesFor(RecipeType.CRAFTING)) {
             ItemStack recipeResult = recipe.getResultItem(serverLevel.registryAccess());
             if (recipeResult.isEmpty()
-                    || !recipeResult.is(targetItem)
+                    || !resultMatcher.test(recipeResult)
                     || recipe.isIncomplete()
                     || !recipe.canCraftInDimensions(width, height)) {
                 continue;

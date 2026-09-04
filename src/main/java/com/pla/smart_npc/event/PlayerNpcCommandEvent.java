@@ -76,6 +76,17 @@ public final class PlayerNpcCommandEvent {
                                         .executes(context -> setTraceAll(context.getSource(), false)))
                                 .then(Commands.literal("status")
                                         .executes(context -> getTraceAllStatus(context.getSource())))))
+                .then(Commands.literal("resource")
+                        .requires(source -> SmartNpcConfig.isForceTickManageEnabled())
+                        .then(Commands.argument("name", StringArgumentType.greedyString())
+                                .suggests((context, builder) -> PlayerNpcForceTickManager.suggestNpcNames(
+                                        context.getSource().getServer(),
+                                        builder
+                                ))
+                                .executes(context -> handoffAiResource(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "name")
+                                ))))
                 .then(Commands.literal("resources")
                         .executes(context -> getAiResources(context.getSource()))));
     }
@@ -164,6 +175,59 @@ public final class PlayerNpcCommandEvent {
         return 1;
     }
 
+    private static int handoffAiResource(CommandSourceStack source, String name) {
+        if (!SmartNpcConfig.isForceTickManageEnabled()) {
+            source.sendFailure(Component.literal("Player NPC force-tick management is disabled"));
+            return 0;
+        }
+
+        PlayerNpcEntity receiver = PlayerNpcForceTickManager.chooseRandomByName(source.getServer(), name).orElse(null);
+        if (receiver == null) {
+            source.sendFailure(Component.literal("No tracked player NPC named " + name));
+            return 0;
+        }
+
+        PlayerNpcAiWorkBudget.WorkerHandoffResult result =
+                PlayerNpcAiWorkBudget.handoffWorkerResource(source.getServer(), receiver);
+        String receiverName = clean(receiver.getDisplayName().getString()) + "#" + receiver.getId();
+        return switch (result.status()) {
+            case TRANSFERRED -> {
+                PlayerNpcEntity donor = result.donor();
+                String donorName = donor == null
+                        ? "another holder"
+                        : clean(donor.getDisplayName().getString()) + "#" + donor.getId();
+                source.sendSuccess(() -> Component.literal("Transferred Player NPC AI worker resource from "
+                        + donorName
+                        + " to "
+                        + receiverName
+                        + "; shiftRemainingTicks="
+                        + result.shiftRemainingTicks()), true);
+                yield 1;
+            }
+            case GRANTED -> {
+                source.sendSuccess(() -> Component.literal("Granted an available Player NPC AI worker resource to "
+                        + receiverName
+                        + "; shiftRemainingTicks="
+                        + result.shiftRemainingTicks()), true);
+                yield 1;
+            }
+            case ALREADY_HOLDER -> {
+                source.sendSuccess(() -> Component.literal(receiverName
+                        + " already holds a Player NPC AI worker resource"), false);
+                yield 0;
+            }
+            case DISABLED -> {
+                source.sendFailure(Component.literal("Player NPC AI worker limit is 0; no resource can be assigned"));
+                yield 0;
+            }
+            case UNAVAILABLE -> {
+                source.sendFailure(Component.literal("Could not assign a Player NPC AI worker resource to "
+                        + receiverName));
+                yield 0;
+            }
+        };
+    }
+
     private static int getAiResources(CommandSourceStack source) {
         PlayerNpcAiWorkBudget.ResourceSnapshot snapshot = PlayerNpcAiWorkBudget.resourceSnapshot(source.getServer());
         PlayerNpcForceTickManager.ForceTickSnapshot forceTicks = PlayerNpcForceTickManager.forceTickSnapshot(source.getServer());
@@ -175,6 +239,10 @@ public final class PlayerNpcCommandEvent {
                 + snapshot.effectiveWorkerLimit()
                 + ", active="
                 + snapshot.activeWorkerCount()
+                + ", running="
+                + snapshot.runningWorkerCount()
+                + ", idle="
+                + snapshot.idleWorkerCount()
                 + ", probes="
                 + snapshot.probeCount()
                 + ", expensiveSlicesThisTick="

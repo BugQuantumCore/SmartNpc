@@ -126,6 +126,7 @@ public final class FarmSetupGoal extends Goal {
     private int failedFarmReturnRetryAfterTick;
     private long lastExpensiveWorkAdmissionTick = Long.MIN_VALUE;
     private NavigationPathBudget activationPathBudget;
+    private boolean usingLocalWaterRecovery;
 
     public FarmSetupGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
@@ -159,7 +160,7 @@ public final class FarmSetupGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
                 || this.playerNpc.getTarget() != null
-                || this.playerNpc.isInWaterOrBubble()
+                || GatherLogsGoal.isLogGatheringEpisodeActive(this.playerNpc)
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
                 || serverLevel.isNight()
@@ -201,6 +202,19 @@ public final class FarmSetupGoal extends Goal {
         }
         this.rewindDamagedReadyPhase(serverLevel);
 
+        // FarmCropGoal requires an exact path to an interior interaction stand before it can own
+        // MOVE. If a ready farmer has wandered beyond the farm work bounds, that exact probe can
+        // fail for every crop and leave no goal responsible for returning to the claimed plot.
+        // Reuse setup's obstruction-aware return handoff; FarmCropGoal takes over at the entry.
+        if (this.plan.phase() == Phase.READY
+                && !FarmAi.isWithinWorkBounds(this.plan, this.playerNpc.blockPosition())
+                && FarmCropGoal.hasActionableOwnedFarmWork(this.playerNpc, serverLevel)) {
+            if (this.selectReturnToFarmAction()) {
+                return true;
+            }
+            return false;
+        }
+
         // Scheduling invariant: once the owned gate is valid, opening it must run
         // before selecting interior repair/clear work. Otherwise an interior soft
         // obstruction can fail its approach through the closed fence opening, enter
@@ -236,6 +250,7 @@ public final class FarmSetupGoal extends Goal {
             return false;
         }
         this.resetRepairDirtSearch();
+
         if (this.plan.phase() != Phase.READY && !FarmAi.hasReachableEntry(this.playerNpc, serverLevel, this.plan)) {
             if (this.trySelectFarmRouteRecoveryClear(serverLevel)) {
                 return true;
@@ -316,6 +331,10 @@ public final class FarmSetupGoal extends Goal {
                         continue;
                     }
                     if (!this.canProvideFence()) {
+                        if (PlayerNpcCraftingUtil.canCraftFences(this.playerNpc.getInventory(), 0)) {
+                            this.playerNpc.setIdleTraceDetail("farm fence awaiting crafting-table recipe", 40);
+                            return false;
+                        }
                         this.plan = FarmAi.advancePhase(this.playerNpc, this.plan, Phase.GATHER_LOGS);
                         return false;
                     }
@@ -330,6 +349,10 @@ public final class FarmSetupGoal extends Goal {
                         return this.selectAction(serverLevel, Action.REPAIR_GATE, this.plan.gatePos());
                     }
                     if (!this.canProvideGate()) {
+                        if (PlayerNpcCraftingUtil.canCraftFenceGate(this.playerNpc.getInventory(), 0)) {
+                            this.playerNpc.setIdleTraceDetail("farm gate awaiting crafting-table recipe", 40);
+                            return false;
+                        }
                         this.plan = FarmAi.advancePhase(this.playerNpc, this.plan, Phase.GATHER_LOGS);
                         return false;
                     }
@@ -378,7 +401,6 @@ public final class FarmSetupGoal extends Goal {
                 && !this.playerNpc.isPassenger()
                 && !this.playerNpc.isHealing()
                 && this.playerNpc.getTarget() == null
-                && !this.playerNpc.isInWaterOrBubble()
                 && this.playerNpc.getUpwardEscapeTarget() == null;
     }
 
@@ -416,6 +438,15 @@ public final class FarmSetupGoal extends Goal {
         }
         this.actionTicks++;
         this.lookAtTarget();
+
+        // The farmer can fall into its own one-block irrigation cell while repairing or
+        // tilling the plot. FloatGoal only owns JUMP, so keep this MOVE goal active and let
+        // the existing destination-aware water recovery carry it toward the selected dry
+        // interaction stand. If that destination is quarantined after a bounded stall,
+        // fall back to WaterEscapeAi's local dry-exit search instead of returning to idle.
+        if (this.tickWaterRecovery(serverLevel)) {
+            return;
+        }
 
         if (this.isFarmReturnAction()) {
             this.tickReturnToFarm(serverLevel);
@@ -469,6 +500,8 @@ public final class FarmSetupGoal extends Goal {
         }
         this.playerNpc.clearBlockBreakProgress(this.clearBlockAi.targetPos());
         this.clearBlockAi.stop();
+        this.pathNavigationAi.stopWaterTravel();
+        this.usingLocalWaterRecovery = false;
         this.returnPositionAi.stop();
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
@@ -567,7 +600,20 @@ public final class FarmSetupGoal extends Goal {
                 true
         ).orElse(null);
         this.clearResolvedTargetPos = resolvedTarget == null ? null : resolvedTarget.immutable();
-        if (resolvedTarget != null && this.isSafeClearTarget(serverLevel, resolvedTarget)) {
+        // resolveInitialClearTarget also returns the requested block when the current ray is
+        // blocked by a protected/non-clearable block. Do not mistake that fallback for proof
+        // that the farmer can actually hit it: doing so hands a low surface obstruction to the
+        // generic ClearBlock stand search, which rejects farmland-supported stands and can keep
+        // rotating local path probes without ever starting BreakingBlockAi.
+        if (resolvedTarget != null
+                && this.isSafeClearTarget(serverLevel, resolvedTarget)
+                && !this.isInWater(serverLevel)
+                && ClearBlockAi.canBreakFromCurrentStand(
+                        serverLevel,
+                        this.playerNpc,
+                        resolvedTarget,
+                        true
+                )) {
             return true;
         }
         if (this.selectFarmWorkApproachAction(serverLevel, target)) {
@@ -623,6 +669,7 @@ public final class FarmSetupGoal extends Goal {
 
     private boolean selectReturnToFarmAction() {
         if (this.plan == null || this.plan.pathPositions().isEmpty()) {
+            this.playerNpc.setIdleTraceDetail("farm return blocked: claimed farm has no entry path", 40);
             return false;
         }
         BlockPos returnTarget = this.plan.pathPositions().get(0).above().immutable();
@@ -1565,14 +1612,12 @@ public final class FarmSetupGoal extends Goal {
 
     private boolean canProvideFence() {
         return InventoryUtils.hasItem(this.playerNpc, stack -> stack.getItem() instanceof BlockItem blockItem
-                && blockItem.getBlock() instanceof FenceBlock)
-                || PlayerNpcCraftingUtil.canCraftFences(this.playerNpc.getInventory(), 0);
+                && blockItem.getBlock() instanceof FenceBlock);
     }
 
     private boolean canProvideGate() {
         return InventoryUtils.hasItem(this.playerNpc, stack -> stack.getItem() instanceof BlockItem blockItem
-                && blockItem.getBlock() instanceof FenceGateBlock)
-                || PlayerNpcCraftingUtil.canCraftFenceGate(this.playerNpc.getInventory(), 0);
+                && blockItem.getBlock() instanceof FenceGateBlock);
     }
 
     private ItemStack consumeFence() {
@@ -1580,10 +1625,6 @@ public final class FarmSetupGoal extends Goal {
                 && blockItem.getBlock() instanceof FenceBlock, 1).orElse(ItemStack.EMPTY);
         if (!stack.isEmpty()) {
             return stack;
-        }
-        if (PlayerNpcCraftingUtil.tryCraftFences(this.playerNpc.getInventory(), 0)) {
-            return this.playerNpc.consumeInventoryItem(item -> item.getItem() instanceof BlockItem blockItem
-                    && blockItem.getBlock() instanceof FenceBlock, 1).orElse(ItemStack.EMPTY);
         }
         return ItemStack.EMPTY;
     }
@@ -1593,10 +1634,6 @@ public final class FarmSetupGoal extends Goal {
                 && blockItem.getBlock() instanceof FenceGateBlock, 1).orElse(ItemStack.EMPTY);
         if (!stack.isEmpty()) {
             return stack;
-        }
-        if (PlayerNpcCraftingUtil.tryCraftFenceGate(this.playerNpc.getInventory(), 0)) {
-            return this.playerNpc.consumeInventoryItem(item -> item.getItem() instanceof BlockItem blockItem
-                    && blockItem.getBlock() instanceof FenceGateBlock, 1).orElse(ItemStack.EMPTY);
         }
         return ItemStack.EMPTY;
     }
@@ -1611,7 +1648,10 @@ public final class FarmSetupGoal extends Goal {
             return null;
         }
         BlockPos feet = this.playerNpc.blockPosition();
-        if (this.isInInteractionRange(target) && (!avoidStandingAboveTarget || !feet.equals(target.above()))) {
+        boolean selectingWaterExit = this.isInWater(serverLevel);
+        if (!selectingWaterExit
+                && this.isInInteractionRange(target)
+                && (!avoidStandingAboveTarget || !feet.equals(target.above()))) {
             return feet.immutable();
         }
         List<BlockPos> candidates = this.interactionStandCandidates(target);
@@ -1627,10 +1667,15 @@ public final class FarmSetupGoal extends Goal {
                     || distanceFromStandToTargetSqr(candidate, target) > INTERACTION_DISTANCE_SQR) {
                 continue;
             }
+            this.interactionStandCursor = (index + 1) % candidates.size();
+            if (selectingWaterExit) {
+                // Destination-aware water recovery owns admission from the wet start;
+                // ordinary ground navigation resumes once this dry stand is reached.
+                return candidate.immutable();
+            }
             if (!pathBudget.tryConsume()) {
                 break;
             }
-            this.interactionStandCursor = (index + 1) % candidates.size();
             Path path = this.playerNpc.getNavigation().createPath(candidate, 0);
             if (path != null
                     && path.canReach()
@@ -1654,6 +1699,7 @@ public final class FarmSetupGoal extends Goal {
         BlockPos feet = this.playerNpc.blockPosition();
         List<BlockPos> candidates = this.interactionStandCandidates(workTarget);
         candidates.sort(Comparator.comparingDouble(feet::distSqr));
+        boolean selectingWaterExit = this.isInWater(serverLevel);
         NavigationPathBudget pathBudget = this.pathBudgetForSelection();
         for (BlockPos candidate : candidates) {
             if (this.failedFarmClearApproachStands.contains(candidate)
@@ -1663,6 +1709,12 @@ public final class FarmSetupGoal extends Goal {
                 continue;
             }
             if (candidate.equals(feet)) {
+                return candidate.immutable();
+            }
+            if (selectingWaterExit) {
+                // Ground navigation may not admit a path whose start is the irrigation
+                // water cell. WaterEscapeAi can still swim/step to this already-validated
+                // dry stand, so retain it as the goal's recovery destination.
                 return candidate.immutable();
             }
             if (!pathBudget.tryConsume()) {
@@ -1778,6 +1830,39 @@ public final class FarmSetupGoal extends Goal {
             return this.playerNpc.getNavigation().moveTo(selectedPath, 1.0D);
         }
         return this.pathNavigationAi.moveToExact(serverLevel, this.standPos, 1.0D, 0);
+    }
+
+    private boolean tickWaterRecovery(ServerLevel serverLevel) {
+        boolean inWater = this.isInWater(serverLevel);
+        BlockPos destination = this.standPos == null ? this.targetPos : this.standPos;
+
+        if (!this.usingLocalWaterRecovery
+                && this.pathNavigationAi.tickWaterTravel(serverLevel, destination, 1.0D)) {
+            return true;
+        }
+        if (!inWater) {
+            this.usingLocalWaterRecovery = false;
+            return false;
+        }
+
+        this.usingLocalWaterRecovery = true;
+        if (this.pathNavigationAi.tickLocalWaterEscape(serverLevel, 1.0D)) {
+            return true;
+        }
+
+        // Both destination and local recovery are bounded internally. Yield this setup
+        // episode when neither can start so other worker/safety goals get a scheduling turn.
+        this.playerNpc.setCurrentAiDetail(this.describeAction() + " (water recovery unavailable; yielding)");
+        this.finished = true;
+        return true;
+    }
+
+    private boolean isInWater(ServerLevel serverLevel) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        return this.playerNpc.isInWaterOrBubble()
+                || serverLevel.getFluidState(feet).is(FluidTags.WATER)
+                || serverLevel.getFluidState(feet.above()).is(FluidTags.WATER)
+                || !this.playerNpc.onGround() && serverLevel.getFluidState(feet.below()).is(FluidTags.WATER);
     }
 
     private static boolean isExactPathTo(Path path, BlockPos target) {
@@ -1971,6 +2056,7 @@ public final class FarmSetupGoal extends Goal {
         this.finished = false;
         this.activationPathBudget = null;
         this.plannedStandPath = null;
+        this.usingLocalWaterRecovery = false;
     }
 
     private ServerLevel serverLevel() {

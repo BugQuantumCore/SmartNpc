@@ -88,8 +88,10 @@ public final class PlayerNpcBuildStatusUtil {
             line.carried = countHeldAndInventory(playerNpc, line.item);
         }
         lines.sort(Comparator
-                .comparingInt(RequirementLine::missing).reversed()
-                .thenComparingInt(RequirementLine::remaining).reversed()
+                .comparingInt((RequirementLine line) ->
+                        PlayerNpcBuildMaterialUtil.buildMaterialPhasePriority(line.item))
+                .thenComparing(Comparator.comparingInt(RequirementLine::missing).reversed())
+                .thenComparing(Comparator.comparingInt(RequirementLine::remaining).reversed())
                 .thenComparing(line -> line.name));
 
         StringBuilder builder = new StringBuilder(REQUIREMENTS_PAYLOAD_VERSION)
