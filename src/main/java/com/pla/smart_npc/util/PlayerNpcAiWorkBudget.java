@@ -43,7 +43,8 @@ public final class PlayerNpcAiWorkBudget {
     private static final int AUTO_HIGH_CAUTION_GROWTH_CHECKS = 6;
     private static final double AUTO_CAUTION_PROBE_MAX_MSPT = 49.0D;
     private static final double AUTO_REDUCTION_MSPT = 52.0D;
-    private static final int AUTO_ROUTINE_WORKER_FLOOR = 3;
+    private static final int AUTO_INITIAL_ROUTINE_WORKERS = 3;
+    private static final double AUTO_SEVERE_OVERLOAD_MSPT = 60.0D;
     private static final double AUTO_REDUCTION_MIN_NPC_MSPT = 20.0D;
     private static final double AUTO_REDUCTION_MIN_NPC_SHARE = 0.40D;
     // Routine AI is single-threaded.  The host in the production traces sustains three to four
@@ -293,7 +294,8 @@ public final class PlayerNpcAiWorkBudget {
         private long admissionTick = Long.MIN_VALUE;
         private long waitingStrollAdmissionTick = Long.MIN_VALUE;
         private int admissionsThisTick;
-        private int automaticWorkerLimit = AUTO_ROUTINE_WORKER_FLOOR;
+        private int automaticWorkerLimit = AUTO_INITIAL_ROUTINE_WORKERS;
+        private final NpcLoadSheddingPolicy loadShedding = new NpcLoadSheddingPolicy();
         private long lastAutomaticEvaluationTick = Long.MIN_VALUE;
         private int healthyWorkerEvaluations;
         private int automaticCapabilityLimit = 1;
@@ -340,6 +342,8 @@ public final class PlayerNpcAiWorkBudget {
             this.automaticCapabilityLimit = capabilityLimit;
             this.automaticWorkerLimit = Math.min(this.automaticWorkerLimit, capabilityLimit);
             if (!PlayerNpcPerformanceMonitor.hasStableRollingSample()) {
+                this.loadShedding.reset();
+                this.healthyWorkerEvaluations = 0;
                 this.automaticWorkerReason = "warming_up";
                 return this.automaticWorkerLimit;
             }
@@ -356,34 +360,30 @@ public final class PlayerNpcAiWorkBudget {
             double rollingMspt = PlayerNpcPerformanceMonitor.getRollingAverageMspt();
             double rollingNpcMs = PlayerNpcPerformanceMonitor.getRollingAverageNpcMs();
             double rollingNpcShare = rollingMspt <= 0.0D ? 0.0D : rollingNpcMs / rollingMspt;
-            int routineWorkerFloor = Math.min(AUTO_ROUTINE_WORKER_FLOOR, capabilityLimit);
             int runningWorkerCount = this.runningWorkerCount();
-
-            // A slow world/chunk/mod tick is not evidence that an NPC slot is too expensive. Keep
-            // queued work recovering toward the host's proven three-worker floor; otherwise an
-            // external spike can collapse automatic mode to one and baseline hysteresis prevents
-            // it from ever recovering while the unrelated load remains.
-            if (this.automaticWorkerLimit < routineWorkerFloor
-                    && runningWorkerCount >= this.automaticWorkerLimit
-                    && !this.waiting.isEmpty()) {
-                this.healthyWorkerEvaluationsRequired = AUTO_HEALTHY_GROWTH_CHECKS;
-                this.automaticWorkerReason = "routine_floor_growth_pending";
-                if (++this.healthyWorkerEvaluations >= AUTO_HEALTHY_GROWTH_CHECKS) {
-                    this.automaticWorkerLimit++;
-                    this.healthyWorkerEvaluations = 0;
-                    this.automaticWorkerReason = "routine_floor_growth";
+            boolean npcOwnedOverload = rollingNpcMs >= AUTO_REDUCTION_MIN_NPC_MSPT
+                    && rollingNpcShare >= AUTO_REDUCTION_MIN_NPC_SHARE;
+            // Use the full rolling mean: repeated expensive ticks still lose TPS even when a
+            // trimmed baseline hides them. Two separated evaluations reject a one-off spike.
+            // Severe sustained overload sheds optional work even if other mods own most cost.
+            boolean sustainedOverload = this.loadShedding.observe(rollingMspt,
+                    npcOwnedOverload ? reductionMspt : AUTO_SEVERE_OVERLOAD_MSPT);
+            if (sustainedOverload) {
+                this.healthyWorkerEvaluations = 0;
+                if (this.automaticWorkerLimit > 1) {
+                    this.automaticWorkerLimit = this.estimateSafeWorkerLimit(healthyTarget);
+                    this.automaticWorkerReason = "sustained_overload_reduced";
+                    // Status/force-ticket queries may evaluate a limit after beginTick already
+                    // ran. Retire excess leases now; wrappers stop cleanly at continuation.
+                    this.trimWorkers(this.automaticWorkerLimit);
+                } else {
+                    this.automaticWorkerReason = "overload_minimum_one";
                 }
                 return this.automaticWorkerLimit;
             }
-
-            boolean npcOwnedOverload = rollingNpcMs >= AUTO_REDUCTION_MIN_NPC_MSPT
-                    && rollingNpcShare >= AUTO_REDUCTION_MIN_NPC_SHARE;
-            if (this.automaticBaselineMspt >= reductionMspt
-                    && npcOwnedOverload
-                    && this.automaticWorkerLimit > routineWorkerFloor) {
+            if (rollingMspt >= reductionMspt) {
                 this.healthyWorkerEvaluations = 0;
-                this.automaticWorkerLimit = this.estimateSafeWorkerLimit(healthyTarget);
-                this.automaticWorkerReason = "npc_owned_overload_reduced";
+                this.automaticWorkerReason = "overload_growth_paused";
                 return this.automaticWorkerLimit;
             }
             if (this.automaticWorkerLimit >= capabilityLimit) {
@@ -399,12 +399,13 @@ public final class PlayerNpcAiWorkBudget {
                 return this.automaticWorkerLimit;
             }
             int requiredChecks;
-            if (this.automaticBaselineMspt <= healthyTarget) {
+            double growthMspt = Math.max(this.automaticBaselineMspt, rollingMspt);
+            if (growthMspt <= healthyTarget) {
                 requiredChecks = this.automaticWorkerLimit < 3
                         ? AUTO_HEALTHY_GROWTH_CHECKS
                         : AUTO_HIGH_HEALTHY_GROWTH_CHECKS;
                 this.automaticWorkerReason = "healthy_growth_pending";
-            } else if (this.automaticBaselineMspt <= cautionProbeMaxMspt) {
+            } else if (growthMspt <= cautionProbeMaxMspt) {
                 requiredChecks = this.automaticWorkerLimit < 3
                         ? AUTO_CAUTION_GROWTH_CHECKS
                         : AUTO_HIGH_CAUTION_GROWTH_CHECKS;
@@ -424,22 +425,9 @@ public final class PlayerNpcAiWorkBudget {
         }
 
         private int estimateSafeWorkerLimit(double targetMspt) {
-            int currentLimit = Math.max(1, this.automaticWorkerLimit);
-            int workerFloor = Math.min(AUTO_ROUTINE_WORKER_FLOOR, this.automaticCapabilityLimit);
-            int currentWorkers = Math.max(1, this.activeWorkers.size());
-            double averageMspt = PlayerNpcPerformanceMonitor.getRollingAverageMspt();
-            double npcMs = PlayerNpcPerformanceMonitor.getRollingAverageNpcMs();
-            if (npcMs <= 0.1D || averageMspt <= 0.0D) {
-                return Math.max(workerFloor, currentLimit - 1);
-            }
-
-            double nonNpcMs = Math.max(0.0D, averageMspt - npcMs);
-            double availableNpcMs = Math.max(0.0D, targetMspt - nonNpcMs);
-            double measuredNpcMsPerWorker = npcMs / currentWorkers;
-            int measuredSafeLimit = measuredNpcMsPerWorker <= 0.0D
-                    ? currentLimit - 1
-                    : (int) Math.floor(availableNpcMs / measuredNpcMsPerWorker);
-            return Math.max(workerFloor, Math.min(currentLimit - 1, measuredSafeLimit));
+            return NpcLoadSheddingPolicy.reducedWorkerLimit(this.automaticWorkerLimit,
+                    this.activeWorkers.size(), PlayerNpcPerformanceMonitor.getRollingAverageMspt(),
+                    PlayerNpcPerformanceMonitor.getRollingAverageNpcMs(), targetMspt);
         }
 
         private String automaticWorkerLimitStatus() {

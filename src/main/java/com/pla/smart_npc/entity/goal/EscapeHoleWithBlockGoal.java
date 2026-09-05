@@ -16,6 +16,7 @@ import com.pla.smart_npc.util.PlayerNpcFarmPlan.Plan;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
+import com.pla.smart_npc.util.PlayerNpcTeamUpManager;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -28,6 +29,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.goal.Goal;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
@@ -61,6 +63,7 @@ import java.util.Set;
 import javax.annotation.Nullable;
 
 public class EscapeHoleWithBlockGoal extends Goal {
+    private static final int PASSIVE_TRAP_PROBE_INTERVAL_TICKS = 10;
     private static final String AI_STATE = "ai.player_npc.pillaring_up";
     private static final int COOLDOWN_TICKS = 40;
     private static final int PLACE_DELAY_TICKS = 2;
@@ -152,6 +155,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private final ToolAi toolAi;
     private final BreakingBlockAi breakingBlockAi;
     private final ClearBlockAi clearBlockAi;
+    private final CanUseThrottle passiveTrapProbeThrottle = new CanUseThrottle(PASSIVE_TRAP_PROBE_INTERVAL_TICKS);
     private final PathStuckFallbackAi gatherPathStuckFallbackAi;
     private final PathStuckFallbackAi protectedPillarPathStuckFallbackAi;
     private EscapeMode mode = EscapeMode.NONE;
@@ -245,6 +249,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private boolean protectedPillarReplanPending;
     private boolean usingTemporaryBlock;
     private boolean explorationClimbEpisode;
+    private boolean teamFollowerRecoveryEpisode;
+    private long teamRecoveryPathAdmissionTick = Long.MIN_VALUE;
     private boolean workerSlotPaused;
     private boolean finished;
 
@@ -298,6 +304,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         BlockPos feet = this.playerNpc.blockPosition();
         BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+        this.teamFollowerRecoveryEpisode = this.playerNpc.isTeamFollowUpwardEscapeRequested();
+        if (this.teamFollowerRecoveryEpisode && this.playerNpc.tickCount < this.nextPillarPlanTick) {
+            return false;
+        }
         FarmEgressDecision farmEgressDecision = this.tryResumeOrStartFarmGateEgress(serverLevel, feet, requestedTarget);
         if (farmEgressDecision == FarmEgressDecision.START) {
             return true;
@@ -305,10 +315,19 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (farmEgressDecision == FarmEgressDecision.BLOCK) {
             return false;
         }
-        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
-            // Farm-gate egress above is a non-pillar safety movement. Every remaining mode can
-            // lead to pillar preparation or placement and therefore requires an existing slot;
-            // this read-only check never queues a turn during entity join/load.
+        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)
+                && (!this.teamFollowerRecoveryEpisode
+                || !this.tryAcquireTeamRecoveryPathStart())) {
+            // Farm-gate egress above is a non-pillar safety movement. Other modes require a
+            // routine worker, except a provenance-scoped team-follow recovery. That exception is
+            // admitted through the shared path-start slice and never enables material gathering.
+            return false;
+        }
+        if (requestedTarget == null && !this.passiveTrapProbeThrottle.canCheck(this.playerNpc)) {
+            // A goal-owned explicit climb request (including TEAMUP recovery) remains immediate.
+            // Only the speculative confined-shaft/trap discovery below is staggered: polling its
+            // collision/component probes every GoalSelector pass added measurable super.tick
+            // work even for ordinary idle/exploring holders standing on open terrain.
             return false;
         }
         if (requestedTarget != null && !serverLevel.hasChunkAt(requestedTarget)) {
@@ -381,6 +400,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                     OPEN_SHAFT_REQUEST_TICKS,
                     maxBlocks
             );
+            this.retainTeamFollowerRecoveryProvenance();
             requestedTarget = this.playerNpc.getUpwardEscapeTarget();
             this.directOpenShaftRequestTarget = openShaftTarget.immutable();
             this.directOpenShaftRequestUntilTick = this.playerNpc.tickCount + OPEN_SHAFT_REQUEST_TICKS;
@@ -389,7 +409,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 && requestedTarget.equals(this.directOpenShaftRequestTarget)
                 && this.playerNpc.tickCount < this.directOpenShaftRequestUntilTick;
         boolean retainedExplorationStallEscape = requestedTarget != null
-                && ExploreAroundGoal.isRetainedStallEscapeRequest(this.playerNpc, requestedTarget);
+                && (ExploreAroundGoal.isRetainedStallEscapeRequest(this.playerNpc, requestedTarget)
+                || this.teamFollowerRecoveryEpisode);
         boolean trapped = this.hasOpenBodySpace(serverLevel, feet)
                 && this.isWalkableFloor(serverLevel, feet.below())
                 && this.isActuallyTrapped(serverLevel, feet);
@@ -409,6 +430,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                         OPEN_SHAFT_REQUEST_TICKS,
                         maxBlocks
                 );
+                this.retainTeamFollowerRecoveryProvenance();
                 requestedTarget = this.playerNpc.getUpwardEscapeTarget();
                 this.trappedCaveRequestTarget = caveSurfaceTarget.immutable();
                 this.playerNpc.setIdleTraceDetail("pillar request admitted: trapped cave surface gain="
@@ -551,7 +573,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         int escapeBlocks = this.countEscapeBlocks();
-        if (escapeBlocks < this.requiredEscapeBlocks) {
+        if (escapeBlocks < this.requiredEscapeBlocks && !this.teamFollowerRecoveryEpisode) {
             EscapeMaterialTarget target = this.findEscapeMaterialTarget(serverLevel);
             if (target != null) {
                 setEscapeMode(EscapeMode.GATHER_BLOCKS);
@@ -588,8 +610,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
+        if (this.teamFollowerRecoveryEpisode && !this.isValidTeamFollowerRecovery()) {
+            return false;
+        }
         if (this.mode != EscapeMode.FARM_GATE_EGRESS
-                && !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+                && !this.hasEscapeExecutionAccess()) {
             this.workerSlotPaused = this.mode != EscapeMode.NONE;
             return false;
         }
@@ -676,10 +701,56 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || !this.playerNpc.onGround() && serverLevel.getFluidState(feet.below()).is(FluidTags.WATER);
     }
 
+    private boolean hasEscapeExecutionAccess() {
+        return PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)
+                || this.teamFollowerRecoveryEpisode && this.isValidTeamFollowerRecovery();
+    }
+
+    private boolean isValidTeamFollowerRecovery() {
+        if (!this.playerNpc.isTeamFollower()
+                || !this.playerNpc.isAlive()
+                || this.playerNpc.isNoAi()
+                || this.playerNpc.getTarget() != null) {
+            return false;
+        }
+        LivingEntity leader = PlayerNpcTeamUpManager.resolveLeader(this.playerNpc);
+        if (leader == null || !leader.isAlive() || leader.isRemoved() || leader.level() != this.playerNpc.level()) {
+            return false;
+        }
+        boolean finishingPillarStep = this.mode == EscapeMode.PILLAR
+                && (!this.playerNpc.onGround()
+                || this.placePos != null
+                || this.settlingPillarSupportPos != null);
+        return this.playerNpc.isTeamFollowUpwardEscapeRequested() || finishingPillarStep;
+    }
+
+    private boolean tryAcquireTeamRecoveryPathStart() {
+        if (!this.teamFollowerRecoveryEpisode) {
+            return true;
+        }
+        long tick = this.playerNpc.level().getServer() == null
+                ? this.playerNpc.tickCount
+                : this.playerNpc.level().getServer().getTickCount();
+        if (this.teamRecoveryPathAdmissionTick == tick) {
+            return true;
+        }
+        if (!PlayerNpcAiWorkBudget.tryAcquireNavigationPathStart(this.playerNpc)) {
+            return false;
+        }
+        this.teamRecoveryPathAdmissionTick = tick;
+        return true;
+    }
+
+    private void retainTeamFollowerRecoveryProvenance() {
+        if (this.teamFollowerRecoveryEpisode) {
+            this.playerNpc.retainTeamFollowUpwardEscapeProvenance();
+        }
+    }
+
     @Override
     public void start() {
         if (this.mode != EscapeMode.FARM_GATE_EGRESS
-                && !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+                && !this.hasEscapeExecutionAccess()) {
             this.workerSlotPaused = true;
             this.playerNpc.getNavigation().stop();
             return;
@@ -748,8 +819,12 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
             return;
         }
+        if (this.teamFollowerRecoveryEpisode && !this.isValidTeamFollowerRecovery()) {
+            this.finished = true;
+            return;
+        }
         if (this.mode != EscapeMode.FARM_GATE_EGRESS
-                && !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
+                && !this.hasEscapeExecutionAccess()) {
             this.workerSlotPaused = true;
             this.pauseForWorkerSlotLoss();
             return;
@@ -774,6 +849,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     @Override
     public void stop() {
         if (this.mode != EscapeMode.FARM_GATE_EGRESS
+                && !this.teamFollowerRecoveryEpisode
                 && (this.workerSlotPaused || !PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc))) {
             this.pauseForWorkerSlotLoss();
             return;
@@ -821,6 +897,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
         this.playerNpc.setCurrentAiDetail("");
         this.resetPlan();
+        this.teamFollowerRecoveryEpisode = false;
+        this.teamRecoveryPathAdmissionTick = Long.MIN_VALUE;
     }
 
     private void pauseForWorkerSlotLoss() {
@@ -1477,6 +1555,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                         failedTargetMaxPillarBlocks
                 );
             }
+            this.retainTeamFollowerRecoveryProvenance();
             this.playerNpc.setIdleTraceDetail("farm gate egress exhausted; trying protected upward route: "
                     + reason + " target=" + posText(failedTarget), 60);
         } else {
@@ -1826,7 +1905,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
             return;
         }
 
-        ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel);
+        boolean pathWorkAllowed = !this.teamFollowerRecoveryEpisode
+                || !this.clearBlockAi.needsPathWork(serverLevel)
+                || this.tryAcquireTeamRecoveryPathStart();
+        ClearBlockAi.TickResult result = this.clearBlockAi.tick(serverLevel, pathWorkAllowed);
         if (result == ClearBlockAi.TickResult.RUNNING) {
             return;
         }
@@ -2344,12 +2426,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
             this.failedPillarPlaceAttempts = 0;
             this.resetPillarStuckWatch();
             this.resetForcedPillarBaseWatch();
-            this.playerNpc.getNavigation().moveTo(
-                    plan.basePos().getX() + 0.5D,
-                    plan.basePos().getY(),
-                    plan.basePos().getZ() + 0.5D,
-                    1.0D
-            );
+            this.moveToEscapeTarget(plan.basePos(), 1.0D);
             this.playerNpc.getMoveControl().setWantedPosition(
                     plan.basePos().getX() + 0.5D,
                     plan.basePos().getY(),
@@ -2738,7 +2815,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.requiredEscapeBlocks = Math.max(1, pillarPlan.blocksNeeded());
 
         int escapeBlocks = this.countEscapeBlocks();
-        if (escapeBlocks < this.requiredEscapeBlocks) {
+        if (escapeBlocks < this.requiredEscapeBlocks && !this.teamFollowerRecoveryEpisode) {
             EscapeMaterialTarget target = this.findEscapeMaterialTarget(serverLevel);
             if (target != null) {
                 setEscapeMode(EscapeMode.GATHER_BLOCKS);
@@ -3199,15 +3276,13 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (this.mineStandPos == null) {
             return false;
         }
-
-        return this.playerNpc.getNavigation().moveTo(this.mineStandPos.getX() + 0.5D, this.mineStandPos.getY(), this.mineStandPos.getZ() + 0.5D, 1.0D);
+        return this.moveToEscapeTarget(this.mineStandPos, 1.0D);
     }
 
     private boolean moveToRouteNavigationTarget() {
         if (this.routeNavigationTarget == null) {
             return false;
         }
-
         this.playerNpc.getLookControl().setLookAt(
                 this.routeNavigationTarget.getX() + 0.5D,
                 this.routeNavigationTarget.getY() + 0.5D,
@@ -3215,12 +3290,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 40.0F,
                 40.0F
         );
-        return this.playerNpc.getNavigation().moveTo(
-                this.routeNavigationTarget.getX() + 0.5D,
-                this.routeNavigationTarget.getY(),
-                this.routeNavigationTarget.getZ() + 0.5D,
-                1.0D
-        );
+        return this.moveToEscapeTarget(this.routeNavigationTarget, 1.0D);
     }
 
     private boolean isAtPillarBase() {
@@ -3243,7 +3313,6 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (this.pillarBasePos == null) {
             return false;
         }
-
         this.playerNpc.getLookControl().setLookAt(
                 this.pillarBasePos.getX() + 0.5D,
                 this.pillarBasePos.getY(),
@@ -3251,12 +3320,25 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 40.0F,
                 40.0F
         );
-        return this.playerNpc.getNavigation().moveTo(
-                this.pillarBasePos.getX() + 0.5D,
-                this.pillarBasePos.getY(),
-                this.pillarBasePos.getZ() + 0.5D,
-                1.0D
+        return this.moveToEscapeTarget(this.pillarBasePos, 1.0D);
+    }
+
+    private boolean moveToEscapeTarget(BlockPos target, double speed) {
+        if (target == null) {
+            return false;
+        }
+        if (!this.teamFollowerRecoveryEpisode) {
+            return this.playerNpc.getNavigation().moveTo(
+                    target.getX() + 0.5D, target.getY(), target.getZ() + 0.5D, speed
+            );
+        }
+        if (!this.tryAcquireTeamRecoveryPathStart()) {
+            return false;
+        }
+        Path path = PathNavigationAi.createBoundedPath(
+                this.playerNpc, target, ESCAPE_DIAGNOSTIC_PATH_NODE_MULTIPLIER
         );
+        return path != null && path.canReach() && this.playerNpc.getNavigation().moveTo(path, speed);
     }
 
     private PillarPlan findPillarPlan(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
@@ -3549,6 +3631,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 EXPLORATION_CLIMB_CLEAR_REQUEST_TICKS,
                 this.getRequestedRouteMaxPillarBlocks()
         );
+        this.retainTeamFollowerRecoveryProvenance();
         setEscapeMode(EscapeMode.CLEAR_ROUTE);
         return true;
     }
@@ -3884,6 +3967,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     /** Bounds speculative route/reachability probes without changing normal navigation. */
     private Path createBoundedDiagnosticPath(BlockPos target) {
+        if (!this.tryAcquireTeamRecoveryPathStart()) {
+            return null;
+        }
         return PathNavigationAi.createBoundedPath(
                 this.playerNpc,
                 target,

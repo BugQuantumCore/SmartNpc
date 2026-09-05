@@ -87,6 +87,8 @@ public class LootNearbyChestGoal extends Goal {
     @Override
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || this.playerNpc.isTeamLeaderPlayer()
+                || this.playerNpc.isTeamUpRequestPending()
                 || !this.playerNpc.isAlive()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
@@ -123,6 +125,7 @@ public class LootNearbyChestGoal extends Goal {
     public boolean canContinueToUse() {
         return this.chestPos != null
                 && this.standPos != null
+                && !this.playerNpc.isTeamLeaderPlayer()
                 && !this.finishedLooting
                 && !this.routeFailed
                 && this.playerNpc.isAlive()

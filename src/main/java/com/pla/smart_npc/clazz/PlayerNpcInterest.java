@@ -13,7 +13,8 @@ public enum PlayerNpcInterest {
     TROLL_HIT("Troll Hit"),
     LOOTING("Looting"),
     CAUTIOUS("Cautious"),
-    CHEST_PROTECT("Chest Protect");
+    CHEST_PROTECT("Chest Protect"),
+    TEAMUP("Team Up");
 
     private final String displayName;
 

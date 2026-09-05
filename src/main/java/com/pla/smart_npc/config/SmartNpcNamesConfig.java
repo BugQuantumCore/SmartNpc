@@ -18,53 +18,56 @@ import java.util.Optional;
 import java.util.Set;
 
 public final class SmartNpcNamesConfig {
+    private static final Object ENTRY_CACHE_LOCK = new Object();
+    private static volatile List<String> cachedPlayerNpcNameEntries;
+    private static volatile long playerNpcNameEntriesRevision;
     private static final List<String> DEFAULT_PLAYER_NPC_NAMES = List.of(
             "Technoblade|EXPLORING|HUNT_MONSTERS|LOOTING|TROLL_HIT",
             "Dream|EXPLORING|MINING|HUNT_PLAYERS|LOOTING|HUNT_ANIMALS|TROLL_HIT|CHEST_PROTECT",
             "MrBeast|BUILDING|EXPLORING|LOOTING|TROLL_HIT|CHEST_PROTECT",
             "Skeppy|BUILDING|FARMING|TROLL_HIT|LOOTING|HUNT_MONSTERS",
-            "Sapnap|EXPLORING|HUNT_ANIMALS|HUNT_VILLAGERS|HUNT_PLAYERS",
+            "Sapnap|EXPLORING|HUNT_ANIMALS|HUNT_VILLAGERS|HUNT_PLAYERS|TEAMUP",
             "ExplodingTNT|MINING|EXPLORING|TROLL_HIT|LOOTING|HUNT_MONSTERS|CHEST_PROTECT",
             "GeorgeNotFound|BUILDING|FISHING|CAUTIOUS",
             "TommyInnit|EXPLORING|FARMING|TROLL_HIT",
             "Philza|FISHING|HUNT_MONSTERS|LOOTING|CHEST_PROTECT",
-            "Ranboo|FISHING|BUILDING|CAUTIOUS|HUNT_ANIMALS",
+            "Ranboo|FISHING|BUILDING|CAUTIOUS|HUNT_ANIMALS|TEAMUP",
             "Quackity|FARMING|BUILDING|EXPLORING|HUNT_PLAYERS|HUNT_ANIMALS|HUNT_MONSTERS",
             "Tubbo|FARMING|CAUTIOUS|LOOTING",
-            "DanTDM|EXPLORING|FISHING|HUNT_MONSTERS|TROLL_HIT",
+            "DanTDM|EXPLORING|FISHING|HUNT_MONSTERS|TROLL_HIT|TEAMUP",
             "PopularMMOs|EXPLORING|BUILDING|HUNT_MONSTERS|TROLL_HIT|LOOTING|CHEST_PROTECT",
-            "Darkere|BUILDING|FARMING|FISHING|HUNT_ANIMALS|LOOTING",
+            "Darkere|BUILDING|FARMING|FISHING|HUNT_ANIMALS|LOOTING|TEAMUP",
             "Darkhax|FISHING|CAUTIOUS",
-            "Emberwalker|FARMING|MINING|CAUTIOUS",
+            "Emberwalker|FARMING|MINING|CAUTIOUS|TEAMUP",
             "Gigabit101|BUILDING|FISHING|LOOTING|HUNT_PLAYERS|CHEST_PROTECT",
             "Kamefrede|MINING|FARMING|HUNT_MONSTERS|LOOTING",
             "KnightMiner_|MINING|EXPLORING|HUNT_MONSTERS|LOOTING",
-            "Lat|MINING|TROLL_HIT|HUNT_VILLAGERS|CHEST_PROTECT",
+            "Lat|MINING|TROLL_HIT|HUNT_VILLAGERS|CHEST_PROTECT|TEAMUP",
             "LexManos|EXPLORING|FISHING|LOOTING|HUNT_PLAYERS",
             "Mrbysco|BUILDING|EXPLORING|MINING|LOOTING",
-            "P3pp3rF1y|FARMING|EXPLORING|HUNT_MONSTERS|TROLL_HIT",
+            "P3pp3rF1y|FARMING|EXPLORING|HUNT_MONSTERS|TROLL_HIT|TEAMUP",
             "Ray|BUILDING|HUNT_PLAYERS|LOOTING|TROLL_HIT|CHEST_PROTECT",
             "Ridanis|FISHING|HUNT_ANIMALS|CAUTIOUS|LOOTING",
             "SOTMead|FARMING|HUNT_ANIMALS|LOOTING|HUNT_MONSTERS|CHEST_PROTECT",
-            "ShyNieke|EXPLORING|HUNT_MONSTERS|LOOTING",
+            "ShyNieke|EXPLORING|HUNT_MONSTERS|LOOTING|TEAMUP",
             "SkySom|EXPLORING|BUILDING|LOOTING|HUNT_PLAYERS|TROLL_HIT",
             "Soaryn|EXPLORING|FARMING|HUNT_MONSTERS|LOOTING",
             "ValkyrieofNight|FISHING|FARMING|CAUTIOUS|LOOTING",
             "XCompWiz|FARMING|BUILDING|TROLL_HIT|LOOTING|HUNT_VILLAGERS|CHEST_PROTECT",
             "DaReal_BingoBear|MINING|BUILDING|HUNT_ANIMALS|LOOTING|CAUTIOUS",
-            "darkphan|BUILDING|FISHING|LOOTING|HUNT_MONSTERS",
+            "darkphan|BUILDING|FISHING|LOOTING|HUNT_MONSTERS|TEAMUP",
             "direwolf20|FISHING|FARMING|EXPLORING|LOOTING|HUNT_MONSTERS|HUNT_ANIMALS",
             "dmodoomsirius|BUILDING|FARMING|FISHING|LOOTING|TROLL_HIT|HUNT_PLAYERS|CHEST_PROTECT",
-            "malte0811|FARMING|CAUTIOUS|HUNT_ANIMALS|LOOTING",
+            "malte0811|FARMING|CAUTIOUS|HUNT_ANIMALS|LOOTING|TEAMUP",
             "nekosune|MINING|FARMING|FISHING|HUNT_PLAYERS|TROLL_HIT|LOOTING",
             "neptunepink|FISHING|HUNT_PLAYERS|HUNT_MONSTERS|LOOTING|CHEST_PROTECT",
-            "vadis365|BUILDING|FARMING|HUNT_VILLAGERS|TROLL_HIT|LOOTING",
-            "wyld|EXPLORING|HUNT_ANIMALS|LOOTING|CAUTIOUS",
+            "vadis365|BUILDING|FARMING|HUNT_VILLAGERS|TROLL_HIT|LOOTING|TEAMUP",
+            "wyld|EXPLORING|HUNT_ANIMALS|LOOTING|CAUTIOUS|TEAMUP",
             "paulsoaresjr|BUILDING|FARMING|LOOTING|HUNT_MONSTERS|CHEST_PROTECT",
             "Mhykol|FISHING|EXPLORING|HUNT_MONSTERS|LOOTING|HUNT_ANIMALS|CHEST_PROTECT",
-            "Vswe|BUILDING|EXPLORING|LOOTING|CAUTIOUS",
+            "Vswe|BUILDING|EXPLORING|LOOTING|CAUTIOUS|TEAMUP",
             "TurkeyDev|EXPLORING|FARMING|FISHING|TROLL_HIT|HUNT_ANIMALS|LOOTING",
-            "Gen_Deathrow|EXPLORING|HUNT_MONSTERS|HUNT_PLAYERS|LOOTING|CHEST_PROTECT",
+            "Gen_Deathrow|EXPLORING|HUNT_MONSTERS|HUNT_PLAYERS|LOOTING|CHEST_PROTECT|TEAMUP",
             "Sevadus|EXPLORING|FISHING|HUNT_VILLAGERS|CAUTIOUS|LOOTING|CHEST_PROTECT"
     );
     private static final CommentedConfig DEFAULT_PLAYER_NPC_ROSTER = createRosterConfig(DEFAULT_PLAYER_NPC_NAMES);
@@ -78,7 +81,7 @@ public final class SmartNpcNamesConfig {
                         "Player NPC roster. Each line uses: skinName = [\"INTEREST\", \"INTEREST\", ...]",
                         "The key must be a valid Minecraft username (1-16 letters, numbers, or underscores).",
                         "Each NPC must contain one job: BUILDING, MINING, FARMING, FISHING, or EXPLORING.",
-                        "Other interests: HUNT_MONSTERS, HUNT_ANIMALS, HUNT_PLAYERS, HUNT_VILLAGERS, TROLL_HIT, LOOTING, CAUTIOUS.",
+                        "Other interests: HUNT_MONSTERS, HUNT_ANIMALS, HUNT_PLAYERS, HUNT_VILLAGERS, TROLL_HIT, LOOTING, CAUTIOUS, CHEST_PROTECT, TEAMUP.",
                         "CAUTIOUS conflict with HUNT_MONSTERS and HUNT_PLAYERS since CAUTIOUS will let NPC run away from them.",
                         "For an optional display name, use a quoted key: \"skinName:Display Name\" = [\"BUILDING\", \"CAUTIOUS\"].",
                         "Duplicate skin names are ignored after the first entry. An empty table disables Player NPC spawning.")
@@ -90,15 +93,33 @@ public final class SmartNpcNamesConfig {
     }
 
     public static List<String> getPlayerNpcNameEntries() {
-        return toNameEntryStrings(PLAYER_NPC_NAMES.get());
+        List<String> entries = cachedPlayerNpcNameEntries;
+        if (entries != null) {
+            return entries;
+        }
+        synchronized (ENTRY_CACHE_LOCK) {
+            entries = cachedPlayerNpcNameEntries;
+            if (entries == null) {
+                entries = List.copyOf(toNameEntryStrings(PLAYER_NPC_NAMES.get()));
+                cachedPlayerNpcNameEntries = entries;
+            }
+            return entries;
+        }
+    }
+
+    /** Cheap generation check used by loaded NPCs to refresh interests after a config reload. */
+    public static long getPlayerNpcNameEntriesRevision() {
+        return playerNpcNameEntriesRevision;
     }
 
     public static void onConfigLoading(ModConfigEvent.Loading event) {
         migrateLegacyList(event.getConfig());
+        invalidatePlayerNpcNameEntries(event.getConfig());
     }
 
     public static void onConfigReloading(ModConfigEvent.Reloading event) {
         migrateLegacyList(event.getConfig());
+        invalidatePlayerNpcNameEntries(event.getConfig());
     }
 
     public static Optional<NameEntry> parseNameEntry(String rawEntry) {
@@ -241,6 +262,22 @@ public final class SmartNpcNamesConfig {
                 }
             }
             config.getConfigData().set("playerNpcNames", createRosterConfig(entries));
+        }
+    }
+
+    private static void invalidatePlayerNpcNameEntries(ModConfig config) {
+        if (config.getSpec() != SPEC) {
+            return;
+        }
+        invalidatePlayerNpcNameEntries();
+    }
+
+    static void invalidatePlayerNpcNameEntries() {
+        synchronized (ENTRY_CACHE_LOCK) {
+            // Reload may mutate the existing NightConfig object in place, so identity/equality
+            // checks cannot prove freshness. The Forge config event is the cache boundary.
+            cachedPlayerNpcNameEntries = null;
+            playerNpcNameEntriesRevision++;
         }
     }
 

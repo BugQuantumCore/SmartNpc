@@ -2,6 +2,7 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.util.PlayerNpcTrashUtil;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.sounds.SoundEvents;
@@ -304,7 +305,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
             return false;
         }
         ItemStack groundStack = itemEntity.getItem();
-        if (groundStack.isEmpty() || !isUsefulWeapon(groundStack)) {
+        if (groundStack.isEmpty() || PlayerNpcTrashUtil.isDiscarded(groundStack) || !isUsefulWeapon(groundStack)) {
             return false;
         }
         ItemStack equipStack = groundStack.copy();
@@ -357,6 +358,7 @@ public class RecoverWeaponInCombatGoal extends Goal {
                 itemEntity -> itemEntity.isAlive()
                         && !itemEntity.hasPickUpDelay()
                         && !itemEntity.getItem().isEmpty()
+                        && !PlayerNpcTrashUtil.isDiscarded(itemEntity.getItem())
                         && isUsefulWeapon(itemEntity.getItem())
         );
 

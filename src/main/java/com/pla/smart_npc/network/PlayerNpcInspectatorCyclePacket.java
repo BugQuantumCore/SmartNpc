@@ -78,6 +78,7 @@ public class PlayerNpcInspectatorCyclePacket {
                             PlayerNpcInspectorData.createPerformanceText(),
                             PlayerNpcInspectorData.createDailyJobText(target),
                             packet.includeRequirements ? PlayerNpcInspectorData.createBuildRequirementsText(target) : "",
+                            PlayerNpcInspectorData.createTeamInfo(target),
                             PlayerNpcGoalTraceLogger.isEffectivelyTracing(sender, target)
                     )
             );

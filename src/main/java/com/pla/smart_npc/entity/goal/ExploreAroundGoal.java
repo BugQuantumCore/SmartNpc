@@ -54,6 +54,7 @@ public class ExploreAroundGoal extends Goal {
     private static final int MAX_EXPLORE_TICKS = 20 * 45;
     private static final int REPATH_INTERVAL_TICKS = 20 * 2;
     private static final int RADIUS_RETRY_COOLDOWN_TICKS = 20;
+    private static final int OVERLOADED_RADIUS_RETRY_COOLDOWN_TICKS = 20 * 3;
     private static final int WATER_ESCAPE_RETRY_MIN_TICKS = 20 * 8;
     private static final int WATER_ESCAPE_RETRY_RANDOM_TICKS = 20 * 8;
     private static final int UPWARD_ESCAPE_REQUEST_TICKS = 20 * 8;
@@ -61,6 +62,7 @@ public class ExploreAroundGoal extends Goal {
     private static final int MAX_EXPLORE_SAFE_DROP_BLOCKS = 5;
     private static final int EXPLORE_CAN_USE_INTERVAL_TICKS = 20;
     private static final int CONTINUE_PREDICATE_INTERVAL_TICKS = 20;
+    private static final int OVERLOADED_CONTINUE_PREDICATE_INTERVAL_TICKS = 20 * 2;
     private static final int FAILED_CLIMB_FALLBACK_REQUEST_TICKS = 20 * 15;
     private static final int EXPLORATION_CLIMB_OWNER_TICKS = 20 * 60;
     private static final int FAILED_CLIMB_FALLBACK_RETRY_TICKS = 20;
@@ -389,8 +391,11 @@ public class ExploreAroundGoal extends Goal {
 
         if (this.playerNpc.tickCount >= this.nextContinuePredicateCheckTick) {
             if (PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+                int continuePredicateInterval = PlayerNpcPerformanceMonitor.isAiWorkOverloaded()
+                        ? OVERLOADED_CONTINUE_PREDICATE_INTERVAL_TICKS
+                        : CONTINUE_PREDICATE_INTERVAL_TICKS;
                 this.nextContinuePredicateCheckTick = this.playerNpc.tickCount
-                        + CONTINUE_PREDICATE_INTERVAL_TICKS
+                        + continuePredicateInterval
                         + this.playerNpc.getRandom().nextInt(5);
                 this.continuePredicatesAllowed = this.shouldExplore.test(serverLevel)
                         && !this.shouldYieldToSubGoal.test(serverLevel);
@@ -1606,7 +1611,10 @@ public class ExploreAroundGoal extends Goal {
         }
 
         this.searchRadiusIndex = completedFullSearch ? 0 : this.searchRadiusIndex + 1;
-        this.retryWaitTicks = RADIUS_RETRY_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(RADIUS_RETRY_COOLDOWN_TICKS + 1);
+        int retryCooldown = PlayerNpcPerformanceMonitor.isAiWorkOverloaded()
+                ? OVERLOADED_RADIUS_RETRY_COOLDOWN_TICKS
+                : RADIUS_RETRY_COOLDOWN_TICKS;
+        this.retryWaitTicks = retryCooldown + this.playerNpc.getRandom().nextInt(retryCooldown + 1);
         this.nextSearchTick = this.playerNpc.tickCount + this.retryWaitTicks;
         this.waitingForRetry = true;
         this.playerNpc.getNavigation().stop();

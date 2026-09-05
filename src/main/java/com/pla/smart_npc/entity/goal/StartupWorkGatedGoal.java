@@ -44,7 +44,8 @@ public final class StartupWorkGatedGoal extends Goal {
 
     @Override
     public boolean canUse() {
-        if (!this.isStartupGraceComplete()
+        if ((this.playerNpc.isTeamFollower() || this.playerNpc.isTeamUpRequestPending())
+                || !this.isStartupGraceComplete()
                 || !PlayerNpcAiWorkBudget.canStartWork(
                 this.playerNpc,
                 this.predicateSlice,
@@ -69,7 +70,8 @@ public final class StartupWorkGatedGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
-        if (!this.isStartupGraceComplete()
+        if ((this.playerNpc.isTeamFollower() || this.playerNpc.isTeamUpRequestPending())
+                || !this.isStartupGraceComplete()
                 || !PlayerNpcAiWorkBudget.canContinueWork(this.playerNpc)) {
             return false;
         }
@@ -93,6 +95,9 @@ public final class StartupWorkGatedGoal extends Goal {
 
     @Override
     public void start() {
+        if (this.playerNpc.isTeamFollower() || this.playerNpc.isTeamUpRequestPending()) {
+            return;
+        }
         PlayerNpcAiWorkBudget.onWorkStarted(this.playerNpc);
         long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
         try {
@@ -115,6 +120,11 @@ public final class StartupWorkGatedGoal extends Goal {
 
     @Override
     public void tick() {
+        // Membership can change after GoalSelector's continuation check. Do not let a stale
+        // running wrapper perform another job action while its follower/pending gate is closed.
+        if (this.playerNpc.isTeamFollower() || this.playerNpc.isTeamUpRequestPending()) {
+            return;
+        }
         long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
         try {
             this.delegate.tick();

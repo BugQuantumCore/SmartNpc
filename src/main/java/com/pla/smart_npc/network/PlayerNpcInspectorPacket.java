@@ -20,7 +20,27 @@ public class PlayerNpcInspectorPacket {
     private final String dailyJobText;
     private final String requirementsText;
     private final String aiResourceText;
+    private final TeamInfo teamInfo;
     private final boolean traceEnabled;
+
+    public enum TeamRole {
+        NONE,
+        LEADER,
+        NPC_FOLLOWER,
+        PLAYER_FOLLOWER
+    }
+
+    public record TeamInfo(String teamName, String leaderName, TeamRole role) {
+        public TeamInfo {
+            teamName = teamName == null ? "" : teamName;
+            leaderName = leaderName == null ? "" : leaderName;
+            role = role == null ? TeamRole.NONE : role;
+        }
+
+        public static TeamInfo none() {
+            return new TeamInfo("", "", TeamRole.NONE);
+        }
+    }
 
     public PlayerNpcInspectorPacket(int entityId, List<ItemStack> items) {
         this(entityId, items, "");
@@ -68,7 +88,35 @@ public class PlayerNpcInspectorPacket {
             String performanceText,
             String dailyJobText,
             String requirementsText,
+            TeamInfo teamInfo,
+            boolean traceEnabled
+    ) {
+        this(entityId, items, buildStatusText, performanceText, dailyJobText, requirementsText, "", teamInfo, traceEnabled);
+    }
+
+    public PlayerNpcInspectorPacket(
+            int entityId,
+            List<ItemStack> items,
+            String buildStatusText,
+            String performanceText,
+            String dailyJobText,
+            String requirementsText,
             String aiResourceText,
+            boolean traceEnabled
+    ) {
+        this(entityId, items, buildStatusText, performanceText, dailyJobText, requirementsText,
+                aiResourceText, TeamInfo.none(), traceEnabled);
+    }
+
+    public PlayerNpcInspectorPacket(
+            int entityId,
+            List<ItemStack> items,
+            String buildStatusText,
+            String performanceText,
+            String dailyJobText,
+            String requirementsText,
+            String aiResourceText,
+            TeamInfo teamInfo,
             boolean traceEnabled
     ) {
         this.entityId = entityId;
@@ -78,6 +126,7 @@ public class PlayerNpcInspectorPacket {
         this.dailyJobText = dailyJobText == null ? "" : dailyJobText;
         this.requirementsText = requirementsText == null ? "" : requirementsText;
         this.aiResourceText = aiResourceText == null ? "" : aiResourceText;
+        this.teamInfo = teamInfo == null ? TeamInfo.none() : teamInfo;
         this.traceEnabled = traceEnabled;
     }
 
@@ -121,6 +170,10 @@ public class PlayerNpcInspectorPacket {
         return aiResourceText;
     }
 
+    public TeamInfo teamInfo() {
+        return teamInfo;
+    }
+
     public static void encode(PlayerNpcInspectorPacket packet, FriendlyByteBuf buffer) {
         buffer.writeVarInt(packet.entityId);
         buffer.writeVarInt(packet.items.size());
@@ -132,6 +185,9 @@ public class PlayerNpcInspectorPacket {
         buffer.writeUtf(packet.dailyJobText);
         buffer.writeUtf(packet.requirementsText);
         buffer.writeUtf(packet.aiResourceText);
+        buffer.writeUtf(packet.teamInfo.teamName());
+        buffer.writeUtf(packet.teamInfo.leaderName());
+        buffer.writeByte(packet.teamInfo.role().ordinal());
         buffer.writeBoolean(packet.traceEnabled);
     }
 
@@ -147,8 +203,14 @@ public class PlayerNpcInspectorPacket {
         String dailyJobText = buffer.readUtf();
         String requirementsText = buffer.readUtf();
         String aiResourceText = buffer.readUtf();
+        String teamName = buffer.readUtf();
+        String leaderName = buffer.readUtf();
+        int roleIndex = buffer.readUnsignedByte();
+        TeamRole[] roles = TeamRole.values();
+        TeamRole role = roleIndex < roles.length ? roles[roleIndex] : TeamRole.NONE;
         boolean traceEnabled = buffer.readBoolean();
-        return new PlayerNpcInspectorPacket(entityId, items, buildStatusText, performanceText, dailyJobText, requirementsText, aiResourceText, traceEnabled);
+        return new PlayerNpcInspectorPacket(entityId, items, buildStatusText, performanceText,
+                dailyJobText, requirementsText, aiResourceText, new TeamInfo(teamName, leaderName, role), traceEnabled);
     }
 
     public static void handle(PlayerNpcInspectorPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {

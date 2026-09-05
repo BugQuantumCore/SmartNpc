@@ -50,8 +50,10 @@ public final class PlayerNpcHomeEvent {
             playerNpc.stopSleeping();
             playerNpc.setSleepCooldown(20 * 90 + playerNpc.getRandom().nextInt(20 * 120));
             playerNpc.wakeUpIdleWork();
-            playerNpc.setTarget(breaker);
-            playerNpc.setCurrentAiState("ai.player_npc.retaliating");
+            if (!playerNpc.isTeamAlliedWith(breaker)) {
+                playerNpc.setTarget(breaker);
+                playerNpc.setCurrentAiState("ai.player_npc.retaliating");
+            }
             playerNpc.setCurrentAiDetail("bed broken by " + breaker.getDisplayName().getString());
             ChatUtil.brokenBedWhileSleeping(playerNpc, breaker);
         }

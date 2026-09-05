@@ -63,12 +63,13 @@ public class RespondToNpcAlertGoal extends Goal {
         return this.avoiding
                 && this.avoidTicks > 0
                 && this.threat != null
-                && this.threat.isAlive();
+                && this.threat.isAlive()
+                && !this.playerNpc.isTeamAlliedWith(this.threat);
     }
 
     @Override
     public void start() {
-        if (this.threat == null) {
+        if (this.threat == null || this.playerNpc.isTeamAlliedWith(this.threat)) {
             return;
         }
 

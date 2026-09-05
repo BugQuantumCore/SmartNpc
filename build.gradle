@@ -46,7 +46,13 @@ minecraft {
         }
 
         gameTestServer {
+            workingDirectory project.file('build/gametest')
             property 'forge.enabledGameTestNamespaces', mod_id
+            mods {
+                "${mod_id}" {
+                    source sourceSets.test
+                }
+            }
         }
 
         data {
@@ -144,4 +150,31 @@ publishing {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+tasks.register('loadSheddingRegression', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.pla.smart_npc.util.NpcLoadSheddingPolicyTest'
+}
+tasks.named('check').configure {
+    dependsOn tasks.named('loadSheddingRegression')
+}
+
+tasks.register('npcNamesCacheRegression', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.pla.smart_npc.config.SmartNpcNamesCacheTest'
+}
+
+tasks.register('prepareNpcGameTestStructures', Copy) {
+    from 'src/test/gameteststructures'
+    into 'build/gametest/gameteststructures'
+}
+
+tasks.matching { it.name == 'runGameTestServer' }.configureEach {
+    dependsOn tasks.named('testClasses'), tasks.named('prepareNpcGameTestStructures')
+}
+tasks.named('check').configure {
+    dependsOn tasks.named('npcNamesCacheRegression')
 }

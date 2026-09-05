@@ -50,6 +50,8 @@ public final class PlayerNpcChestProtectEvent {
             if (!(entity instanceof PlayerNpcEntity owner)
                     || !owner.isAlive()
                     || owner == offender
+                    || owner.isTeamFollower()
+                    || owner.isTeamAlliedWith(offender)
                     || !owner.hasInterest(PlayerNpcInterest.CHEST_PROTECT)
                     || !owner.isOwnedChest(chestPos)) {
                 continue;

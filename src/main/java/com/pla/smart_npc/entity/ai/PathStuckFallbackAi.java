@@ -274,7 +274,10 @@ public final class PathStuckFallbackAi {
             this.clearStepOffSearch();
             return false;
         }
-        if (!PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc)) {
+        boolean acquired = this.playerNpc.isTeamFollowUpwardEscapeRequested()
+                ? PlayerNpcAiWorkBudget.tryAcquireNavigationPathStart(this.playerNpc)
+                : PlayerNpcAiWorkBudget.tryAcquire(serverLevel, this.playerNpc);
+        if (!acquired) {
             this.detail = detailPrefix + " path fallback queued for shared search slice";
             return true;
         }

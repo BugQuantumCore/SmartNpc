@@ -111,6 +111,8 @@ public final class AiBudgetWaitingStrollGoal extends WaterAvoidingRandomStrollGo
 
     private boolean canWaitStroll() {
         return this.playerNpc.level() instanceof ServerLevel
+                && !this.playerNpc.isTeamFollower()
+                && !this.playerNpc.isTeamUpRequestPending()
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
                 && !this.playerNpc.isPassenger()
@@ -124,6 +126,8 @@ public final class AiBudgetWaitingStrollGoal extends WaterAvoidingRandomStrollGo
 
     private boolean canContinueStroll() {
         return this.playerNpc.level() instanceof ServerLevel
+                && !this.playerNpc.isTeamFollower()
+                && !this.playerNpc.isTeamUpRequestPending()
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
                 && !this.playerNpc.isPassenger()

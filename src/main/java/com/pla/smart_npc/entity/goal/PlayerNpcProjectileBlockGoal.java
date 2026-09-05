@@ -1,22 +1,27 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.util.Mth;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.projectile.Projectile;
+import net.minecraft.world.entity.projectile.ThrownPotion;
 import net.minecraft.world.item.BedItem;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.alchemy.PotionUtils;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayDeque;
@@ -24,18 +29,20 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Queue;
-import java.util.function.BiFunction;
+import java.util.UUID;
 
 public class PlayerNpcProjectileBlockGoal extends Goal {
-    private static final double PROJECTILE_SCAN_RADIUS = 6.0D;
-    private static final double PROJECTILE_SCAN_RADIUS_SQR = PROJECTILE_SCAN_RADIUS * PROJECTILE_SCAN_RADIUS;
-    private static final double INCOMING_DOT_THRESHOLD = 0.35D;
+    private static final double PROJECTILE_SCAN_RADIUS = 8.0D;
+    private static final double PROJECTILE_PREDICTION_TICKS = 8.0D;
+    private static final double TARGET_BOX_INFLATE = 0.45D;
     private static final int PLACE_INTERVAL_TICKS = 2;
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
     private final Queue<BlockPos> placementQueue = new ArrayDeque<>();
     private Projectile projectile;
+    private UUID lastConsideredProjectile;
+    private int nextProjectileScanTick;
     private int placeDelayTicks;
     private boolean finished;
 
@@ -46,6 +53,11 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
     }
 
     @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
+    }
+
+    @Override
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
                 || !this.playerNpc.isAlive()
@@ -53,14 +65,28 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
                 || this.playerNpc.isPassenger()
                 || !this.playerNpc.onGround()
                 || this.playerNpc.isHealing()
-                || this.playerNpc.hasPlaceBlockParryCooldown()
-                || !InventoryUtils.hasItem(this.playerNpc, this::isDefensiveBlock)
-                || this.playerNpc.getRandom().nextDouble() > this.playerNpc.getPlaceBlockToParryChance()) {
+                || this.playerNpc.hasPlaceBlockParryCooldown()) {
+            return false;
+        }
+        if (this.playerNpc.tickCount < this.nextProjectileScanTick) {
+            return false;
+        }
+        this.nextProjectileScanTick = this.playerNpc.tickCount + 2 + this.playerNpc.getRandom().nextInt(2);
+        if (!InventoryUtils.hasItem(this.playerNpc, this::isDefensiveBlock)) {
             return false;
         }
 
         Projectile incomingProjectile = this.findIncomingProjectile(serverLevel);
         if (incomingProjectile == null) {
+            this.lastConsideredProjectile = null;
+            return false;
+        }
+        if (incomingProjectile.getUUID().equals(this.lastConsideredProjectile)) {
+            return false;
+        }
+
+        this.lastConsideredProjectile = incomingProjectile.getUUID();
+        if (this.playerNpc.getRandom().nextDouble() > this.playerNpc.getPlaceBlockToParryChance()) {
             return false;
         }
 
@@ -92,6 +118,14 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
         this.playerNpc.getNavigation().stop();
         this.playerNpc.setPlaceBlockParryCooldown();
         this.playerNpc.setCurrentAiState("ai.player_npc.blocking_projectile");
+        // Build the supported two-block core together. Waiting multiple selector ticks between
+        // the base and head-height block lets fast arrows pass over the unfinished defense.
+        if (this.playerNpc.level() instanceof ServerLevel serverLevel) {
+            for (int i = 0; i < 2 && !this.placementQueue.isEmpty(); i++) {
+                this.placeIfReplaceable(serverLevel, this.placementQueue.poll());
+            }
+            this.placeDelayTicks = PLACE_INTERVAL_TICKS;
+        }
     }
 
     @Override
@@ -131,15 +165,26 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
     }
 
     private Projectile findIncomingProjectile(ServerLevel serverLevel) {
-        List<Projectile> projectiles = serverLevel.getEntitiesOfClass(
-                Projectile.class,
-                this.playerNpc.getBoundingBox().inflate(PROJECTILE_SCAN_RADIUS, 3.0D, PROJECTILE_SCAN_RADIUS),
-                this::isThreateningProjectile
-        );
-
+        AABB targetBox = this.playerNpc.getBoundingBox().inflate(TARGET_BOX_INFLATE);
         Projectile closest = null;
         double closestDistance = Double.MAX_VALUE;
-        for (Projectile projectile : projectiles) {
+        for (Projectile projectile : serverLevel.getEntitiesOfClass(
+                Projectile.class,
+                this.playerNpc.getBoundingBox().inflate(PROJECTILE_SCAN_RADIUS),
+                this::isThreateningProjectile
+        )) {
+            Vec3 velocity = projectile.getDeltaMovement();
+            Vec3 start = projectile.position();
+            Vec3 toTarget = targetBox.getCenter().subtract(start);
+            if (velocity.lengthSqr() < 1.0E-6D || velocity.dot(toTarget) <= 0.0D) {
+                continue;
+            }
+
+            Vec3 end = start.add(velocity.scale(PROJECTILE_PREDICTION_TICKS));
+            if (targetBox.clip(start, end).isEmpty()) {
+                continue;
+            }
+
             double distance = this.playerNpc.distanceToSqr(projectile);
             if (distance < closestDistance) {
                 closest = projectile;
@@ -150,7 +195,7 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
     }
 
     private boolean isThreateningProjectile(Projectile projectile) {
-        if (!projectile.isAlive() || projectile.isRemoved() || this.playerNpc.distanceToSqr(projectile) > PROJECTILE_SCAN_RADIUS_SQR) {
+        if (projectile == null || !projectile.isAlive() || projectile.isRemoved()) {
             return false;
         }
 
@@ -159,93 +204,46 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
             return false;
         }
 
-        Vec3 velocity = projectile.getDeltaMovement();
-        Vec3 toNpc = this.playerNpc.position().add(0.0D, this.playerNpc.getBbHeight() * 0.5D, 0.0D).subtract(projectile.position());
-        if (toNpc.lengthSqr() <= 3.0D * 3.0D) {
-            return true;
+        if (projectile instanceof ThrownPotion thrownPotion) {
+            var effects = PotionUtils.getMobEffects(thrownPotion.getItem());
+            if (effects.isEmpty() || effects.stream().allMatch(effect -> effect.getEffect().isBeneficial())) {
+                return false;
+            }
         }
-        if (velocity.lengthSqr() < 1.0E-4D || toNpc.lengthSqr() < 1.0E-4D) {
-            return false;
-        }
-
-        return velocity.normalize().dot(toNpc.normalize()) > INCOMING_DOT_THRESHOLD;
+        return true;
     }
 
     private List<BlockPos> findPlacementPattern(ServerLevel serverLevel, Projectile projectile) {
-        int pattern = this.playerNpc.getRandom().nextInt(11);
-        int rotation = this.playerNpc.getRandom().nextInt(4);
-        BiFunction<Integer, Integer, int[]> toWorld = this.getOffsetTransform(rotation);
-        BlockPos projectileXZ = BlockPos.containing(projectile.getX(), 0.0D, projectile.getZ());
-        int surfaceY = serverLevel.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, projectileXZ).getY();
-        int topY = Math.max(surfaceY, Mth.floor(projectile.getY()));
-        topY = Math.min(topY, surfaceY + 3);
-
+        Direction threatDirection = this.getThreatDirection(projectile);
+        Direction sideDirection = threatDirection.getClockWise();
+        BlockPos center = this.playerNpc.blockPosition().relative(threatDirection);
         List<BlockPos> placements = new ArrayList<>();
-        for (int y = surfaceY; y <= topY; y++) {
-            int layer = y - surfaceY;
-            BlockPos center = new BlockPos(projectileXZ.getX(), y, projectileXZ.getZ());
-            if (!this.canPlaceAt(serverLevel, center)) {
-                break;
-            }
-
-            placements.add(center.immutable());
-            for (int[] offset : this.extraOffsetsForPattern(pattern, layer)) {
-                int[] worldOffset = toWorld.apply(offset[0], offset[1]);
-                BlockPos extra = center.offset(worldOffset[0], 0, worldOffset[1]);
-                if (this.canPlaceAt(serverLevel, extra)) {
-                    placements.add(extra.immutable());
-                }
+        BlockPos[] candidates = {
+                center,
+                center.above(),
+                center.relative(sideDirection),
+                center.relative(sideDirection.getOpposite()),
+                center.relative(sideDirection).above(),
+                center.relative(sideDirection.getOpposite()).above()
+        };
+        for (BlockPos candidate : candidates) {
+            if (this.canPlaceAt(serverLevel, candidate)) {
+                placements.add(candidate.immutable());
             }
         }
         return placements;
     }
 
-    private int[][] extraOffsetsForPattern(int pattern, int layer) {
-        return switch (pattern) {
-            case 0 -> new int[][]{};
-            case 1 -> layer == 3 ? new int[][]{{1, 0}} : new int[][]{};
-            case 2 -> {
-                if (layer == 0) yield new int[][]{{-1, 0}, {1, 0}, {2, 0}};
-                if (layer == 1) yield new int[][]{{1, 0}};
-                yield new int[][]{};
-            }
-            case 3 -> layer == 1 ? new int[][]{{-1, 0}, {1, 0}} : new int[][]{};
-            case 4 -> layer == 0 ? new int[][]{{-1, 0}, {1, 0}} : new int[][]{};
-            case 5 -> new int[][]{{1, 0}};
-            case 6 -> layer <= 1 ? new int[][]{{1, 0}} : new int[][]{};
-            case 7 -> layer == 0 ? new int[][]{{1, 0}} : new int[][]{};
-            case 8 -> layer == 1 ? new int[][]{{1, 0}} : new int[][]{};
-            case 9 -> layer == 0 ? new int[][]{{-1, 0}} : new int[][]{};
-            default -> layer == 1 ? new int[][]{{-1, 0}} : new int[][]{};
-        };
-    }
-
-    private BiFunction<Integer, Integer, int[]> getOffsetTransform(int rotation) {
-        Direction facing = this.playerNpc.getDirection();
-        int forwardX = facing.getStepX();
-        int forwardZ = facing.getStepZ();
-        int rightX = -forwardZ;
-        int rightZ = forwardX;
-
-        for (int i = 0; i < rotation; i++) {
-            int nextForwardX = rightX;
-            int nextForwardZ = rightZ;
-            int nextRightX = -forwardZ;
-            int nextRightZ = forwardX;
-            forwardX = nextForwardX;
-            forwardZ = nextForwardZ;
-            rightX = nextRightX;
-            rightZ = nextRightZ;
+    private Direction getThreatDirection(Projectile projectile) {
+        double dx = projectile.getX() - this.playerNpc.getX();
+        double dz = projectile.getZ() - this.playerNpc.getZ();
+        if (Math.abs(dx) > Math.abs(dz)) {
+            return dx >= 0.0D ? Direction.EAST : Direction.WEST;
         }
-
-        int finalRightX = rightX;
-        int finalForwardX = forwardX;
-        int finalRightZ = rightZ;
-        int finalForwardZ = forwardZ;
-        return (right, forward) -> new int[]{
-                right * finalRightX + forward * finalForwardX,
-                right * finalRightZ + forward * finalForwardZ
-        };
+        if (Math.abs(dz) > 1.0E-6D) {
+            return dz >= 0.0D ? Direction.SOUTH : Direction.NORTH;
+        }
+        return this.playerNpc.getDirection();
     }
 
     private boolean placeIfReplaceable(ServerLevel serverLevel, BlockPos pos) {
@@ -260,18 +258,47 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
             return false;
         }
 
-        return this.placingBlockAi.placeBlock(serverLevel, pos, blockState);
+        if (!this.hasPlacementSupport(serverLevel, pos)
+                || !this.placingBlockAi.canPlaceWithoutClipping(serverLevel, pos, blockState)
+                || !this.placingBlockAi.placeBlock(serverLevel, pos, blockState)) {
+            this.giveOrDrop(blockStack);
+            return false;
+        }
+        return true;
     }
 
     private boolean canPlaceAt(ServerLevel serverLevel, BlockPos pos) {
         return serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
+                && serverLevel.hasChunkAt(pos)
+                && serverLevel.getFluidState(pos).isEmpty()
+                && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)
                 && serverLevel.getBlockState(pos).canBeReplaced();
+    }
+
+    private boolean hasPlacementSupport(ServerLevel serverLevel, BlockPos pos) {
+        BlockPos below = pos.below();
+        BlockState belowState = serverLevel.getBlockState(below);
+        if (belowState.isFaceSturdy(serverLevel, below, Direction.UP)
+                || !belowState.getCollisionShape(serverLevel, below).isEmpty()) {
+            return true;
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos neighbor = pos.relative(direction);
+            if (serverLevel.hasChunkAt(neighbor)
+                    && !serverLevel.getBlockState(neighbor).getCollisionShape(serverLevel, neighbor).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isDefensiveBlock(ItemStack stack) {
         if (stack.isEmpty()
                 || !(stack.getItem() instanceof BlockItem blockItem)
+                || stack.hasCustomHoverName()
+                || stack.isEnchanted()
                 || stack.is(Items.CRAFTING_TABLE)
                 || stack.is(Items.CHEST)
                 || stack.is(Items.FURNACE)
@@ -280,7 +307,20 @@ public class PlayerNpcProjectileBlockGoal extends Goal {
             return false;
         }
 
-        return blockItem.getBlock().defaultBlockState().canOcclude();
+        BlockState state = blockItem.getBlock().defaultBlockState();
+        return state.canOcclude()
+                && state.getFluidState().isEmpty()
+                && (stack.is(Items.DIRT)
+                || stack.is(Items.GRASS_BLOCK)
+                || stack.is(Items.COARSE_DIRT)
+                || stack.is(Items.ROOTED_DIRT)
+                || stack.is(Items.PODZOL)
+                || stack.is(ItemTags.PLANKS) && !this.playerNpc.shouldPrioritizeLogGathering()
+                || state.is(BlockTags.BASE_STONE_OVERWORLD)
+                || state.is(BlockTags.BASE_STONE_NETHER)
+                || state.is(Blocks.COBBLESTONE)
+                || state.is(Blocks.MOSSY_COBBLESTONE)
+                || state.is(Blocks.COBBLED_DEEPSLATE));
     }
 
     private void giveOrDrop(ItemStack stack) {

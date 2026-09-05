@@ -130,7 +130,8 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
 
     private TargetSearchContext createSearchContext() {
         return new TargetSearchContext(
-                this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_PLAYERS),
+                this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_PLAYERS)
+                        && !this.playerNpc.isTeamUpRequestPending(),
                 this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_MONSTERS),
                 this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_ANIMALS),
                 this.playerNpc.hasInterest(PlayerNpcInterest.HUNT_VILLAGERS),

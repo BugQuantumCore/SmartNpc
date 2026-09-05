@@ -26,9 +26,9 @@ public class PlayerNpcAlertManager {
     }
 
     public static void raiseDeathAlert(PlayerNpcEntity reporter, LivingEntity threat) {
-        if (raiseAlert(reporter, threat, true)) {
-            ChatUtil.warnDeath(reporter, threat);
-        }
+        // The alert is AI state, not a second victim chat line. ChatUtil.reportDeath owns the
+        // single visible death message for this incident.
+        raiseAlert(reporter, threat, true);
     }
 
     public static Optional<LivingEntity> getNearbyThreat(PlayerNpcEntity listener, double radius) {
@@ -50,6 +50,9 @@ public class PlayerNpcAlertManager {
 
             Entity threat = serverLevel.getEntity(alert.threatId());
             if (threat instanceof LivingEntity livingThreat && livingThreat.isAlive()) {
+                if (listener.isTeamAlliedWith(livingThreat)) {
+                    continue;
+                }
                 return Optional.of(livingThreat);
             }
         }

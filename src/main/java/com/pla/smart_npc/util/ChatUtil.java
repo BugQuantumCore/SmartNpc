@@ -14,11 +14,13 @@ import net.minecraft.world.entity.player.Player;
 
 public class ChatUtil {
     private static final int CALL_FOR_HELP_MESSAGES = 5;
-    private static final int WARN_DEATH_MESSAGES = 5;
     private static final int MISSING_HOME_CHEST_MESSAGES = 4;
     private static final int BROKEN_BED_MESSAGES = 4;
     private static final int KILLER_TAUNT_MESSAGES = 20;
     private static final int DEATH_REACTION_MESSAGES = 20;
+    private static final int TEAM_UP_GREETING_MESSAGES = 5;
+    private static final int TEAM_UP_ACCEPTANCE_MESSAGES = 2;
+    private static final int THROW_TRASH_MESSAGES = 5;
 
     public static void joinGame(Entity entity) {
         joinGame(entity, entity.getDisplayName());
@@ -36,12 +38,16 @@ public class ChatUtil {
         broadcastNpcChat(speaker, randomKey(speaker, "chat.player_npc.call_help", CALL_FOR_HELP_MESSAGES), threat.getDisplayName());
     }
 
-    public static void warnDeath(PlayerNpcEntity victim, Entity threat) {
-        if (!isPlayerLikeThreat(threat)) {
-            return;
-        }
+    public static void teamUpGreeting(PlayerNpcEntity speaker, LivingEntity target) {
+        broadcastNpcChat(speaker, randomKey(speaker, "chat.player_npc.teamup_request", TEAM_UP_GREETING_MESSAGES), target.getDisplayName());
+    }
 
-        broadcastNpcChat(victim, randomKey(victim, "chat.player_npc.warn_death", WARN_DEATH_MESSAGES), threat.getDisplayName());
+    public static void teamUpAcceptance(PlayerNpcEntity speaker) {
+        broadcastNpcChat(speaker, randomKey(speaker, "chat.player_npc.teamup_accept", TEAM_UP_ACCEPTANCE_MESSAGES));
+    }
+
+    public static void throwTrash(PlayerNpcEntity speaker) {
+        broadcastNpcChat(speaker, randomKey(speaker, "chat.player_npc.throw_trash", THROW_TRASH_MESSAGES));
     }
 
     public static void missingHomeChest(PlayerNpcEntity speaker) {
@@ -54,6 +60,18 @@ public class ChatUtil {
 
     public static void broadcastDeathSummary(PlayerNpcEntity victim, Component deathMessage) {
         broadcastSystemMessage(victim, deathMessage);
+    }
+
+    /**
+     * Emits one victim-side death message. A player-like killer gets the delayed NPC reaction;
+     * other deaths retain Minecraft's normal death summary instead.
+     */
+    public static void reportDeath(PlayerNpcEntity victim, Component deathMessage, Entity killer) {
+        if (isPlayerLikeThreat(killer)) {
+            scheduleDeathReaction(victim, killer);
+        } else {
+            broadcastDeathSummary(victim, deathMessage);
+        }
     }
 
     public static void scheduleKillerTaunt(PlayerNpcEntity killer, Entity victim) {

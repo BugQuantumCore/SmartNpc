@@ -7,11 +7,13 @@ import com.pla.smart_npc.util.PlayerNpcAdaptiveSearchScope;
 import com.pla.smart_npc.util.PlayerNpcForceTickManager;
 import com.pla.smart_npc.util.PlayerNpcNaturalSpawnCap;
 import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
+import com.pla.smart_npc.util.PlayerNpcTeamUpManager;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 
 import java.util.ArrayList;
@@ -62,6 +64,28 @@ public final class PlayerNpcInspectorData {
 
     public static String createBuildRequirementsText(PlayerNpcEntity playerNpc) {
         return PlayerNpcBuildStatusUtil.describeRequirements(playerNpc);
+    }
+
+    public static PlayerNpcInspectorPacket.TeamInfo createTeamInfo(PlayerNpcEntity playerNpc) {
+        if (!playerNpc.isTeamMember()) {
+            return PlayerNpcInspectorPacket.TeamInfo.none();
+        }
+        String teamName = playerNpc.getTeamName();
+        if (playerNpc.isTeamLeader()) {
+            return new PlayerNpcInspectorPacket.TeamInfo(
+                    teamName,
+                    playerNpc.getDisplayName().getString(),
+                    PlayerNpcInspectorPacket.TeamRole.LEADER
+            );
+        }
+        LivingEntity leader = PlayerNpcTeamUpManager.resolveLeader(playerNpc);
+        // The persisted, leader-named team remains visible even when the leader entity is not.
+        // Keep the owner empty so the client can localize an explicit unavailable label.
+        String leaderName = leader == null ? "" : leader.getDisplayName().getString();
+        PlayerNpcInspectorPacket.TeamRole role = playerNpc.isTeamLeaderPlayer()
+                ? PlayerNpcInspectorPacket.TeamRole.PLAYER_FOLLOWER
+                : PlayerNpcInspectorPacket.TeamRole.NPC_FOLLOWER;
+        return new PlayerNpcInspectorPacket.TeamInfo(teamName, leaderName, role);
     }
 
     public static String createPerformanceText() {

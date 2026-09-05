@@ -10,6 +10,7 @@ import com.pla.smart_npc.entity.ai.PathStuckFallbackAi;
 import com.pla.smart_npc.entity.ai.PillarUpAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcTrashUtil;
 import com.pla.smart_npc.util.PlayerNpcCraftingUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
@@ -506,6 +507,7 @@ public class PickupNearbyItemGoal extends Goal {
                 && !item.isRemoved()
                 && !item.hasPickUpDelay()
                 && !item.getItem().isEmpty()
+                && !PlayerNpcTrashUtil.isDiscarded(item.getItem())
                 && (failedItemId == null
                 || playerNpc.tickCount >= failedItemAvoidUntilTick
                 || !failedItemId.equals(item.getUUID()))

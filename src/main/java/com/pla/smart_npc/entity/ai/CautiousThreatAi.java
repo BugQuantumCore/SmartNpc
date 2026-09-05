@@ -23,7 +23,9 @@ public final class CautiousThreatAi {
                 || candidate == playerNpc
                 || !candidate.isAlive()
                 || candidate.isRemoved()
-                || candidate.isSpectator()) {
+                || candidate.isSpectator()
+                || playerNpc.isAlliedTo(candidate)
+                || candidate.isAlliedTo(playerNpc)) {
             return false;
         }
 
@@ -37,10 +39,6 @@ public final class CautiousThreatAi {
         if (candidate instanceof Player || candidate instanceof PlayerNpcEntity) {
             return true;
         }
-        if (playerNpc.isAlliedTo(candidate) || candidate.isAlliedTo(playerNpc)) {
-            return false;
-        }
-
         return candidate instanceof Enemy
                 || candidate instanceof Monster
                 || candidate.getType().getCategory() == MobCategory.MONSTER

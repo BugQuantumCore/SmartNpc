@@ -534,6 +534,13 @@ public final class PlayerNpcGoalTraceLogger {
     private static String flagsText(PlayerNpcEntity playerNpc) {
         StringJoiner joiner = new StringJoiner(",");
         joiner.add("job=" + sanitize(playerNpc.getSelectedDailyJobDisplayText()));
+        if (playerNpc.isTeamMember()) {
+            joiner.add("team=" + sanitize(playerNpc.getTeamName()));
+            joiner.add(playerNpc.isTeamLeader() ? "teamRole=leader" : "teamRole=follower");
+            if (playerNpc.getTeamLeaderUuid() != null) {
+                joiner.add("follow=" + playerNpc.getTeamLeaderUuid().toString().substring(0, 8));
+            }
+        }
         if (playerNpc.isBuildingBaseSelectionLocked()) {
             joiner.add("baseLock");
         }

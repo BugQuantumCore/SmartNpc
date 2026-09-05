@@ -65,6 +65,10 @@ import com.pla.smart_npc.entity.goal.StartupWorkGatedGoal;
 import com.pla.smart_npc.entity.goal.PlantSaplingGoal;
 import com.pla.smart_npc.entity.goal.RetargetCloserThreatGoal;
 import com.pla.smart_npc.entity.goal.ThrowEnderPearlGoal;
+import com.pla.smart_npc.entity.goal.ThrowTrashItemsGoal;
+import com.pla.smart_npc.entity.goal.WaterFallGoal;
+import com.pla.smart_npc.entity.goal.TeamUpGoal;
+import com.pla.smart_npc.entity.goal.FollowTeamLeaderGoal;
 import com.pla.smart_npc.entity.goal.TerraformBuildSiteGoal;
 import com.pla.smart_npc.entity.goal.TrollHitGoal;
 import com.pla.smart_npc.entity.goal.UtilityCraftingGoal;
@@ -322,6 +326,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     @Nullable
     private BlockPos ownedChestPos;
     @Nullable
+    private UUID teamId;
+    private String teamName = "";
+    @Nullable
+    private UUID teamFounderUuid;
+    @Nullable
+    private UUID teamLeaderUuid;
+    private boolean teamLeaderIsPlayer;
+    private boolean teamLeaderRole;
+    private boolean teamUpRequestPending;
+    private boolean teamMembershipValidated;
+    @Nullable
     private BlockPos upwardEscapeTarget;
     private int upwardEscapeRequestTicks = 0;
     private int upwardEscapeMaxPillarBlocks = 0;
@@ -329,6 +344,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private boolean explorationUpwardEscape = false;
     private boolean craftingUpwardEscape = false;
     private boolean terraformSupportUpwardEscape = false;
+    private boolean teamFollowUpwardEscape = false;
     @Nullable
     private BlockPos explorationClimbWatchPos;
     @Nullable
@@ -601,6 +617,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.explorationUpwardEscape = false;
         this.craftingUpwardEscape = false;
         this.terraformSupportUpwardEscape = false;
+        this.teamFollowUpwardEscape = false;
         this.resetExplorationClimbFallback();
         this.holeEscapeCooldown = 0;
     }
@@ -612,6 +629,29 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
         this.requestUpwardEscapeTo(target, ticks, maxPillarBlocks);
         this.explorationUpwardEscape = true;
+    }
+
+    public void requestTeamFollowUpwardEscapeTo(@Nullable BlockPos target, int ticks, int maxPillarBlocks) {
+        this.requestExplorationUpwardEscapeTo(target, ticks, maxPillarBlocks);
+        if (target != null && ticks > 0 && this.isTeamFollower()) {
+            this.teamFollowUpwardEscape = true;
+        }
+    }
+
+    public boolean isTeamFollowUpwardEscapeRequested() {
+        return this.getUpwardEscapeTarget() != null && this.teamFollowUpwardEscape && this.isTeamFollower();
+    }
+
+    public void retainTeamFollowUpwardEscapeProvenance() {
+        if (this.getUpwardEscapeTarget() != null && this.isTeamFollower()) {
+            this.teamFollowUpwardEscape = true;
+        }
+    }
+
+    public void clearTeamFollowUpwardEscapeTarget() {
+        if (this.teamFollowUpwardEscape) {
+            this.clearUpwardEscapeTarget();
+        }
     }
 
     public boolean isExplorationUpwardEscapeRequested() {
@@ -667,6 +707,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.explorationUpwardEscape = false;
         this.craftingUpwardEscape = false;
         this.terraformSupportUpwardEscape = false;
+        this.teamFollowUpwardEscape = false;
         this.resetExplorationClimbFallback();
     }
 
@@ -744,7 +785,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public boolean isDailyJobActive(PlayerNpcInterest interest) {
-        if (interest == null || !interest.isJob() || !this.hasInterest(interest)) {
+        if (this.isTeamFollower()
+                || interest == null || !interest.isJob() || !this.hasInterest(interest)) {
             return false;
         }
         if (this.isBuildingBaseSelectionLocked()) {
@@ -796,6 +838,123 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public String getInterestsDisplayText() {
         return this.getUsername().getInterestDisplayText();
+    }
+
+    public boolean isTeamFollower() {
+        return this.teamId != null && !this.teamLeaderRole;
+    }
+
+    public boolean isTeamMember() {
+        return this.teamId != null;
+    }
+
+    @Nullable
+    public UUID getTeamId() {
+        return this.teamId;
+    }
+
+    public String getTeamName() {
+        return this.teamName;
+    }
+
+    @Nullable
+    public UUID getTeamFounderUuid() {
+        return this.teamFounderUuid;
+    }
+
+    @Nullable
+    public UUID getTeamLeaderUuid() {
+        return this.teamLeaderUuid;
+    }
+
+    public boolean isTeamLeaderPlayer() {
+        return this.isTeamFollower() && this.teamLeaderUuid != null && this.teamLeaderIsPlayer;
+    }
+
+    public boolean isTeamLeader() {
+        return this.teamId != null && this.teamLeaderRole;
+    }
+
+    public boolean isTeamUpRequestPending() {
+        return this.teamUpRequestPending;
+    }
+
+    public void setTeamUpRequestPending(boolean pending) {
+        this.teamUpRequestPending = pending;
+    }
+
+    public void setTeamMembership(UUID nextTeamId, String nextTeamName, UUID founderUuid, boolean asLeader,
+                                  @Nullable UUID followLeaderUuid, boolean followLeaderIsPlayer) {
+        if (nextTeamId == null || founderUuid == null || !asLeader && followLeaderUuid == null) {
+            return;
+        }
+        if (!asLeader) {
+            this.interruptRoutineWork();
+            this.clearUpwardEscapeTarget();
+        }
+        this.teamId = nextTeamId;
+        this.teamName = nextTeamName == null || nextTeamName.isBlank() ? "Unnamed team" : nextTeamName;
+        this.teamFounderUuid = founderUuid;
+        this.teamLeaderRole = asLeader;
+        this.teamLeaderUuid = asLeader ? null : followLeaderUuid;
+        this.teamLeaderIsPlayer = !asLeader && followLeaderIsPlayer;
+        this.teamUpRequestPending = false;
+        this.teamMembershipValidated = true;
+        this.setTarget(null);
+        this.getNavigation().stop();
+        this.setCurrentAiState(AI_IDLE);
+        this.setCurrentAiDetail(asLeader ? "leader of " + this.teamName : "member of " + this.teamName);
+        this.wakeUpIdleWork();
+    }
+
+    public void clearTeamMembership() {
+        this.clearTeamFollowUpwardEscapeTarget();
+        this.teamId = null;
+        this.teamName = "";
+        this.teamFounderUuid = null;
+        this.teamLeaderUuid = null;
+        this.teamLeaderIsPlayer = false;
+        this.teamLeaderRole = false;
+        this.teamUpRequestPending = false;
+        this.teamMembershipValidated = true;
+        this.getNavigation().stop();
+        this.setTarget(null);
+        this.setCurrentAiState(AI_IDLE);
+        this.setCurrentAiDetail("");
+        this.wakeUpIdleWork();
+    }
+
+    /** Stops only scheduler-owned routine work, preserving combat and other non-job goals. */
+    public void interruptRoutineWork() {
+        List<WrappedGoal> runningGoals = this.goalSelector.getRunningGoals().toList();
+        for (WrappedGoal runningGoal : runningGoals) {
+            if (runningGoal.getGoal() instanceof StartupWorkGatedGoal) {
+                runningGoal.stop();
+            }
+        }
+        this.getNavigation().stop();
+    }
+
+    public boolean isTeamAlliedWith(@Nullable Entity entity) {
+        if (entity == null || entity == this) {
+            return entity == this;
+        }
+        if (this.teamId == null) {
+            return false;
+        }
+        UUID otherUuid = entity.getUUID();
+        if (this.isTeamLeaderPlayer() && this.teamLeaderUuid.equals(otherUuid)) {
+            return true;
+        }
+        if (!(entity instanceof PlayerNpcEntity otherNpc)) {
+            return false;
+        }
+        return this.teamId.equals(otherNpc.getTeamId());
+    }
+
+    @Override
+    public boolean isAlliedTo(@NotNull Entity entity) {
+        return this.isTeamAlliedWith(entity) || super.isAlliedTo(entity);
     }
 
     public void setGapCooldown() {
@@ -1540,6 +1699,24 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             tag.putInt("OwnedChestY", this.ownedChestPos.getY());
             tag.putInt("OwnedChestZ", this.ownedChestPos.getZ());
         }
+        tag.remove("TeamId");
+        tag.remove("TeamName");
+        tag.remove("TeamFounder");
+        tag.remove("TeamLeader");
+        tag.remove("TeamLeaderIsPlayer");
+        tag.remove("TeamLeaderRole");
+        if (this.teamId != null) {
+            tag.putUUID("TeamId", this.teamId);
+            tag.putString("TeamName", this.teamName);
+            if (this.teamFounderUuid != null) {
+                tag.putUUID("TeamFounder", this.teamFounderUuid);
+            }
+            tag.putBoolean("TeamLeaderRole", this.teamLeaderRole);
+        }
+        if (this.isTeamFollower() && this.teamLeaderUuid != null) {
+            tag.putUUID("TeamLeader", this.teamLeaderUuid);
+            tag.putBoolean("TeamLeaderIsPlayer", this.teamLeaderIsPlayer);
+        }
         ListTag temporarySupports = new ListTag();
         for (Map.Entry<BlockPos, Block> entry : this.temporaryPillarSupports.entrySet()) {
             ResourceLocation blockId = ForgeRegistries.BLOCKS.getKey(entry.getValue());
@@ -1628,6 +1805,32 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.selectedDailyJobDay = tag.getLong("SelectedDailyJobDay");
         }
         this.selectedDailyJobInterest = parseSavedDailyJobInterest(tag.getString("SelectedDailyJobInterest")).orElse(null);
+        this.teamLeaderUuid = tag.hasUUID("TeamLeader") ? tag.getUUID("TeamLeader") : null;
+        this.teamLeaderIsPlayer = this.teamLeaderUuid != null && tag.getBoolean("TeamLeaderIsPlayer");
+        this.teamLeaderRole = this.teamLeaderUuid == null && tag.getBoolean("TeamLeaderRole");
+        this.teamId = tag.hasUUID("TeamId")
+                ? tag.getUUID("TeamId")
+                : this.teamLeaderUuid != null
+                ? this.teamLeaderUuid
+                : this.teamLeaderRole
+                ? this.getUUID()
+                : null;
+        this.teamName = this.teamId == null
+                ? ""
+                : tag.contains("TeamName", Tag.TAG_STRING) && !tag.getString("TeamName").isBlank()
+                ? tag.getString("TeamName")
+                : this.getDisplayName().getString() + "'s team";
+        this.teamFounderUuid = this.teamId == null
+                ? null
+                : tag.hasUUID("TeamFounder")
+                ? tag.getUUID("TeamFounder")
+                : this.teamLeaderIsPlayer && this.teamLeaderUuid != null
+                ? this.teamLeaderUuid
+                : this.teamLeaderRole
+                ? this.getUUID()
+                : this.teamLeaderUuid;
+        this.teamUpRequestPending = false;
+        this.teamMembershipValidated = false;
         this.temporaryPillarSupports.clear();
         this.gatherLogsTemporaryPillarSupports.clear();
         if (tag.contains(TEMPORARY_PILLAR_SUPPORTS_TAG, Tag.TAG_LIST)) {
@@ -1690,7 +1893,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     private boolean shouldCustomInventoryPickup(ItemStack stack) {
-        if (stack.isEmpty()) {
+        if (stack.isEmpty() || PlayerNpcTrashUtil.isDiscarded(stack)) {
             return false;
         }
 
@@ -1719,7 +1922,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public boolean wantsToPickUp(@NotNull ItemStack stack) {
-        if (stack.isEmpty()) {
+        if (stack.isEmpty() || PlayerNpcTrashUtil.isDiscarded(stack)) {
             return false;
         }
 
@@ -1799,6 +2002,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         // Destination-aware water recovery is ticked by the work goal instead of globally
         // redirecting the NPC to an unrelated nearby bank.
         this.goalSelector.addGoal(0, new FloatGoal(this));
+        this.goalSelector.addGoal(0, new WaterFallGoal(this));
         this.registerVanillaCombatReplacementGoals();
         this.goalSelector.addGoal(1, new EscapeHoleWithBlockGoal(this));
         this.goalSelector.addGoal(1, new DescendHighColumnGoal(this, terraformBuildSiteGoal));
@@ -1806,6 +2010,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(1, this.gated(new CautiousAvoidThreatGoal(this), PlayerNpcInterest.CAUTIOUS));
         this.addWorkGoal(2, this.gated(new SleepAtHomeGoal(this), PlayerNpcInterest.BUILDING));
         this.goalSelector.addGoal(2, this.gated(new ScaredHideGoal(this), PlayerNpcInterest.CAUTIOUS));
+        // Personal maintenance must yield to priority-2 emergency bucket/projectile utilities.
+        this.goalSelector.addGoal(3, new ThrowTrashItemsGoal(this));
         this.addWorkGoal(3, new PickupNearbyItemGoal(this, 1.0D));
         this.goalSelector.addGoal(3, new RecoverWeaponInCombatGoal(this, 1.0D, 8.0D));
         this.goalSelector.addGoal(3, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS));
@@ -1988,6 +2194,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         // synchronous paths were charged only to Mob.super.tick() and produced the 291 ms
         // avoiding_alert spike seen in the TPS trace.
         this.goalSelector.addGoal(1, new RespondToNpcAlertGoal(this));
+        this.goalSelector.addGoal(4, new FollowTeamLeaderGoal(this, 1.05D));
+        this.goalSelector.addGoal(8, new TeamUpGoal(this));
         this.targetSelector.addGoal(4, this.gated(new PlayerNpcSmartTargetGoal(this), PlayerNpcInterest.HUNT_MONSTERS, PlayerNpcInterest.HUNT_ANIMALS, PlayerNpcInterest.HUNT_PLAYERS, PlayerNpcInterest.HUNT_VILLAGERS));
     }
 
@@ -2103,6 +2311,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public boolean hurt(@NotNull DamageSource damageSource, float f) {
+        if (this.isTeamAlliedWith(damageSource.getEntity())) {
+            return false;
+        }
         if (this.tryBlockDamageWithShield(damageSource, f)) {
             return false;
         }
@@ -2153,6 +2364,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public boolean doHurtTarget(@NotNull Entity target) {
+        if (this.isTeamAlliedWith(target)) {
+            this.setTarget(null);
+            return false;
+        }
         this.setCurrentAiState("ai.player_npc.melee_attacking");
         this.triggerMainHandAttackAnimation();
         boolean hurtTarget = super.doHurtTarget(target);
@@ -2496,6 +2711,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public void performRangedAttack(@NotNull LivingEntity pTarget, float pVelocity) {
+        if (this.isTeamAlliedWith(pTarget)) {
+            this.setTarget(null);
+            return;
+        }
         if (!BowFunction.hasClearShot(this, pTarget)) {
             return;
         }
@@ -2527,6 +2746,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     public void die(@NotNull DamageSource damageSource) {
         Component deathMessage = this.getCombatTracker().getDeathMessage();
         super.die(damageSource);
+        PlayerNpcTeamUpManager.onNpcDeath(this);
         this.handlePlayerNpcDeathChat(damageSource, deathMessage);
 
         if (this.level() instanceof ServerLevel serverLevel) {
@@ -2542,8 +2762,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return;
         }
 
-        ChatUtil.broadcastDeathSummary(this, deathMessage);
-        ChatUtil.scheduleDeathReaction(this, killer);
+        ChatUtil.reportDeath(this, deathMessage, killer);
 
         if (ChatUtil.isPlayerLikeThreat(killer) && killer instanceof LivingEntity livingKiller) {
             PlayerNpcAlertManager.raiseDeathAlert(this, livingKiller);
@@ -2718,6 +2937,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public void tick() {
+        if (this.level() instanceof ServerLevel && !this.teamMembershipValidated) {
+            PlayerNpcTeamUpManager.validateLoadedMembership(this);
+            this.teamMembershipValidated = true;
+        }
         boolean measurePerformance = this.level() instanceof ServerLevel
                 && PlayerNpcPerformanceMonitor.shouldMeasureNpcEntityTick();
         long performanceStartNanos = measurePerformance ? System.nanoTime() : 0L;
@@ -2760,6 +2983,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             );
         }
     }
+
 
     @Override
     protected Vec3i getPickupReach() {
@@ -2817,7 +3041,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.idleTraceDetail = "";
         }
         if (this.upwardEscapeRequestTicks > 0
-                && (this.upwardEscapeTarget == null || PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this))) {
+                && (this.upwardEscapeTarget == null
+                || PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this)
+                || this.teamFollowUpwardEscape)) {
             this.upwardEscapeRequestTicks = tickCooldown(this.upwardEscapeRequestTicks);
         }
         BlockPos feet = this.blockPosition();
@@ -2844,6 +3070,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             this.explorationUpwardEscape = false;
             this.craftingUpwardEscape = false;
             this.terraformSupportUpwardEscape = false;
+            this.teamFollowUpwardEscape = false;
             if (!hasExplorationClimbFallbackDetail) {
                 this.resetExplorationClimbFallback();
             }
@@ -4136,6 +4363,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     private void cleanupStaleCombatState() {
         LivingEntity currentTarget = this.getTarget();
+        if (currentTarget != null && this.isTeamAlliedWith(currentTarget)) {
+            this.setTarget(null);
+            this.getNavigation().stop();
+            currentTarget = null;
+        }
         if (currentTarget != null && (!currentTarget.isAlive() || currentTarget.isRemoved())) {
             if (currentTarget instanceof Animal) {
                 this.prioritizeAnimalLoot(currentTarget.blockPosition());

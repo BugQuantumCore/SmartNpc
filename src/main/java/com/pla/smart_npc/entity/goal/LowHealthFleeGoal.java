@@ -2,10 +2,24 @@ package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
+import com.pla.smart_npc.entity.ai.PlacingBlockAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.util.InventoryUtils;
+import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
+import net.minecraft.world.item.BedItem;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.entity.ai.util.DefaultRandomPos;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.pathfinder.Path;
@@ -25,17 +39,30 @@ public class LowHealthFleeGoal extends Goal {
     private static final int MAX_JUMP_COOLDOWN_TICKS = 28;
     private static final int POST_FLEE_ESCAPE_COOLDOWN_TICKS = 20 * 5;
     private static final float PATH_NODE_MULTIPLIER = 0.15F;
+    private static final int SUPPORT_JUMP_CHANCE_BOUND = 3;
+    private static final int MAX_SUPPORT_PLACE_TICKS = 10;
+    private static final double MIN_SUPPORT_PLACE_Y_OFFSET = 1.01D;
+    private static final double MAX_SUPPORT_HORIZONTAL_DRIFT_SQR = 1.5D * 1.5D;
 
     private final PlayerNpcEntity playerNpc;
+    private final PlacingBlockAi placingBlockAi;
     private LivingEntity threat;
     private Vec3 fleePos;
     private int fleeTicks;
     private int pathRecalculateTicks;
     private int jumpCooldownTicks;
+    private BlockPos jumpSupportPos;
+    private int jumpSupportTicks;
 
     public LowHealthFleeGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.placingBlockAi = new PlacingBlockAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK, Flag.JUMP));
+    }
+
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
     }
 
     @Override
@@ -100,6 +127,8 @@ public class LowHealthFleeGoal extends Goal {
         this.fleeTicks = 0;
         this.pathRecalculateTicks = 0;
         this.jumpCooldownTicks = 0;
+        this.jumpSupportPos = null;
+        this.jumpSupportTicks = 0;
         this.playerNpc.clearUpwardEscapeTarget();
         this.playerNpc.setHoleEscapeCooldown(POST_FLEE_ESCAPE_COOLDOWN_TICKS);
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -123,11 +152,11 @@ public class LowHealthFleeGoal extends Goal {
             this.pathRecalculateTicks = PATH_RECALCULATE_TICKS;
         }
 
-        if (this.fleePos != null) {
+        if (this.jumpSupportPos == null && this.fleePos != null) {
             this.playerNpc.getLookControl().setLookAt(this.fleePos.x, this.fleePos.y, this.fleePos.z, 60.0F, 60.0F);
         }
 
-        this.tryJump();
+        this.tickRandomJump();
     }
 
     private boolean canFleeFrom(LivingEntity threat) {
@@ -186,7 +215,12 @@ public class LowHealthFleeGoal extends Goal {
         }
     }
 
-    private void tryJump() {
+    private void tickRandomJump() {
+        if (this.jumpSupportPos != null) {
+            this.tickJumpSupport();
+            return;
+        }
+
         if (this.jumpCooldownTicks > 0) {
             this.jumpCooldownTicks--;
             return;
@@ -195,9 +229,138 @@ public class LowHealthFleeGoal extends Goal {
         if (this.playerNpc.onGround()
                 && !this.playerNpc.isInWaterOrBubble()
                 && !this.playerNpc.isInLava()) {
+            BlockPos feet = this.playerNpc.blockPosition();
+            if (this.playerNpc.getRandom().nextInt(SUPPORT_JUMP_CHANCE_BOUND) == 0
+                    && this.canPrepareJumpSupport(feet)) {
+                this.jumpSupportPos = feet.immutable();
+                this.jumpSupportTicks = 0;
+                this.lookDownAt(feet);
+            }
             this.playerNpc.jump();
         }
         this.jumpCooldownTicks = this.nextJumpCooldown();
+    }
+
+    private void tickJumpSupport() {
+        BlockPos supportPos = this.jumpSupportPos;
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || supportPos == null
+                || ++this.jumpSupportTicks > MAX_SUPPORT_PLACE_TICKS
+                || this.playerNpc.isInWaterOrBubble()
+                || this.playerNpc.isInLava()
+                || this.horizontalDistanceSqr(supportPos) > MAX_SUPPORT_HORIZONTAL_DRIFT_SQR) {
+            this.clearJumpSupport();
+            return;
+        }
+
+        this.lookDownAt(supportPos);
+        if (this.playerNpc.getBoundingBox().minY < supportPos.getY() + MIN_SUPPORT_PLACE_Y_OFFSET) {
+            if (this.playerNpc.getDeltaMovement().y < -0.05D) {
+                this.clearJumpSupport();
+            }
+            return;
+        }
+        if (!this.canPlaceJumpSupport(serverLevel, supportPos)) {
+            this.clearJumpSupport();
+            return;
+        }
+
+        ItemStack consumed = InventoryUtils.consumeItem(this.playerNpc, this::isEscapeSupportBlock, 1)
+                .orElse(ItemStack.EMPTY);
+        BlockState state = InventoryUtils.getBlockState(consumed);
+        if (consumed.isEmpty()
+                || state == null
+                || !state.canOcclude()
+                || !this.placingBlockAi.canPlaceWithoutClipping(serverLevel, supportPos, state)
+                || !this.placingBlockAi.placeBlock(serverLevel, supportPos, state)) {
+            this.giveOrDrop(consumed);
+            this.clearJumpSupport();
+            return;
+        }
+
+        this.playerNpc.markTemporaryPillarSupport(supportPos);
+        this.clearJumpSupport();
+    }
+
+    private boolean canPrepareJumpSupport(BlockPos feet) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || !InventoryUtils.hasItem(this.playerNpc, this::isEscapeSupportBlock)
+                || !this.canPlaceJumpSupport(serverLevel, feet)) {
+            return false;
+        }
+
+        BlockPos below = feet.below();
+        BlockState support = serverLevel.getBlockState(below);
+        return support.isFaceSturdy(serverLevel, below, Direction.UP)
+                || !support.getCollisionShape(serverLevel, below).isEmpty();
+    }
+
+    private boolean canPlaceJumpSupport(ServerLevel serverLevel, BlockPos pos) {
+        if (!serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.hasChunkAt(pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)) {
+            return false;
+        }
+
+        FluidState fluidState = serverLevel.getFluidState(pos);
+        return fluidState.isEmpty() && serverLevel.getBlockState(pos).canBeReplaced();
+    }
+
+    private boolean isEscapeSupportBlock(ItemStack stack) {
+        if (stack.isEmpty()
+                || !(stack.getItem() instanceof BlockItem blockItem)
+                || stack.hasCustomHoverName()
+                || stack.isEnchanted()
+                || stack.is(Items.CRAFTING_TABLE)
+                || stack.is(Items.CHEST)
+                || stack.is(Items.FURNACE)
+                || stack.getItem() instanceof BedItem
+                || blockItem.getBlock().defaultBlockState().is(Blocks.TORCH)) {
+            return false;
+        }
+        BlockState state = blockItem.getBlock().defaultBlockState();
+        return state.canOcclude()
+                && state.getFluidState().isEmpty()
+                && (stack.is(Items.DIRT)
+                || stack.is(Items.GRASS_BLOCK)
+                || stack.is(Items.COARSE_DIRT)
+                || stack.is(Items.ROOTED_DIRT)
+                || stack.is(Items.PODZOL)
+                || stack.is(ItemTags.PLANKS) && !this.playerNpc.shouldPrioritizeLogGathering()
+                || state.is(BlockTags.BASE_STONE_OVERWORLD)
+                || state.is(BlockTags.BASE_STONE_NETHER)
+                || state.is(Blocks.COBBLESTONE)
+                || state.is(Blocks.MOSSY_COBBLESTONE)
+                || state.is(Blocks.COBBLED_DEEPSLATE));
+    }
+
+    private double horizontalDistanceSqr(BlockPos pos) {
+        double dx = this.playerNpc.getX() - (pos.getX() + 0.5D);
+        double dz = this.playerNpc.getZ() - (pos.getZ() + 0.5D);
+        return dx * dx + dz * dz;
+    }
+
+    private void lookDownAt(BlockPos pos) {
+        this.playerNpc.getLookControl().setLookAt(
+                pos.getX() + 0.5D,
+                pos.getY() + 0.1D,
+                pos.getZ() + 0.5D,
+                70.0F,
+                70.0F
+        );
+    }
+
+    private void clearJumpSupport() {
+        this.jumpSupportPos = null;
+        this.jumpSupportTicks = 0;
+    }
+
+    private void giveOrDrop(ItemStack stack) {
+        if (!stack.isEmpty() && !InventoryUtils.addItem(this.playerNpc, stack)) {
+            this.playerNpc.spawnAtLocation(stack);
+        }
     }
 
     private int nextJumpCooldown() {

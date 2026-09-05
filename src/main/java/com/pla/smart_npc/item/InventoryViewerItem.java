@@ -53,6 +53,7 @@ public class InventoryViewerItem extends Item {
                             PlayerNpcInspectorData.createPerformanceText(),
                             PlayerNpcInspectorData.createDailyJobText(playerNpcEntity),
                             PlayerNpcInspectorData.createBuildRequirementsText(playerNpcEntity),
+                            PlayerNpcInspectorData.createTeamInfo(playerNpcEntity),
                             PlayerNpcGoalTraceLogger.isEffectivelyTracing(serverPlayer, playerNpcEntity)
                     )
             );

@@ -262,7 +262,10 @@ public class JukeboxDanceGoal extends Goal {
 
     private PlayerNpcEntity findDancingNpc() {
         return this.playerNpc.level()
-                .getEntitiesOfClass(PlayerNpcEntity.class, this.playerNpc.getBoundingBox().inflate(JUKEBOX_SCAN_RADIUS), entity -> entity != this.playerNpc && entity.isAlive() && entity.isDancing())
+                .getEntitiesOfClass(PlayerNpcEntity.class, this.playerNpc.getBoundingBox().inflate(JUKEBOX_SCAN_RADIUS), entity -> entity != this.playerNpc
+                        && entity.isAlive()
+                        && entity.isDancing()
+                        && !this.playerNpc.isTeamAlliedWith(entity))
                 .stream()
                 .min(Comparator.comparingDouble(this.playerNpc::distanceToSqr))
                 .orElse(null);

@@ -63,6 +63,7 @@ public class PlayerNpcGoalTracePacket {
                             PlayerNpcInspectorData.createPerformanceText(),
                             PlayerNpcInspectorData.createDailyJobText(playerNpc),
                             PlayerNpcInspectorData.createBuildRequirementsText(playerNpc),
+                            PlayerNpcInspectorData.createTeamInfo(playerNpc),
                             PlayerNpcGoalTraceLogger.isEffectivelyTracing(sender, playerNpc)
                     )
             );

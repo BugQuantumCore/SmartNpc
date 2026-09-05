@@ -74,6 +74,7 @@ public class SmartNpcInspectorOverlay {
     private static String snapshotDailyJobText = "";
     private static String snapshotRequirementsText = "";
     private static String snapshotAiResourceText = "";
+    private static PlayerNpcInspectorPacket.TeamInfo snapshotTeamInfo = PlayerNpcInspectorPacket.TeamInfo.none();
     private static boolean snapshotTraceEnabled;
     private static boolean requirementsVisible;
     private static long lastRefreshGameTime = Long.MIN_VALUE;
@@ -101,6 +102,7 @@ public class SmartNpcInspectorOverlay {
     private static int cachedHealthColor = 0xFF74E291;
     private static Component cachedAiText = Component.empty();
     private static List<String> cachedInterestsLines = List.of("");
+    private static List<String> cachedTeamLines = List.of("");
     private static String cachedDailyJobText = "";
     private static String cachedBuildStatusText = "";
     private static List<String> cachedPerformanceLines = List.of("");
@@ -150,6 +152,7 @@ public class SmartNpcInspectorOverlay {
         snapshotDailyJobText = packet.dailyJobText();
         snapshotRequirementsText = packet.requirementsText();
         snapshotAiResourceText = packet.aiResourceText();
+        snapshotTeamInfo = packet.teamInfo();
         snapshotTraceEnabled = packet.traceEnabled();
         lastDisplayCacheMillis = Long.MIN_VALUE;
     }
@@ -375,6 +378,7 @@ public class SmartNpcInspectorOverlay {
                 Component.translatable("gui.player_npc.inspector.interests", playerNpc.getInterestsDisplayText()).getString(),
                 PANEL_WIDTH - 16
         );
+        cachedTeamLines = wrappedLines(font, teamText().getString(), PANEL_WIDTH - 16);
         cachedDailyJobText = trimToWidth(
                 font,
                 Component.translatable("gui.player_npc.inspector.daily_job", snapshotDailyJobText).getString(),
@@ -445,6 +449,7 @@ public class SmartNpcInspectorOverlay {
     private static void renderPanel(GuiGraphics guiGraphics, Font font, int x, int y) {
         int panelHeight = currentPanelHeight();
         int interestsExtraHeight = interestsExtraHeight();
+        int teamExtraHeight = teamExtraHeight();
         int mainHandY = y + mainHandOffset();
         guiGraphics.fill(x, y, x + PANEL_WIDTH, y + panelHeight, 0xE80F1720);
         guiGraphics.fill(x, y, x + PANEL_WIDTH, y + 1, 0xFF4FD1C5);
@@ -458,9 +463,14 @@ public class SmartNpcInspectorOverlay {
         for (int i = 0; i < cachedInterestsLines.size(); i++) {
             guiGraphics.drawString(font, cachedInterestsLines.get(i), x + 8, y + 49 + i * TEXT_LINE_HEIGHT, 0xFFB7C9E2, false);
         }
-        guiGraphics.drawString(font, cachedDailyJobText, x + 8, y + 63 + interestsExtraHeight, 0xFFD6E4FF, false);
-        guiGraphics.drawString(font, cachedBuildStatusText, x + 8, y + 77 + interestsExtraHeight, 0xFFB7C9E2, false);
-        int performanceY = y + 91 + interestsExtraHeight;
+        for (int i = 0; i < cachedTeamLines.size(); i++) {
+            guiGraphics.drawString(font, cachedTeamLines.get(i), x + 8,
+                    y + 63 + interestsExtraHeight + i * TEXT_LINE_HEIGHT, 0xFF9ED7C5, false);
+        }
+        int contentExtraHeight = interestsExtraHeight + teamExtraHeight;
+        guiGraphics.drawString(font, cachedDailyJobText, x + 8, y + 77 + contentExtraHeight, 0xFFD6E4FF, false);
+        guiGraphics.drawString(font, cachedBuildStatusText, x + 8, y + 91 + contentExtraHeight, 0xFFB7C9E2, false);
+        int performanceY = y + 105 + contentExtraHeight;
         for (String line : cachedPerformanceLines) {
             guiGraphics.drawString(font, line, x + 8, performanceY, 0xFFB7C9E2, false);
             performanceY += TEXT_LINE_HEIGHT;
@@ -700,15 +710,51 @@ public class SmartNpcInspectorOverlay {
         return Math.max(0, cachedInterestsLines.size() - 1) * TEXT_LINE_HEIGHT;
     }
 
+    private static int teamExtraHeight() {
+        return Math.max(0, cachedTeamLines.size() - 1) * TEXT_LINE_HEIGHT;
+    }
+
     private static int mainHandOffset() {
-        int traceOffset = 91 + interestsExtraHeight() + cachedPerformanceLines.size() * TEXT_LINE_HEIGHT;
+        int contentExtraHeight = interestsExtraHeight() + teamExtraHeight();
+        int traceOffset = 105 + contentExtraHeight + cachedPerformanceLines.size() * TEXT_LINE_HEIGHT;
         int taskOffset = traceOffset + 15;
         int taskBottom = taskOffset + cachedTaskValueLines.size() * TEXT_LINE_HEIGHT;
-        return Math.max(151 + interestsExtraHeight(), taskBottom + 3);
+        return Math.max(165 + contentExtraHeight, taskBottom + 3);
     }
 
     private static int currentPanelHeight() {
-        return Math.max(PANEL_HEIGHT + interestsExtraHeight(), mainHandOffset() + 143);
+        return Math.max(PANEL_HEIGHT + 14 + interestsExtraHeight() + teamExtraHeight(), mainHandOffset() + 143);
+    }
+
+    private static Component teamText() {
+        return switch (snapshotTeamInfo.role()) {
+            case LEADER -> Component.translatable(
+                    "gui.player_npc.inspector.team_leader",
+                    snapshotTeamInfo.teamName(),
+                    snapshotTeamInfo.leaderName()
+            );
+            case NPC_FOLLOWER -> snapshotTeamInfo.leaderName().isBlank()
+                    ? Component.translatable(
+                    "gui.player_npc.inspector.team_npc_follower_unavailable",
+                    snapshotTeamInfo.teamName()
+            )
+                    : Component.translatable(
+                    "gui.player_npc.inspector.team_npc_follower",
+                    snapshotTeamInfo.teamName(),
+                    snapshotTeamInfo.leaderName()
+            );
+            case PLAYER_FOLLOWER -> snapshotTeamInfo.leaderName().isBlank()
+                    ? Component.translatable(
+                    "gui.player_npc.inspector.team_player_follower_unavailable",
+                    snapshotTeamInfo.teamName()
+            )
+                    : Component.translatable(
+                    "gui.player_npc.inspector.team_player_follower",
+                    snapshotTeamInfo.teamName(),
+                    snapshotTeamInfo.leaderName()
+            );
+            case NONE -> Component.translatable("gui.player_npc.inspector.team_none");
+        };
     }
 
     private static List<String> taskLines(Font font, String detail, int firstLineWidth, int fullLineWidth) {
@@ -1311,6 +1357,7 @@ public class SmartNpcInspectorOverlay {
         inspectatorEntityId = entityId;
         inspectedEntityId = entityId;
         snapshot = List.of();
+        snapshotTeamInfo = PlayerNpcInspectorPacket.TeamInfo.none();
         resetRequirementScroll();
         resetRequirementScrollInput();
         resetResourceScroll();
@@ -1382,6 +1429,7 @@ public class SmartNpcInspectorOverlay {
         PlayerNpcEntity nextNpc = nearby.get(nextIndex);
         inspectedEntityId = nextNpc.getId();
         snapshot = List.of();
+        snapshotTeamInfo = PlayerNpcInspectorPacket.TeamInfo.none();
         snapshotTraceEnabled = false;
         resetRequirementScroll();
         resetRequirementScrollInput();
@@ -1499,6 +1547,7 @@ public class SmartNpcInspectorOverlay {
         snapshotDailyJobText = "";
         snapshotRequirementsText = "";
         snapshotAiResourceText = "";
+        snapshotTeamInfo = PlayerNpcInspectorPacket.TeamInfo.none();
         snapshotTraceEnabled = false;
         requirementsVisible = false;
         resetRequirementScroll();
@@ -1510,6 +1559,7 @@ public class SmartNpcInspectorOverlay {
         cachedHealthColor = 0xFF74E291;
         cachedAiText = Component.empty();
         cachedInterestsLines = List.of("");
+        cachedTeamLines = List.of("");
         cachedDailyJobText = "";
         cachedBuildStatusText = "";
         cachedPerformanceLines = List.of("");

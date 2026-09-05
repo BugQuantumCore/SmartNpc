@@ -77,6 +77,7 @@ public final class PlayerNpcForceTickManager {
     @Nullable
     private static Boolean lastEnabled;
     private static int automaticSlotTarget = 1;
+    private static final NpcLoadSheddingPolicy LOAD_SHEDDING = new NpcLoadSheddingPolicy();
     private static int automaticCapabilityLimit = 1;
     private static int healthyAutomaticEvaluations;
     private static long lastAutomaticEvaluationTick = Long.MIN_VALUE;
@@ -217,7 +218,8 @@ public final class PlayerNpcForceTickManager {
         }
 
         int mode = SmartNpcConfig.getForceTickMode();
-        boolean handoffPrefetch = mode < 0 && workerSnapshot.holders().stream()
+        boolean overloaded = PlayerNpcPerformanceMonitor.isAiWorkOverloaded();
+        boolean handoffPrefetch = mode < 0 && !overloaded && workerSnapshot.holders().stream()
                 .filter(PlayerNpcAiWorkBudget.ResourceHolder::worker)
                 .anyMatch(holder -> holder.shiftRemainingTicks() > 0L
                         && holder.shiftRemainingTicks() <= WORKER_HANDOFF_PREFETCH_TICKS);
@@ -233,10 +235,13 @@ public final class PlayerNpcForceTickManager {
             }
             handoffProtectionUntilTick = Math.max(handoffProtectionUntilTick, server.getTickCount() + 60L);
         }
-        boolean handoffProtectionActive = mode < 0
+        boolean handoffProtectionActive = mode < 0 && !overloaded
                 && server.getTickCount() <= handoffProtectionUntilTick;
         if (!handoffProtectionActive) {
             handoffProtectedSlotFloor = 0;
+            if (overloaded) {
+                handoffProtectionUntilTick = Long.MIN_VALUE;
+            }
         }
         int slotLimit;
         if (mode > 0) {
@@ -337,6 +342,7 @@ public final class PlayerNpcForceTickManager {
 
         long tick = server.getTickCount();
         if (!PlayerNpcPerformanceMonitor.hasStableRollingSample()) {
+            LOAD_SHEDDING.reset();
             healthyAutomaticEvaluations = 0;
             automaticReason = "warming_up";
             return;
@@ -347,18 +353,21 @@ public final class PlayerNpcForceTickManager {
         }
         lastAutomaticEvaluationTick = tick;
         automaticBaselineMspt = PlayerNpcPerformanceMonitor.getRollingBaselineMspt();
+        double rollingMspt = PlayerNpcPerformanceMonitor.getRollingAverageMspt();
 
         int protectedWorkerFloor = Math.max(1, activeWorkerCount);
-        if (automaticBaselineMspt >= 55.0D) {
+        if (LOAD_SHEDDING.observe(rollingMspt, AUTO_OVERLOAD_REDUCTION_MSPT)) {
             healthyAutomaticEvaluations = 0;
+            // The automatic worker controller can now shrink to one. Release spare tickets
+            // with it instead of retaining chunks at a stale three-worker floor. A manually
+            // fixed worker count remains protected; do not unload an executing worker.
             automaticSlotTarget = protectedWorkerFloor;
-            automaticReason = "severe_overload_worker_floor";
+            automaticReason = "sustained_overload_worker_floor";
             return;
         }
-        if (automaticBaselineMspt >= AUTO_OVERLOAD_REDUCTION_MSPT) {
+        if (rollingMspt >= AUTO_OVERLOAD_REDUCTION_MSPT) {
             healthyAutomaticEvaluations = 0;
-            automaticSlotTarget = Math.max(protectedWorkerFloor, automaticSlotTarget - 1);
-            automaticReason = "overload_removed_spare";
+            automaticReason = "overload_confirmation_pending";
             return;
         }
         if (Math.max(activeWorkerCount, automaticSlotTarget) >= knownNpcCount) {
@@ -373,10 +382,11 @@ public final class PlayerNpcForceTickManager {
         }
 
         int requiredHealthyChecks;
-        if (automaticBaselineMspt <= AUTO_HEALTHY_GROWTH_MSPT) {
+        double growthMspt = Math.max(automaticBaselineMspt, rollingMspt);
+        if (growthMspt <= AUTO_HEALTHY_GROWTH_MSPT) {
             requiredHealthyChecks = AUTO_HEALTHY_GROWTH_CHECKS;
             automaticReason = "healthy_growth_pending";
-        } else if (automaticBaselineMspt <= AUTO_CAUTION_GROWTH_MSPT) {
+        } else if (growthMspt <= AUTO_CAUTION_GROWTH_MSPT) {
             requiredHealthyChecks = AUTO_CAUTION_GROWTH_CHECKS;
             automaticReason = "cautious_growth_pending";
         } else {
@@ -393,6 +403,7 @@ public final class PlayerNpcForceTickManager {
     }
 
     private static void resetAutomaticState() {
+        LOAD_SHEDDING.reset();
         automaticSlotTarget = 1;
         automaticCapabilityLimit = 1;
         healthyAutomaticEvaluations = 0;

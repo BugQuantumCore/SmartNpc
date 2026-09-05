@@ -42,9 +42,9 @@ public class FakePlayer extends PathfinderMob {
             PlayerNpcInterest.BUILDING
     );
     private static final Queue<FakePlayerName> NAME_POOL = new ArrayDeque<>();
-    private static List<String> cachedNameEntries = List.of();
     private static List<FakePlayerName> cachedNames = List.of();
     private static boolean nameConfigInitialized;
+    private static long cachedNameConfigRevision = Long.MIN_VALUE;
     private static final Queue<FakePlayer> PROFILE_QUEUE = new ConcurrentLinkedQueue<>();
     private static final Object PROFILE_LOCK = new Object();
     private static Thread profileThread;
@@ -57,6 +57,9 @@ public class FakePlayer extends PathfinderMob {
     private boolean capeAvailable;
     private boolean elytraAvailable;
     private volatile boolean profileUpdateQueued;
+    private FakePlayerName cachedUsername;
+    private String cachedUsernameValue = "";
+    private long cachedUsernameConfigRevision = Long.MIN_VALUE;
 
     public double xCloakO;
     public double yCloakO;
@@ -79,6 +82,7 @@ public class FakePlayer extends PathfinderMob {
     public void onSyncedDataUpdated(@NotNull EntityDataAccessor<?> key) {
         super.onSyncedDataUpdated(key);
         if (NAME.equals(key)) {
+            this.invalidateCachedUsername();
             this.profile = null;
             this.clearTextureState();
             if (this.hasUsername()) {
@@ -195,7 +199,16 @@ public class FakePlayer extends PathfinderMob {
                 this.setUsername(nextName);
             }
         }
-        return new FakePlayerName(this.entityData.get(NAME));
+        String usernameValue = this.entityData.get(NAME);
+        long configRevision = SmartNpcNamesConfig.getPlayerNpcNameEntriesRevision();
+        if (this.cachedUsername == null
+                || this.cachedUsernameConfigRevision != configRevision
+                || !this.cachedUsernameValue.equals(usernameValue)) {
+            this.cachedUsername = new FakePlayerName(usernameValue);
+            this.cachedUsernameValue = usernameValue;
+            this.cachedUsernameConfigRevision = configRevision;
+        }
+        return this.cachedUsername;
     }
 
     public void setUsername(String username) {
@@ -214,6 +227,7 @@ public class FakePlayer extends PathfinderMob {
 
         useName(newName);
         this.entityData.set(NAME, newName.getCombinedNames());
+        this.invalidateCachedUsername();
 
         if (!Objects.equals(oldName, newName)) {
             this.profile = null;
@@ -333,10 +347,11 @@ public class FakePlayer extends PathfinderMob {
 
     private static List<FakePlayerName> configuredNames() {
         synchronized (NAME_POOL) {
-            List<String> configuredEntries = SmartNpcNamesConfig.getPlayerNpcNameEntries();
-            if (nameConfigInitialized && configuredEntries.equals(cachedNameEntries)) {
+            long configRevision = SmartNpcNamesConfig.getPlayerNpcNameEntriesRevision();
+            if (nameConfigInitialized && cachedNameConfigRevision == configRevision) {
                 return cachedNames;
             }
+            List<String> configuredEntries = SmartNpcNamesConfig.getPlayerNpcNameEntries();
 
             List<FakePlayerName> names = new ArrayList<>();
             Set<String> usedSkinNames = new HashSet<>();
@@ -350,12 +365,18 @@ public class FakePlayer extends PathfinderMob {
                 });
             }
 
-            cachedNameEntries = List.copyOf(configuredEntries);
             cachedNames = List.copyOf(names);
+            cachedNameConfigRevision = configRevision;
             nameConfigInitialized = true;
             NAME_POOL.clear();
             return cachedNames;
         }
+    }
+
+    private void invalidateCachedUsername() {
+        this.cachedUsername = null;
+        this.cachedUsernameValue = "";
+        this.cachedUsernameConfigRevision = Long.MIN_VALUE;
     }
 
     private static boolean isNameUsed(FakePlayerName name, Set<String> usedNameKeys) {
