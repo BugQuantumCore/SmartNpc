@@ -2,7 +2,11 @@ package com.pla.smart_npc.client.renderer;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.pla.smart_npc.clazz.FakePlayer;
+import com.pla.smart_npc.client.compat.BetterCombatClientCompat;
 import com.pla.smart_npc.client.gui.SmartNpcInspectorOverlay;
+import com.pla.smart_npc.client.model.BetterCombatPlayerNpcModel;
+import com.pla.smart_npc.client.renderer.layer.BetterCombatItemInHandLayer;
+import com.pla.smart_npc.compat.BetterCombatCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.client.model.HumanoidArmorModel;
 import net.minecraft.client.model.HumanoidModel;
@@ -13,6 +17,7 @@ import net.minecraft.client.renderer.entity.EntityRendererProvider;
 import net.minecraft.client.renderer.entity.HumanoidMobRenderer;
 import net.minecraft.client.renderer.entity.layers.ArrowLayer;
 import net.minecraft.client.renderer.entity.layers.HumanoidArmorLayer;
+import net.minecraft.client.renderer.entity.layers.ItemInHandLayer;
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
@@ -33,9 +38,9 @@ public class FakePlayerRenderer<T extends FakePlayer> extends HumanoidMobRendere
     private final int armorLayerIndex;
 
     public FakePlayerRenderer(EntityRendererProvider.Context context) {
-        super(context, new PlayerModel<>(context.bakeLayer(ModelLayers.PLAYER), false), 0.5F);
+        super(context, new BetterCombatPlayerNpcModel<>(context.bakeLayer(ModelLayers.PLAYER), false), 0.5F);
         this.defaultModel = this.model;
-        this.slimModel = new PlayerModel<>(context.bakeLayer(ModelLayers.PLAYER_SLIM), true);
+        this.slimModel = new BetterCombatPlayerNpcModel<>(context.bakeLayer(ModelLayers.PLAYER_SLIM), true);
         this.defaultArmorLayer = new HumanoidArmorLayer<>(
                 this,
                 new HumanoidArmorModel<>(context.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR)),
@@ -46,6 +51,27 @@ public class FakePlayerRenderer<T extends FakePlayer> extends HumanoidMobRendere
                 new HumanoidArmorModel<>(context.bakeLayer(ModelLayers.PLAYER_SLIM_INNER_ARMOR)),
                 new HumanoidArmorModel<>(context.bakeLayer(ModelLayers.PLAYER_SLIM_OUTER_ARMOR)),
                 context.getModelManager());
+
+        // HumanoidMobRenderer installs vanilla ItemInHandLayer in its
+        // constructor. Only replace it when Better Combat is actually loaded,
+        // keeping the vanilla renderer completely untouched otherwise.
+        if (BetterCombatCompat.isLoaded()) {
+            int vanillaHeldItemLayerIndex = -1;
+            for (int index = 0; index < this.layers.size(); index++) {
+                if (this.layers.get(index) instanceof ItemInHandLayer<?, ?>) {
+                    vanillaHeldItemLayerIndex = index;
+                    break;
+                }
+            }
+            if (vanillaHeldItemLayerIndex >= 0) {
+                this.layers.remove(vanillaHeldItemLayerIndex);
+                this.layers.add(
+                        vanillaHeldItemLayerIndex,
+                        new BetterCombatItemInHandLayer<>(this, context.getItemInHandRenderer()));
+            } else {
+                this.addLayer(new BetterCombatItemInHandLayer<>(this, context.getItemInHandRenderer()));
+            }
+        }
 
         ArrowLayer<T, PlayerModel<T>> arrowLayer = new ArrowLayer<>(context, this);
         this.addLayer(arrowLayer);
@@ -103,6 +129,11 @@ public class FakePlayerRenderer<T extends FakePlayer> extends HumanoidMobRendere
 
     @Override
     protected float getAttackAnim(@NotNull T entity, float partialTick) {
+        if (entity instanceof PlayerNpcEntity playerNpc
+                && BetterCombatClientCompat.hasActiveAttackAnimation(playerNpc)) {
+            return 0.0F;
+        }
+
         float attackAnim = super.getAttackAnim(entity, partialTick);
         if (attackAnim > 0.0F) {
             return attackAnim;

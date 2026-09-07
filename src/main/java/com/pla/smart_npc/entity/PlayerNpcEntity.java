@@ -5,6 +5,7 @@ import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.clazz.FakePlayer;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.config.SmartNpcConfig;
+import com.pla.smart_npc.compat.BetterCombatCompat;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
@@ -150,12 +151,15 @@ import java.util.function.Predicate;
 
 public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final EntityDataAccessor<Integer> MAIN_HAND_ATTACK_ANIMATION_TICKS = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.INT);
+    private static final EntityDataAccessor<Integer> BETTER_COMBAT_ATTACK_ANIMATION_TICKS = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.INT);
+    private static final EntityDataAccessor<Integer> BETTER_COMBAT_ATTACK_SEQUENCE = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<String> AI_STATE = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> AI_DETAIL = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<Boolean> DANCING = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
     private static final EntityDataAccessor<Boolean> EPIC_FIGHT_DIGGING = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
     private static final EntityDataAccessor<Boolean> SNEAKING_AI_HIDES_DISPLAY_NAME = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
     private static final int MAIN_HAND_ATTACK_ANIMATION_DURATION = 10;
+    private static final int BETTER_COMBAT_ATTACK_ANIMATION_DURATION = 120;
     private static final int MAIN_HAND_USE_ANIMATION_DURATION = 6;
     private static final int PLACE_BLOCK_PARRY_COOLDOWN_TICKS = 60;
     private static final double PLAYER_LIKE_JUMP_Y = 0.42D;
@@ -1637,6 +1641,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     protected void defineSynchedData() {
         super.defineSynchedData();
         this.entityData.define(MAIN_HAND_ATTACK_ANIMATION_TICKS, 0);
+        this.entityData.define(BETTER_COMBAT_ATTACK_ANIMATION_TICKS, 0);
+        this.entityData.define(BETTER_COMBAT_ATTACK_SEQUENCE, 0);
         this.entityData.define(AI_STATE, AI_IDLE);
         this.entityData.define(AI_DETAIL, "");
         this.entityData.define(DANCING, false);
@@ -2387,6 +2393,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
         this.setCurrentAiState("ai.player_npc.melee_attacking");
         this.triggerMainHandAttackAnimation();
+        this.triggerBetterCombatAttackAnimation();
         boolean hurtTarget = super.doHurtTarget(target);
         if (hurtTarget) {
             this.lastCombatProgressTick = this.tickCount;
@@ -2636,6 +2643,16 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.entityData.set(MAIN_HAND_ATTACK_ANIMATION_TICKS, MAIN_HAND_ATTACK_ANIMATION_DURATION);
     }
 
+    private void triggerBetterCombatAttackAnimation() {
+        if (!BetterCombatCompat.isLoaded()) {
+            return;
+        }
+
+        int sequence = this.entityData.get(BETTER_COMBAT_ATTACK_SEQUENCE);
+        this.entityData.set(BETTER_COMBAT_ATTACK_SEQUENCE, sequence == Integer.MAX_VALUE ? 1 : sequence + 1);
+        this.entityData.set(BETTER_COMBAT_ATTACK_ANIMATION_TICKS, BETTER_COMBAT_ATTACK_ANIMATION_DURATION);
+    }
+
     public void triggerMainHandUseAnimation() {
         if (this.entityData.get(MAIN_HAND_ATTACK_ANIMATION_TICKS) <= 0) {
             this.entityData.set(MAIN_HAND_ATTACK_ANIMATION_TICKS, MAIN_HAND_USE_ANIMATION_DURATION);
@@ -2649,6 +2666,18 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public int getMainHandAttackAnimationDuration() {
         return MAIN_HAND_ATTACK_ANIMATION_DURATION;
+    }
+
+    public int getBetterCombatAttackAnimationTicks() {
+        return this.entityData.get(BETTER_COMBAT_ATTACK_ANIMATION_TICKS);
+    }
+
+    public int getBetterCombatAttackAnimationDuration() {
+        return BETTER_COMBAT_ATTACK_ANIMATION_DURATION;
+    }
+
+    public int getBetterCombatAttackSequence() {
+        return this.entityData.get(BETTER_COMBAT_ATTACK_SEQUENCE);
     }
 
     public String getCurrentAiState() {
@@ -2968,6 +2997,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         int mainHandAttackAnimationTicks = this.getMainHandAttackAnimationTicks();
         if (mainHandAttackAnimationTicks > 0) {
             this.entityData.set(MAIN_HAND_ATTACK_ANIMATION_TICKS, mainHandAttackAnimationTicks - 1);
+        }
+
+        int betterCombatAttackAnimationTicks = this.getBetterCombatAttackAnimationTicks();
+        if (betterCombatAttackAnimationTicks > 0) {
+            this.entityData.set(BETTER_COMBAT_ATTACK_ANIMATION_TICKS, betterCombatAttackAnimationTicks - 1);
         }
 
         if (!(this.level() instanceof ServerLevel serverLevel)) return;
