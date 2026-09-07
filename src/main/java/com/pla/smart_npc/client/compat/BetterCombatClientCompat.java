@@ -12,6 +12,7 @@ import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ShieldItem;
 
@@ -93,15 +94,57 @@ public final class BetterCombatClientCompat {
 
             Object animationApplier = sampled.animationApplier();
             // Match PlayerAnimator's PlayerModelMixin application order.
-            applyPart(animationApplier, "head", model.head);
-            applyPart(animationApplier, "leftArm", model.leftArm);
-            applyPart(animationApplier, "rightArm", model.rightArm);
-            applyPart(animationApplier, "leftLeg", model.leftLeg);
-            applyPart(animationApplier, "rightLeg", model.rightLeg);
-            applyPart(animationApplier, "torso", model.body);
+            applyBodyParts(animationApplier, model);
             return true;
         } catch (ReflectiveOperationException | LinkageError | RuntimeException exception) {
             disable("apply the NPC attack animation", exception);
+            return false;
+        }
+    }
+
+    /**
+     * Applies Better Combat's resolved idle/holding pose to the NPC model.
+     *
+     * This follows Better Combat's player pose rules:
+     *  - main-hand pose comes from WeaponAttributes#pose();
+     *  - off-hand pose comes from WeaponAttributes#offHandPose() while dual wielding;
+     *  - one-handed body poses are suppressed while walking/sneaking, while
+     *    two-handed body poses remain active;
+     *  - item channels remain active while walking;
+     *  - attacks, item use, swimming, digging/swing activity and charged
+     *    crossbows suppress the idle pose.
+     */
+    public static boolean applyPoseAnimation(PlayerModel<?> model, PlayerNpcEntity playerNpc, float partialTick) {
+        if (!BetterCombatCompat.isLoaded() || disabled || isPoseSuppressed(playerNpc)) {
+            return false;
+        }
+
+        try {
+            ResolvedPoseSet poses = resolvePoseSet(playerNpc);
+            if (poses == null || !shouldApplyPoseBody(playerNpc, poses)) {
+                return false;
+            }
+
+            boolean applied = false;
+            // Better Combat's stack priority is off-hand body below main-hand
+            // body, so apply them in that same order.
+            if (poses.offHandPose() != null) {
+                SampledAnimation sampled = samplePose(poses.offHandPose(), playerNpc, partialTick);
+                if (sampled != null) {
+                    applyPoseBodyParts(sampled.animationApplier(), model, playerNpc);
+                    applied = true;
+                }
+            }
+            if (poses.mainHandPose() != null) {
+                SampledAnimation sampled = samplePose(poses.mainHandPose(), playerNpc, partialTick);
+                if (sampled != null) {
+                    applyPoseBodyParts(sampled.animationApplier(), model, playerNpc);
+                    applied = true;
+                }
+            }
+            return applied;
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException exception) {
+            disable("apply the NPC idle weapon pose", exception);
             return false;
         }
     }
@@ -121,32 +164,64 @@ public final class BetterCombatClientCompat {
             HumanoidArm renderedArm,
             float partialTick
     ) {
-        if (!BetterCombatCompat.isLoaded() || disabled || playerNpc.getBetterCombatAttackAnimationTicks() <= 0) {
+        if (!BetterCombatCompat.isLoaded() || disabled) {
             return false;
         }
 
         try {
-            SampledAnimation sampled = sampleCurrentAttack(playerNpc, partialTick);
-            if (sampled == null) {
+            // Attack has the highest Better Combat animation-stack priority.
+            // Do not compose an idle pose on top of it or the transforms would
+            // add together instead of behaving like layered PlayerAnimator.
+            if (playerNpc.getBetterCombatAttackAnimationTicks() > 0) {
+                SampledAnimation sampled = sampleCurrentAttack(playerNpc, partialTick);
+                if (sampled != null) {
+                    return applyHeldItemSample(poseStack, sampled, renderedArm);
+                }
+            }
+
+            if (isPoseSuppressed(playerNpc)) {
                 return false;
             }
 
-            String itemPart = renderedArm == HumanoidArm.LEFT ? "leftItem" : "rightItem";
-            TransformVector position = sampleTransform(sampled.animationApplier(), itemPart, "POSITION");
-            TransformVector rotation = sampleTransform(sampled.animationApplier(), itemPart, "ROTATION");
+            ResolvedPoseSet poses = resolvePoseSet(playerNpc);
+            if (poses == null) {
+                return false;
+            }
 
-            // This intentionally matches PlayerAnimator 1.20 HeldItemMixin:
-            // item offsets are model pixels (1/16 block) and Euler rotations
-            // are applied roll(Z), yaw(Y), pitch(X) in that exact order.
-            poseStack.translate(position.x() / 16.0F, position.y() / 16.0F, position.z() / 16.0F);
-            poseStack.mulPose(Axis.ZP.rotation(rotation.z()));
-            poseStack.mulPose(Axis.YP.rotation(rotation.y()));
-            poseStack.mulPose(Axis.XP.rotation(rotation.x()));
-            return true;
+            // Main/off hand in Minecraft map to the entity's main arm rather
+            // than always to right/left. PoseSubStack mirrors authored right
+            // hand poses for left-handed players; ResolvedPose carries that
+            // same mirror state.
+            boolean renderingMainHand = renderedArm == playerNpc.getMainArm();
+            ResolvedPose pose = renderingMainHand ? poses.mainHandPose() : poses.offHandPose();
+            if (pose == null) {
+                return false;
+            }
+
+            SampledAnimation sampled = samplePose(pose, playerNpc, partialTick);
+            return sampled != null && applyHeldItemSample(poseStack, sampled, renderedArm);
         } catch (ReflectiveOperationException | LinkageError | RuntimeException exception) {
             disable("apply the NPC held-item animation", exception);
             return false;
         }
+    }
+
+    private static boolean applyHeldItemSample(
+            PoseStack poseStack,
+            SampledAnimation sampled,
+            HumanoidArm renderedArm
+    ) throws ReflectiveOperationException {
+        String itemPart = renderedArm == HumanoidArm.LEFT ? "leftItem" : "rightItem";
+        TransformVector position = sampleTransform(sampled.animationApplier(), itemPart, "POSITION");
+        TransformVector rotation = sampleTransform(sampled.animationApplier(), itemPart, "ROTATION");
+
+        // Match PlayerAnimator 1.20 HeldItemMixin exactly: model-pixel
+        // translation followed by roll(Z), yaw(Y), pitch(X).
+        poseStack.translate(position.x() / 16.0F, position.y() / 16.0F, position.z() / 16.0F);
+        poseStack.mulPose(Axis.ZP.rotation(rotation.z()));
+        poseStack.mulPose(Axis.YP.rotation(rotation.y()));
+        poseStack.mulPose(Axis.XP.rotation(rotation.x()));
+        return true;
     }
 
     @Nullable
@@ -201,6 +276,154 @@ public final class BetterCombatClientCompat {
             throw new IllegalStateException("PlayerAnimator vector " + getter + "() did not return a number");
         }
         return number.floatValue();
+    }
+
+    @Nullable
+    private static SampledAnimation samplePose(
+            ResolvedPose pose,
+            PlayerNpcEntity playerNpc,
+            float partialTick
+    ) throws ReflectiveOperationException {
+        Object animation = pose.animation();
+        if (animation == null) {
+            return null;
+        }
+
+        float animationTime = poseAnimationTime(animation, playerNpc, partialTick);
+        int animationTick = Math.max(0, (int) Math.floor(animationTime));
+        float animationPartialTick = clamp(animationTime - animationTick, 0.0F, 0.9999F);
+
+        Object animationPlayer = newCustomAnimationPlayer(animation, animationTick);
+        Object animationForApplier = pose.mirror()
+                ? createMirroredAnimation(animationPlayer)
+                : animationPlayer;
+        Object animationApplier = newAnimationApplier(animationForApplier);
+        setAnimationPartialTick(animationApplier, animationForApplier, animationPartialTick);
+        return new SampledAnimation(animationApplier);
+    }
+
+    /**
+     * Better Combat's pose animations are normally persistent
+     * KeyframeAnimationPlayers. PlayerNpcEntity cannot own that player-only
+     * stack, so sample the same looping interval from the NPC's world age.
+     */
+    private static float poseAnimationTime(Object animation, PlayerNpcEntity playerNpc, float partialTick) {
+        int beginTick = readIntField(animation, "beginTick", 0);
+        int returnTick = readIntField(animation, "returnTick", beginTick);
+        int stopTick = readIntField(animation, "stopTick", Math.max(returnTick + 1, 20));
+
+        if (stopTick <= returnTick) {
+            return Math.max(0, beginTick);
+        }
+
+        float absoluteTime = Math.max(0.0F, playerNpc.tickCount + partialTick);
+        if (absoluteTime < stopTick) {
+            return absoluteTime;
+        }
+
+        float loopLength = stopTick - returnTick;
+        float loopTime = (absoluteTime - returnTick) % loopLength;
+        if (loopTime < 0.0F) {
+            loopTime += loopLength;
+        }
+        return returnTick + loopTime;
+    }
+
+    @Nullable
+    private static ResolvedPoseSet resolvePoseSet(PlayerNpcEntity playerNpc) throws ReflectiveOperationException {
+        ItemStack mainHand = playerNpc.getMainHandItem();
+        if (mainHand.isEmpty()) {
+            return null;
+        }
+
+        Object mainAttributes = getWeaponAttributes(mainHand);
+        if (mainAttributes == null) {
+            return null;
+        }
+
+        ResolvedPose mainPose = resolvePose(invokeNoArgs(mainAttributes, "pose"),
+                playerNpc.getMainArm() == HumanoidArm.LEFT);
+
+        Object offAttributes = getWeaponAttributes(playerNpc.getOffhandItem());
+        boolean dualWielding = offAttributes != null
+                && !isTwoHanded(mainAttributes)
+                && !isTwoHanded(offAttributes);
+
+        ResolvedPose offPose = null;
+        if (dualWielding) {
+            offPose = resolvePose(invokeNoArgs(offAttributes, "offHandPose"),
+                    playerNpc.getMainArm() != HumanoidArm.LEFT);
+        }
+
+        if (mainPose == null && offPose == null) {
+            return null;
+        }
+        return new ResolvedPoseSet(mainPose, offPose, isTwoHanded(mainAttributes));
+    }
+
+    @Nullable
+    private static ResolvedPose resolvePose(Object poseNameValue, boolean mirror)
+            throws ReflectiveOperationException {
+        if (!(poseNameValue instanceof String poseName) || poseName.isBlank()) {
+            return null;
+        }
+        Object animation = animationMap().get(poseName);
+        if (animation == null) {
+            return null;
+        }
+        return new ResolvedPose(animation, mirror);
+    }
+
+    private static boolean shouldApplyPoseBody(PlayerNpcEntity playerNpc, ResolvedPoseSet poses) {
+        if (poses.mainHandTwoHanded()) {
+            return true;
+        }
+        boolean walking = !playerNpc.isDeadOrDying()
+                && playerNpc.getDeltaMovement().horizontalDistance() > 0.03D;
+        boolean sneaking = playerNpc.isShiftKeyDown() || playerNpc.isCrouching();
+        return !walking && !sneaking;
+    }
+
+    private static boolean isPoseSuppressed(PlayerNpcEntity playerNpc) {
+        if (playerNpc.getBetterCombatAttackAnimationTicks() > 0
+                || playerNpc.getMainHandAttackAnimationTicks() > 0
+                || playerNpc.swinging
+                || playerNpc.isUsingItem()
+                || playerNpc.isSwimming()
+                || playerNpc.isEpicFightDigging()) {
+            return true;
+        }
+        ItemStack mainHand = playerNpc.getMainHandItem();
+        return !mainHand.isEmpty()
+                && mainHand.getItem() instanceof CrossbowItem
+                && CrossbowItem.isCharged(mainHand);
+    }
+
+    private static void applyPoseBodyParts(
+            Object animationApplier,
+            PlayerModel<?> model,
+            PlayerNpcEntity playerNpc
+    ) throws ReflectiveOperationException {
+        applyPart(animationApplier, "head", model.head);
+        applyPart(animationApplier, "leftArm", model.leftArm);
+        applyPart(animationApplier, "rightArm", model.rightArm);
+        // Better Combat disables pose leg channels while mounted so vanilla's
+        // riding leg pose remains authoritative. Swimming suppresses the whole
+        // pose earlier in isPoseSuppressed().
+        if (playerNpc.getVehicle() == null) {
+            applyPart(animationApplier, "leftLeg", model.leftLeg);
+            applyPart(animationApplier, "rightLeg", model.rightLeg);
+        }
+        applyPart(animationApplier, "torso", model.body);
+    }
+
+    private static void applyBodyParts(Object animationApplier, PlayerModel<?> model) throws ReflectiveOperationException {
+        applyPart(animationApplier, "head", model.head);
+        applyPart(animationApplier, "leftArm", model.leftArm);
+        applyPart(animationApplier, "rightArm", model.rightArm);
+        applyPart(animationApplier, "leftLeg", model.leftLeg);
+        applyPart(animationApplier, "rightLeg", model.rightLeg);
+        applyPart(animationApplier, "torso", model.body);
     }
 
     /**
@@ -751,6 +974,16 @@ public final class BetterCombatClientCompat {
     }
 
     private record CachedAttack(int sequence, @Nullable ResolvedAttack attack) {
+    }
+
+    private record ResolvedPose(Object animation, boolean mirror) {
+    }
+
+    private record ResolvedPoseSet(
+            @Nullable ResolvedPose mainHandPose,
+            @Nullable ResolvedPose offHandPose,
+            boolean mainHandTwoHanded
+    ) {
     }
 
     private record ResolvedAttack(

@@ -19,8 +19,8 @@ import net.minecraft.world.item.ItemStack;
  * Vanilla ItemInHandLayer with PlayerAnimator's held-item transform hook added
  * for PlayerNpcEntity.
  *
- * Better Combat attack animations contain rightItem/leftItem channels in
- * addition to rightArm/leftArm. PlayerAnimator normally injects these item
+ * Better Combat attack animations and weapon idle poses contain rightItem/leftItem
+ * channels in addition to rightArm/leftArm. PlayerAnimator normally injects these item
  * channels into ItemInHandLayer only when the entity implements its animated
  * Player interface. PlayerNpcEntity is a PathfinderMob, so that injection does
  * not run for it and the weapon keeps the vanilla grip/rotation.
@@ -86,7 +86,7 @@ public final class BetterCombatItemInHandLayer<T extends FakePlayer> extends Ite
         boolean leftHand = arm == HumanoidArm.LEFT;
         poseStack.translate((leftHand ? -1.0F : 1.0F) / 16.0F, 0.125F, -0.625F);
 
-        // PlayerAnimator's HeldItemMixin applies rightItem/leftItem here,
+        // PlayerAnimator's HeldItemMixin applies attack/pose rightItem/leftItem here,
         // immediately before ItemInHandRenderer#renderItem. Keeping the same
         // transform order is important because the animation was authored in
         // this post-vanilla-item-transform coordinate space.

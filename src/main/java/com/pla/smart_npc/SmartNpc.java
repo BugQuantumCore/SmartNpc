@@ -5,6 +5,7 @@ import com.pla.smart_npc.client.SmartNpcClientItemProperties;
 import com.pla.smart_npc.client.gui.InventoryViewerScreen;
 import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.config.SmartNpcConfig;
+import com.pla.smart_npc.config.SmartNpcEpicFightConfig;
 import com.pla.smart_npc.config.SmartNpcNamesConfig;
 import com.pla.smart_npc.event.NpcGearLoadEvent;
 import com.pla.smart_npc.init.SmartNpcModCreativeTabs;
@@ -54,6 +55,9 @@ public class SmartNpc {
         modEventBus.addListener(SmartNpcNamesConfig::onConfigReloading);
         context.registerConfig(ModConfig.Type.COMMON, SmartNpcConfig.SPEC, "smart_npc-server.toml");
         context.registerConfig(ModConfig.Type.COMMON, SmartNpcNamesConfig.SPEC, "smart_npc-names.toml");
+        if (EpicFightCompat.isLoaded()) {
+            context.registerConfig(ModConfig.Type.COMMON, SmartNpcEpicFightConfig.SPEC, "smart_npc-epicfight.toml");
+        }
         EpicFightCompat.registerModEventHandlers(modEventBus);
 
         if (FMLEnvironment.dist.isClient()) {

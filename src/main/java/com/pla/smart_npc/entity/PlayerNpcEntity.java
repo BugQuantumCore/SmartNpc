@@ -2033,7 +2033,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         // Personal maintenance must yield to priority-2 emergency bucket/projectile utilities.
         this.goalSelector.addGoal(3, new ThrowTrashItemsGoal(this));
         this.addWorkGoal(3, new PickupNearbyItemGoal(this, 1.0D));
-        this.goalSelector.addGoal(3, new RecoverWeaponInCombatGoal(this, 1.0D, 8.0D));
+        // Must outrank Epic Fight's priority-1 chasing goal so a disarmed NPC can
+        // break pursuit long enough to recover and equip a nearby weapon.
+        this.goalSelector.addGoal(0, new RecoverWeaponInCombatGoal(this, 1.2D, 10.0D));
         this.goalSelector.addGoal(3, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS));
         this.addWorkGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.addWorkGoal(5, this.gated(terraformBuildSiteGoal, PlayerNpcInterest.BUILDING));

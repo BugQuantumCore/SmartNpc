@@ -25,7 +25,11 @@ public class BetterCombatPlayerNpcModel<T extends FakePlayer> extends PlayerMode
 
         float partialTick = ageInTicks - entity.tickCount;
         partialTick = Math.max(0.0F, Math.min(1.0F, partialTick));
-        if (!BetterCombatClientCompat.applyAttackAnimation(this, playerNpc, partialTick)) {
+        boolean betterCombatApplied = BetterCombatClientCompat.applyAttackAnimation(this, playerNpc, partialTick);
+        if (!betterCombatApplied) {
+            betterCombatApplied = BetterCombatClientCompat.applyPoseAnimation(this, playerNpc, partialTick);
+        }
+        if (!betterCombatApplied) {
             return;
         }
 
