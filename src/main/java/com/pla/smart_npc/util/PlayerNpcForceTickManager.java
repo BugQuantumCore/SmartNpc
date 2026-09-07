@@ -56,15 +56,11 @@ public final class PlayerNpcForceTickManager {
     private static final int RESTORED_ENTITY_LOAD_GRACE_TICKS = 20 * 30;
     private static final int AUTO_EVALUATION_INTERVAL_TICKS = 20 * 5;
     private static final double AUTO_HEALTHY_GROWTH_MSPT = 40.0D;
-    private static final double AUTO_CAUTION_GROWTH_MSPT = 45.0D;
     private static final double AUTO_OVERLOAD_REDUCTION_MSPT = 52.0D;
     private static final int AUTO_HEALTHY_GROWTH_CHECKS = 2;
-    private static final int AUTO_CAUTION_GROWTH_CHECKS = 4;
-    // Keep automatic chunk tickets aligned with the routine AI budget. Extra tickets keep both
-    // NPC entities and their surrounding chunk/block-entity work alive, so a larger independent
-    // ceiling can recreate the same TPS pressure even after routine worker growth is capped.
-    // Manual forceTickManage=1 remains an explicit opt-in to ticket every NPC.
-    private static final int AUTO_MAX_FORCE_TICK_SLOTS = 4;
+    // Known population, the routine-worker target, and measured MSPT provide the live bounds.
+    // Keep the absolute guard aligned with the supported fixed worker maximum.
+    private static final int AUTO_MAX_FORCE_TICK_SLOTS = 64;
     private static final long WORKER_HANDOFF_PREFETCH_TICKS = 20 * 10L;
     private static final String NPC_TAB_PREFIX = "[NPC] ";
     private static final String NPC_TAB_PROFILE_PREFIX = "zzNPC";
@@ -249,7 +245,12 @@ public final class PlayerNpcForceTickManager {
             automaticBaselineMspt = PlayerNpcPerformanceMonitor.getRollingBaselineMspt();
             slotLimit = MANAGED_NPCS.size();
         } else {
-            updateAutomaticSlotTarget(server, workerIds.size(), MANAGED_NPCS.size());
+            updateAutomaticSlotTarget(
+                    server,
+                    workerIds.size(),
+                    MANAGED_NPCS.size(),
+                    workerSnapshot.effectiveWorkerLimit()
+            );
             slotLimit = Math.max(workerIds.size(), automaticSlotTarget);
             if (handoffPrefetch && MANAGED_NPCS.size() > workerIds.size()) {
                 // Load one future candidate before the time-1000 worker handoff. The scheduler can
@@ -331,14 +332,17 @@ public final class PlayerNpcForceTickManager {
     private static void updateAutomaticSlotTarget(
             MinecraftServer server,
             int activeWorkerCount,
-            int knownNpcCount
+            int knownNpcCount,
+            int effectiveWorkerLimit
     ) {
-        int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
-        long maxHeapBytes = Math.max(1L, Runtime.getRuntime().maxMemory());
-        int heapGiB = (int) Math.max(1L, maxHeapBytes / (1024L * 1024L * 1024L));
-        automaticCapabilityLimit = (int) Math.max(1L, Math.min(AUTO_MAX_FORCE_TICK_SLOTS,
-                Math.min((long) processors * 2L, (long) heapGiB * 3L)));
-        automaticSlotTarget = Math.max(1, Math.min(automaticSlotTarget, automaticCapabilityLimit));
+        automaticCapabilityLimit = AUTO_MAX_FORCE_TICK_SLOTS;
+        int workerPrefetchCeiling = Math.max(1, effectiveWorkerLimit + 1);
+        int liveCeiling = Math.max(1, Math.min(knownNpcCount,
+                Math.min(automaticCapabilityLimit, workerPrefetchCeiling)));
+        automaticSlotTarget = Math.max(1, Math.min(
+                Math.max(automaticSlotTarget, activeWorkerCount),
+                liveCeiling
+        ));
 
         long tick = server.getTickCount();
         if (!PlayerNpcPerformanceMonitor.hasStableRollingSample()) {
@@ -375,27 +379,24 @@ public final class PlayerNpcForceTickManager {
             automaticReason = "awaiting_unticketed_candidate";
             return;
         }
-        if (automaticSlotTarget >= automaticCapabilityLimit) {
+        if (automaticSlotTarget >= liveCeiling) {
             healthyAutomaticEvaluations = 0;
-            automaticReason = "capability_ceiling";
+            automaticReason = automaticSlotTarget >= automaticCapabilityLimit
+                    ? "capability_ceiling"
+                    : "worker_prefetch_ceiling";
             return;
         }
 
-        int requiredHealthyChecks;
         double growthMspt = Math.max(automaticBaselineMspt, rollingMspt);
         if (growthMspt <= AUTO_HEALTHY_GROWTH_MSPT) {
-            requiredHealthyChecks = AUTO_HEALTHY_GROWTH_CHECKS;
             automaticReason = "healthy_growth_pending";
-        } else if (growthMspt <= AUTO_CAUTION_GROWTH_MSPT) {
-            requiredHealthyChecks = AUTO_CAUTION_GROWTH_CHECKS;
-            automaticReason = "cautious_growth_pending";
         } else {
             healthyAutomaticEvaluations = 0;
             automaticReason = "holding_for_headroom";
             return;
         }
 
-        if (++healthyAutomaticEvaluations >= requiredHealthyChecks) {
+        if (++healthyAutomaticEvaluations >= AUTO_HEALTHY_GROWTH_CHECKS) {
             automaticSlotTarget++;
             healthyAutomaticEvaluations = 0;
             automaticReason = "healthy_slot_added";

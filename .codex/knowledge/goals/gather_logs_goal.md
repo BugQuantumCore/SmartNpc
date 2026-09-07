@@ -1,5 +1,13 @@
 # GatherLogsGoal
 
+An unfinished local log scan must not make `hasNearbyUsableLogTarget` return true. It has no
+actionable successor yet, and fresh pending scans otherwise reset or interrupt `ExploreAroundGoal`
+over and over while the worker remains stationary. Keep the retained bounded cursor in GatherLogs;
+allow exploration during PENDING, then let the higher-priority GatherLogs pre-empt when it selects
+a real log. This arbitration signal performs no independent scan or path search.
+
+Farming log-supply exploration must remain eligible under opaque cover just like mining, fishing, exploring, and active building. `PlayerNpcEntity.canExploreForLogSupply` may not require sky visibility or immediately adjacent tree cover for a farmer whose required logs are missing; a local search miss must allow relocation to obtain farm/tool supplies. Emergency hole escape retains its higher priority.
+
 The guaranteed center 5x5 log observation is the first slice of an adaptive retained episode.
 Stable server headroom expands eventual coverage to 9x9 and then 11x11, but every admitted pass
 still observes at most 25 loaded surface columns. The goal freezes scope/origin while pending,

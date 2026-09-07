@@ -1,0 +1,6 @@
+[
+  "A message",
+  "Only Ray says this|Ray",
+  "Everyone says this to Dream|DEFAULT|Dream",
+  "Herobrine is chasing me!|DEFAULT|annoyingvillagers:herobrine_clone"
+]

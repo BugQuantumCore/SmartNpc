@@ -11,11 +11,11 @@
 the server tick before calling the delegate's `canUse()` or `canContinueToUse()`. The minimum grace
 is 60 ticks, followed by a stable 0-60 tick UUID-derived per-NPC offset.
 
-Worker ownership does not authorize evaluating the entire idle routine catalog in one selector
-pass. Registrations are assigned round-robin to four predicate slices. Each NPC advances its slice
-exactly once on an actual resource-owned GoalSelector opportunity, so every repeated probe turn
-eventually covers every registration while only about one quarter of the catalog is eligible per
-pass. Do not derive the slice from absolute `tickCount`: GoalSelector's three-tick new-goal cadence
+Non-holder startup probes are assigned round-robin to eight predicate slices. Each probing NPC
+advances its slice exactly once on an actual resource-owned GoalSelector opportunity, so every
+repeated probe turn eventually covers every registration while only about one eighth of the
+catalog is eligible per pass. Persistent worker holders bypass this slicing and evaluate the
+complete compatible catalog normally. Do not derive the slice from absolute `tickCount`: GoalSelector's three-tick new-goal cadence
 and the multi-NPC scheduler queue can grant one NPC only a repeating subset of modulo phases, which
 previously starved Gigabit101's GatherLogs check while it visibly received probe turns. Interest-
 gated goals consume their slice before the cheap interest rejection, preventing inactive early

@@ -42,6 +42,20 @@ Builder home return uses the last working `ad93109`/`731df2d` recovery sequence:
 
 When the final home-center path is `path=none`, `ReturnPositionAi` should call `PathNavigationAi.moveToWithLocalFallback(...)`. That helper scans nearby standable cells and path-checks a bounded number of local waypoints, preferring cells that are closer to home, under open sky, or upward enough to leave a pit/corner. This prevents return-home from standing still when the home is reachable only after first walking to a nearby exit.
 
+An uphill builder return may also follow the bounded direct pathfinder result when A* cannot reach the
+final home node but does find useful progress up the terrain. This opt-in applies only to builder home
+return. The incomplete endpoint must be loaded, standable, no lower than the NPC, and strictly closer
+to home; every retained path node must stay loaded and fluid-free without a drop over the safe-return
+limit. The same `Path` object is handed to navigation instead of paying for a second path search.
+
+Open-sky builder return does not synthesize a forced climb merely because the goal is interrupted
+below a distant mountain home. Direct pillaring waits for the normal failed-route threshold. A forced
+upward escape is reserved for actual underground recovery and is not requested while the NPC stands
+on an owned temporary pillar. The explicit below-home-footprint surface recovery remains available.
+While an uphill builder return is pending, generic column descent yields at admission, continuation,
+each goal tick, and the final breaking predicate. Night/thunder makes this intent independent of a
+temporary idle or cooking state, so a brief goal interruption cannot remove return-route supports.
+
 Trace strings include:
 
 - `ai.player_npc.returning_home`

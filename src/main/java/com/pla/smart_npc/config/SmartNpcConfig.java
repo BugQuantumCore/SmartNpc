@@ -13,6 +13,8 @@ public class SmartNpcConfig {
     private static final int DEFAULT_MAX_NATURAL_PLAYER_NPCS = -1;
 
     public static ForgeConfigSpec.ConfigValue<Boolean> TURN_ON_NPC_CHAT;
+    public static ForgeConfigSpec.ConfigValue<Boolean> SHOW_NPC_CHAT_PREFIX;
+    public static ForgeConfigSpec.ConfigValue<String> NPC_CHAT_LOCALE;
     public static ForgeConfigSpec.IntValue FORCE_TICK_MANAGE;
     public static ForgeConfigSpec.IntValue MAX_NATURAL_PLAYER_NPCS;
     public static ForgeConfigSpec.IntValue AI_PROCESSING_NPC_LIMIT;
@@ -25,6 +27,13 @@ public class SmartNpcConfig {
         TURN_ON_NPC_CHAT = BUILDER.comment(
                         "Enable Player NPC chat.")
                 .define("turnOnNpcChat", true);
+        SHOW_NPC_CHAT_PREFIX = BUILDER.comment(
+                        "Add [NPC] before the existing <name> prefix in Player NPC chat.")
+                .define("showNpcChatPrefix", false);
+        NPC_CHAT_LOCALE = BUILDER.comment(
+                        "Datapack locale used for Player NPC event chat, for example en_us.")
+                .define("npcChatLocale", "en_us", value -> value instanceof String locale
+                        && locale.matches("[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*"));
 
         FORCE_TICK_MANAGE = BUILDER.comment(
                         "Keep Player NPC chunks loaded: -1 automatic, 0 disabled, 1 all NPCs.")

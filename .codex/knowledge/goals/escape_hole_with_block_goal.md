@@ -1,5 +1,18 @@
 # EscapeHoleWithBlockGoal
 
+Terraform support-fill requests use an exact requested feet height throughout forced-route
+admission, pillar planning, and completion. Ordinary forced-route one-block arrival tolerance is
+not valid for this handoff: it can leave the builder inside the support work level and repeatedly
+request the same climb. Open sky must not shorten Terraform's planned ascent below that height.
+DescendHighColumn protects the authoritative build footprint below the home origin as well as
+the house volume; it rechecks an active Terraform handoff before continuation and breaking so
+generic descent cannot remove the foundation/recovery column that Terraform just needed.
+
+The 2026-09-06 regression run passed all ten GameTests, including exact Terraform climb height,
+foundation protection, distant support approach, pending support retention, and the previous worker
+regressions. The isolated 1,024-entry empty-site scan completed in 18 bounded slices (7.63 ms total);
+this validates cursor throughput in the fixture, not timing or full navigation in the user's world.
+
 ## Source
 
 - `src/main/java/com/pla/smart_npc/entity/goal/EscapeHoleWithBlockGoal.java`
@@ -44,6 +57,8 @@ Exploration may request this pillar mode only toward a genuine local surface sta
 Completed exploration supports remain marked temporarily for placement safety, but that memory must not delay `DescendHighColumnGoal`. Once the upward request has ended, the hole cooldown has elapsed, and the existing narrow-column, lower-terrain, home, farm, fluid, block-entity, and breakability checks pass, descent may remove the remembered support immediately instead of waiting for the 45-second support-memory expiry.
 
 Cooldown uses `PlayerNpcEntity.holeEscapeCooldown`, decremented from the entity tick.
+
+The 2026-09-06 builder mine exit at (-86,96,135) exposed a wider shallow pocket: the immediate body neighbors were air, but its connected walking stands ended at two-block walls. When standing on an owned temporary support, the loaded radius-three open-shaft probe admits up to 24 connected stands and a shallower elevated rim; it still requires closed boundaries in all four directions and a terrain-supported walk-off. Open ground must reject this recovery even when its floor is remembered as a pillar support. Retain the proven rim through an exploration-style upward request, climb to its actual surface height, and physically jump/step across the checked body corridor before considering escape complete. Do not finish merely because the NPC can see sky or landed in another low pocket cell. Descent must validate its prospective lower body position for every support, including stacked owned supports, so it cannot remove the escape floor and immediately trigger its replacement.
 
 Route discovery and reachability checks are speculative safety diagnostics, not normal movement paths. They use a scoped 0.01 visited-node multiplier, test at most two route candidates per pass, and test at most two monotonic farm-egress intermediates. A live 209.5 ms NPC tick while this unwrapped goal was actively mining/pillaring showed that its former batches of raw `createPath` calls could bypass routine-worker bounds. Keep emergency escape available without a routine resource; bound its atomic path work instead.
 

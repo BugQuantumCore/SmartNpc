@@ -72,6 +72,9 @@ public class TerraformBuildSiteGoal extends Goal {
     private static final int NO_PREP_CACHE_TICKS = 20 * 60 * 5;
     private static final int MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE = 4;
     private static final int MAX_TERRAFORM_SUPPORT_COLUMNS_PER_SLICE = 1;
+    private static final int MAX_WORKER_CLEAR_BLOCKS_PER_SLICE = 64;
+    private static final int MAX_WORKER_SUPPORT_COLUMNS_PER_SLICE = 16;
+    private static final long WORKER_TARGET_SEARCH_BUDGET_NANOS = 1_000_000L;
     private static final int MAX_TERRAFORM_LOCAL_PATH_CHECKS = 1;
     private static final int DIRECT_CLEAR_FAILURE_RETRY_TICKS = 20 * 10;
     private static final double SCAFFOLD_PLACE_CLEARANCE_Y = 0.65D;
@@ -353,7 +356,12 @@ public class TerraformBuildSiteGoal extends Goal {
     }
 
     private boolean shouldYieldToGearCrafting(ServerLevel serverLevel) {
-        return CraftBasicGearGoal.shouldPrioritizeGearCrafting(this.playerNpc, serverLevel);
+        // Terraform only needs a crafting handoff when its admitted footprint scan found a
+        // shovel-only clear target. Generic gear upgrades can be craftable while no usable
+        // table/placement plan exists; yielding to that broad inventory probe here leaves the
+        // prep cache actionable, keeps the stone phase closed, and strands an idle worker.
+        return needsShovelForPrep(this.playerNpc, serverLevel)
+                && CraftBasicGearGoal.shouldPrioritizeGearCrafting(this.playerNpc, serverLevel);
     }
 
     @Override
@@ -732,10 +740,10 @@ public class TerraformBuildSiteGoal extends Goal {
         TargetSearchResult nextTarget = this.findNextTarget(serverLevel, true);
         if (!nextTarget.complete()) {
             publishPendingPrepCache(this.playerNpc, serverLevel);
-            // Admission succeeded and each pass is already hard-capped at four clear blocks or
-            // one support column. Resume on the next normal goal tick instead of idling another
-            // one-to-four goal ticks; denial above remains the only randomized backoff.
+            // The retained pass is bounded by both entry count and elapsed time. Resume on the
+            // next normal goal tick; admission denial remains the only randomized backoff.
             this.targetSearchRetryCooldownTicks = 0;
+            this.updateTaskDetail();
             return;
         }
 
@@ -1371,7 +1379,9 @@ public class TerraformBuildSiteGoal extends Goal {
                 if (dx * dx + dz * dz > TERRAFORM_LOCAL_ROUTE_RADIUS * TERRAFORM_LOCAL_ROUTE_RADIUS) {
                     continue;
                 }
-                for (int dy = -1; dy <= 3; dy++) {
+                // Foundation work is reachable from up to three blocks below its support.
+                // Searching only one block below hid ordinary ground-level side approaches.
+                for (int dy = -MAX_DIRECT_CLEAR_VERTICAL_GAP; dy <= 3; dy++) {
                     BlockPos candidate = workPos.offset(dx, dy, dz);
                     if (!PathNavigationAi.canStandAt(serverLevel, candidate)
                             || candidate.below().equals(workPos)
@@ -1505,7 +1515,9 @@ public class TerraformBuildSiteGoal extends Goal {
         }
         if (this.target == null) {
             this.playerNpc.setCurrentAiDetail(this.continuingTargetSearch
-                    ? "checking build site"
+                    ? "checking build site " + (this.targetSearchClearComplete
+                            ? "supports " + this.targetSearchSupportColumnIndex
+                            : "blocks " + this.targetSearchClearBlockIndex)
                     : "");
             return;
         }
@@ -1544,16 +1556,24 @@ public class TerraformBuildSiteGoal extends Goal {
 
         BuildContext buildContext = context.get();
         this.ensureTargetSearchContext(buildContext);
+        boolean worker = PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc);
+        long deadline = System.nanoTime() + WORKER_TARGET_SEARCH_BUDGET_NANOS;
         if (!this.targetSearchClearComplete) {
             // Layout data is already an immutable, deterministic loader-order list. Do not lazily
             // sort the entire blueprint inside the first canUse call for this layout; that full
-            // stream sort bypasses the retained four-block slice.
+            // stream sort bypasses the retained slice. Holders may cheaply skip already-clear
+            // entries in a larger slice, but expensive terrain checks stop it after one millisecond.
             List<PlayerNpcBuildLayout.RelativeBlock> blocks = buildContext.layout().blocks();
             int endIndex = Math.min(
                     blocks.size(),
-                    this.targetSearchClearBlockIndex + MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE
+                    this.targetSearchClearBlockIndex + (worker
+                            ? MAX_WORKER_CLEAR_BLOCKS_PER_SLICE : MAX_TERRAFORM_CLEAR_BLOCKS_PER_SLICE)
             );
             for (int index = this.targetSearchClearBlockIndex; index < endIndex; index++) {
+                if (index > this.targetSearchClearBlockIndex && worker && System.nanoTime() >= deadline) {
+                    this.targetSearchClearBlockIndex = index;
+                    return TargetSearchResult.pending();
+                }
                 PlayerNpcBuildLayout.RelativeBlock block = blocks.get(index);
                 BlockPos worldPos = block.toWorld(buildContext.origin());
                 if (this.failedDirectClearTargets.containsKey(worldPos)) {
@@ -1593,9 +1613,14 @@ public class TerraformBuildSiteGoal extends Goal {
         int totalColumns = layout.width() * layout.depth();
         int endColumn = Math.min(
                 totalColumns,
-                this.targetSearchSupportColumnIndex + MAX_TERRAFORM_SUPPORT_COLUMNS_PER_SLICE
+                this.targetSearchSupportColumnIndex + (worker
+                        ? MAX_WORKER_SUPPORT_COLUMNS_PER_SLICE : MAX_TERRAFORM_SUPPORT_COLUMNS_PER_SLICE)
         );
         for (int columnIndex = this.targetSearchSupportColumnIndex; columnIndex < endColumn; columnIndex++) {
+            if (columnIndex > this.targetSearchSupportColumnIndex && worker && System.nanoTime() >= deadline) {
+                this.targetSearchSupportColumnIndex = columnIndex;
+                return TargetSearchResult.pending();
+            }
             int x = columnIndex % layout.width();
             int z = columnIndex / layout.width();
             if (!layout.isInFootprint(x, z)) {
@@ -1655,7 +1680,9 @@ public class TerraformBuildSiteGoal extends Goal {
 
     private static boolean canRunTargetNow(ServerLevel serverLevel, PlayerNpcEntity playerNpc, TerraformTarget target) {
         if (target.phase() == TerraformPhase.FILL_SUPPORT) {
-            return !shouldDeferSupportFillForVerticalEscape(playerNpc, target.pos());
+            // A support needing vertical recovery is still owned work. Keep it through the
+            // cursor handoff so start/tick can request recovery instead of rescanning the site.
+            return true;
         }
         if (target.phase() != TerraformPhase.CLEAR) {
             return true;
@@ -1811,8 +1838,10 @@ public class TerraformBuildSiteGoal extends Goal {
         BlockPos feet = playerNpc.blockPosition();
         return feet.getY() < homeArea.origin().getY()
                 && supportPos.getY() >= feet.getY()
-                && (PlayerNpcHomeUtil.isInsideFootprint(homeArea, feet)
-                || PlayerNpcHomeUtil.isInsideFootprint(homeArea, supportPos));
+                // Recover when trapped below the house itself. An outside builder can approach
+                // and fill a foundation from its side; pillaring at a distant current column
+                // creates no route toward that support and leads straight into column descent.
+                && PlayerNpcHomeUtil.isInsideFootprint(homeArea, feet);
     }
 
     private static Optional<BuildContext> findBuildContext(PlayerNpcEntity playerNpc) {

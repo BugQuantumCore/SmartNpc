@@ -56,6 +56,20 @@ When the bobber is ready, detail changes to `bite @ x y z`; after a short reacti
 
 Stop discards any remaining bobber, restores the previous main-hand item after stashing or dropping the temporary rod, and sets `fishingCooldown`.
 
+Full-inventory maintenance runs above fishing/crafting at priority three. A completely full inventory
+checks for safe junk once per second instead of waiting for the ordinary five-second cleanup cadence;
+cleanup retains and revalidates one exact slot, then throws only that stack so one usable slot is
+freed. Rotten flesh, bowls, lily pads, tripwire hooks, ordinary flowers/decorative plants, and
+strictly inferior unenchanted vanilla tools are eligible. Food, rare flowers, named/enchanted items,
+saplings, fishing string, materials, and useful gear remain protected. Uneven ground or foliage cannot block cleanup:
+the goal may use a short loaded, collision-free throw point even when no sturdy landing cell exists,
+and it clears the inventory slot only after the item entity is accepted by the world.
+
+Crafting capacity is transactional. Log-to-plank conversion and recipe assembly first simulate input
+consumption, recipe remainders, and output insertion in a copied 27-slot inventory. The real inventory
+is committed only when everything fits, so a full inventory can use an input slot that becomes empty
+without losing a log, planks, recipe inputs, containers, or the crafted fishing rod on failure.
+
 ## Trace Strings
 
 - `ai.player_npc.fishing`

@@ -24,6 +24,7 @@ public final class PathNavigationAi {
     private final PlayerNpcEntity playerNpc;
     private final WaterEscapeAi waterEscapeAi;
     private BlockPos lastLocalRouteTarget;
+    private BlockPos lastUphillPartialRouteTarget;
     private String lastMoveFailureDetail = "";
     private int lastLocalCandidateCount;
     private int lastLocalPathChecks;
@@ -113,6 +114,27 @@ public final class PathNavigationAi {
             int maxSafeDrop,
             float maxVisitedNodesMultiplier
     ) {
+        return this.moveToInternal(serverLevel, target, speed, maxSafeDrop, maxVisitedNodesMultiplier, false);
+    }
+
+    public boolean moveToAllowingUsefulUphillPartial(
+            ServerLevel serverLevel,
+            BlockPos target,
+            double speed,
+            int maxSafeDrop
+    ) {
+        return this.moveToInternal(serverLevel, target, speed, maxSafeDrop, 1.0F, true);
+    }
+
+    private boolean moveToInternal(
+            ServerLevel serverLevel,
+            BlockPos target,
+            double speed,
+            int maxSafeDrop,
+            float maxVisitedNodesMultiplier,
+            boolean allowUsefulUphillPartial
+    ) {
+        this.lastUphillPartialRouteTarget = null;
         if (this.escapeWaterIfNeeded(serverLevel, target, speed)) {
             return true;
         }
@@ -130,9 +152,16 @@ public final class PathNavigationAi {
         }
 
         Path path = createBoundedPath(this.playerNpc, target, maxVisitedNodesMultiplier);
-        if (this.isValidPathTo(target, path)) {
+        boolean usefulUphillPartial = allowUsefulUphillPartial
+                && this.isUsefulSafeUphillPartialPath(serverLevel, target, path, maxSafeDrop);
+        if (this.isValidPathTo(target, path) || usefulUphillPartial) {
             this.lastMoveFailureDetail = "";
-            return this.playerNpc.getNavigation().moveTo(path, speed);
+            if (this.playerNpc.getNavigation().moveTo(path, speed)) {
+                if (usefulUphillPartial) {
+                    this.lastUphillPartialRouteTarget = path.getEndNode().asBlockPos().immutable();
+                }
+                return true;
+            }
         }
 
         boolean movedToSafeDrop = this.moveToSafeDropStep(serverLevel, target, speed, maxSafeDrop);
@@ -217,6 +246,29 @@ public final class PathNavigationAi {
             int horizontalRadius,
             int verticalDown,
             int verticalUp,
+            boolean allowUsefulUphillPartial) {
+        return this.moveToWithLocalFallback(
+                serverLevel,
+                target,
+                speed,
+                maxSafeDrop,
+                horizontalRadius,
+                verticalDown,
+                verticalUp,
+                MAX_LOCAL_ROUTE_PATH_CHECKS,
+                1.0F,
+                allowUsefulUphillPartial
+        );
+    }
+
+    public boolean moveToWithLocalFallback(
+            ServerLevel serverLevel,
+            BlockPos target,
+            double speed,
+            int maxSafeDrop,
+            int horizontalRadius,
+            int verticalDown,
+            int verticalUp,
             int maxLocalPathChecks) {
         return this.moveToWithLocalFallback(
                 serverLevel,
@@ -241,8 +293,39 @@ public final class PathNavigationAi {
             int verticalUp,
             int maxLocalPathChecks,
             float maxVisitedNodesMultiplier) {
+        return this.moveToWithLocalFallback(
+                serverLevel,
+                target,
+                speed,
+                maxSafeDrop,
+                horizontalRadius,
+                verticalDown,
+                verticalUp,
+                maxLocalPathChecks,
+                maxVisitedNodesMultiplier,
+                false
+        );
+    }
+
+    private boolean moveToWithLocalFallback(
+            ServerLevel serverLevel,
+            BlockPos target,
+            double speed,
+            int maxSafeDrop,
+            int horizontalRadius,
+            int verticalDown,
+            int verticalUp,
+            int maxLocalPathChecks,
+            float maxVisitedNodesMultiplier,
+            boolean allowUsefulUphillPartial) {
         this.lastLocalRouteTarget = null;
-        if (this.moveTo(serverLevel, target, speed, maxSafeDrop, maxVisitedNodesMultiplier)) {
+        if (this.moveToInternal(
+                serverLevel,
+                target,
+                speed,
+                maxSafeDrop,
+                maxVisitedNodesMultiplier,
+                allowUsefulUphillPartial)) {
             return true;
         }
 
@@ -270,6 +353,12 @@ public final class PathNavigationAi {
 
     public BlockPos lastLocalRouteTarget() {
         return this.lastLocalRouteTarget == null ? null : this.lastLocalRouteTarget.immutable();
+    }
+
+    public BlockPos lastUphillPartialRouteTarget() {
+        return this.lastUphillPartialRouteTarget == null
+                ? null
+                : this.lastUphillPartialRouteTarget.immutable();
     }
 
     public String lastMoveFailureDetail() {
@@ -520,6 +609,45 @@ public final class PathNavigationAi {
 
         Node endNode = path.getEndNode();
         return endNode != null && endNode.asBlockPos().equals(target);
+    }
+
+    private boolean isUsefulSafeUphillPartialPath(
+            ServerLevel serverLevel,
+            BlockPos target,
+            Path path,
+            int maxSafeDrop
+    ) {
+        BlockPos feet = this.playerNpc.blockPosition();
+        Node endNode = path == null ? null : path.getEndNode();
+        if (target == null
+                || target.getY() <= feet.getY() + 1
+                || path == null
+                || path.canReach()
+                || path.getNodeCount() <= 0
+                || endNode == null) {
+            return false;
+        }
+
+        BlockPos end = endNode.asBlockPos();
+        if (end.getY() < feet.getY()
+                || end.equals(feet)
+                || blockDistanceSqr(end, target) >= blockDistanceSqr(feet, target)
+                || !canStandAt(serverLevel, end)) {
+            return false;
+        }
+
+        BlockPos previous = feet;
+        for (int index = 0; index < path.getNodeCount(); index++) {
+            BlockPos node = path.getNode(index).asBlockPos();
+            if (!serverLevel.hasChunkAt(node)
+                    || previous.getY() - node.getY() > maxSafeDrop
+                    || !serverLevel.getFluidState(node).isEmpty()
+                    || !serverLevel.getFluidState(node.above()).isEmpty()) {
+                return false;
+            }
+            previous = node;
+        }
+        return true;
     }
 
     private boolean shouldStepDownBeforePath(BlockPos target, int maxSafeDrop) {

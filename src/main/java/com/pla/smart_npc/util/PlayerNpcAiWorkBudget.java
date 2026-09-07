@@ -23,7 +23,6 @@ import java.util.WeakHashMap;
  */
 public final class PlayerNpcAiWorkBudget {
     private static final int MAX_EXPENSIVE_BATCHES_PER_TICK = 1;
-    private static final int MAX_ACTIVE_WORKER_EXPENSIVE_BATCHES_PER_TICK = 2;
     private static final long MINECRAFT_DAY_TICKS = 24_000L;
     // Minecraft time 1000 is about 07:00: one in-game hour after dawn/wake-up. Rotating here
     // avoids changing the worker roster in the same tick as sleep skips the night and wakes
@@ -38,20 +37,15 @@ public final class PlayerNpcAiWorkBudget {
     private static final double AUTO_TARGET_MSPT = 40.0D;
     private static final int AUTO_EVALUATION_INTERVAL_TICKS = 20 * 5;
     private static final int AUTO_HEALTHY_GROWTH_CHECKS = 2;
-    private static final int AUTO_CAUTION_GROWTH_CHECKS = 5;
     private static final int AUTO_HIGH_HEALTHY_GROWTH_CHECKS = 3;
-    private static final int AUTO_HIGH_CAUTION_GROWTH_CHECKS = 6;
-    private static final double AUTO_CAUTION_PROBE_MAX_MSPT = 49.0D;
     private static final double AUTO_REDUCTION_MSPT = 52.0D;
     private static final int AUTO_INITIAL_ROUTINE_WORKERS = 3;
     private static final double AUTO_SEVERE_OVERLOAD_MSPT = 60.0D;
     private static final double AUTO_REDUCTION_MIN_NPC_MSPT = 20.0D;
     private static final double AUTO_REDUCTION_MIN_NPC_SHARE = 0.40D;
-    // Routine AI is single-threaded.  The host in the production traces sustains three to four
-    // simultaneous workers, while the old hardware-derived ceiling admitted 7-12 and spent most
-    // of a tick in vanilla PathfinderMob/Mob ticking.  Keep automatic mode in that proven range;
-    // a server owner can still deliberately choose any 0-64 limit through processingNpcLimit.
-    private static final int AUTO_MAX_ROUTINE_WORKERS = 4;
+    // Demand and measured MSPT control gradual automatic growth. Keep an absolute guard aligned
+    // with the config's supported fixed worker maximum.
+    private static final int AUTO_MAX_ROUTINE_WORKERS = 64;
     private static final Map<MinecraftServer, SchedulerState> SERVER_SCHEDULERS = new WeakHashMap<>();
 
     private PlayerNpcAiWorkBudget() {
@@ -329,16 +323,7 @@ public final class PlayerNpcAiWorkBudget {
         }
 
         private int resolveAutomaticWorkerLimit(long tick) {
-            int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
-            long maxHeapBytes = Math.max(1L, Runtime.getRuntime().maxMemory());
-            int heapGiB = (int) Math.max(1L, maxHeapBytes / (1024L * 1024L * 1024L));
-            // Logical workers still execute on the server thread, so this is an exploration
-            // ceiling rather than claimed parallelism. Heap limits retained goal state/searches;
-            // CPU count prevents a small host from advertising a large worker catalog.
-            long cpuExplorationLimit = (long) processors * 2L;
-            long heapExplorationLimit = (long) heapGiB * 3L;
-            int capabilityLimit = (int) Math.max(1L, Math.min(AUTO_MAX_ROUTINE_WORKERS,
-                    Math.min(cpuExplorationLimit, heapExplorationLimit)));
+            int capabilityLimit = AUTO_MAX_ROUTINE_WORKERS;
             this.automaticCapabilityLimit = capabilityLimit;
             this.automaticWorkerLimit = Math.min(this.automaticWorkerLimit, capabilityLimit);
             if (!PlayerNpcPerformanceMonitor.hasStableRollingSample()) {
@@ -355,12 +340,10 @@ public final class PlayerNpcAiWorkBudget {
             this.automaticBaselineMspt = PlayerNpcPerformanceMonitor.getRollingBaselineMspt();
             double configuredTarget = SmartNpcConfig.AI_TARGET_SERVER_MSPT.get();
             double healthyTarget = configuredTarget > 0.0D ? configuredTarget : AUTO_TARGET_MSPT;
-            double cautionProbeMaxMspt = Math.min(AUTO_CAUTION_PROBE_MAX_MSPT, healthyTarget + 9.0D);
             double reductionMspt = Math.min(AUTO_REDUCTION_MSPT, healthyTarget + 12.0D);
             double rollingMspt = PlayerNpcPerformanceMonitor.getRollingAverageMspt();
             double rollingNpcMs = PlayerNpcPerformanceMonitor.getRollingAverageNpcMs();
             double rollingNpcShare = rollingMspt <= 0.0D ? 0.0D : rollingNpcMs / rollingMspt;
-            int runningWorkerCount = this.runningWorkerCount();
             boolean npcOwnedOverload = rollingNpcMs >= AUTO_REDUCTION_MIN_NPC_MSPT
                     && rollingNpcShare >= AUTO_REDUCTION_MIN_NPC_SHARE;
             // Use the full rolling mean: repeated expensive ticks still lose TPS even when a
@@ -391,10 +374,10 @@ public final class PlayerNpcAiWorkBudget {
                 this.automaticWorkerReason = "capability_ceiling";
                 return this.automaticWorkerLimit;
             }
-            if (runningWorkerCount < this.automaticWorkerLimit || this.waiting.isEmpty()) {
+            if (this.activeWorkers.size() < this.automaticWorkerLimit || this.waiting.isEmpty()) {
                 this.healthyWorkerEvaluations = 0;
-                this.automaticWorkerReason = runningWorkerCount < this.automaticWorkerLimit
-                        ? "awaiting_running_worker_occupancy"
+                this.automaticWorkerReason = this.activeWorkers.size() < this.automaticWorkerLimit
+                        ? "awaiting_worker_roster_occupancy"
                         : "awaiting_queued_demand";
                 return this.automaticWorkerLimit;
             }
@@ -405,14 +388,9 @@ public final class PlayerNpcAiWorkBudget {
                         ? AUTO_HEALTHY_GROWTH_CHECKS
                         : AUTO_HIGH_HEALTHY_GROWTH_CHECKS;
                 this.automaticWorkerReason = "healthy_growth_pending";
-            } else if (growthMspt <= cautionProbeMaxMspt) {
-                requiredChecks = this.automaticWorkerLimit < 3
-                        ? AUTO_CAUTION_GROWTH_CHECKS
-                        : AUTO_HIGH_CAUTION_GROWTH_CHECKS;
-                this.automaticWorkerReason = "cautious_growth_pending";
             } else {
                 this.healthyWorkerEvaluations = 0;
-                this.automaticWorkerReason = "hysteresis_hold";
+                this.automaticWorkerReason = "holding_above_growth_target";
                 return this.automaticWorkerLimit;
             }
             this.healthyWorkerEvaluationsRequired = requiredChecks;
@@ -497,8 +475,8 @@ public final class PlayerNpcAiWorkBudget {
             // Persistent holders must see every compatible predicate on the selector pass. Several
             // gather/explore goals advance retained search state from consecutive canUse calls;
             // slicing a holder stretched each search step across eight selector passes and could
-            // leave the worker idle indefinitely. Expensive work is bounded separately in
-            // tryAcquire(), so restoring liveness here does not restore an unbounded path burst.
+            // leave the worker idle indefinitely. Each goal retains its own scan/path bounds
+            // and cadence; worker ownership must not add another competing admission quota.
             if (this.activeWorkers.containsKey(id)) {
                 return true;
             }
@@ -575,17 +553,12 @@ public final class PlayerNpcAiWorkBudget {
                 this.updateWaiting(playerNpc, tick);
                 return false;
             }
-            ActiveWorker activeWorker = this.activeWorkers.get(id);
-            if (activeWorker != null) {
-                if (activeWorker.lastExpensiveWorkTick != tick) {
-                    activeWorker.lastExpensiveWorkTick = tick;
-                    activeWorker.expensiveWorkBatchesThisTick = 0;
-                }
-                if (activeWorker.expensiveWorkBatchesThisTick
-                        >= MAX_ACTIVE_WORKER_EXPENSIVE_BATCHES_PER_TICK) {
-                    return false;
-                }
-                activeWorker.expensiveWorkBatchesThisTick++;
+            if (this.activeWorkers.containsKey(id)) {
+                // The worker lease already admits this NPC's routine AI. A second quota here
+                // lets earlier eligibility checks consume the allowance before lower-priority
+                // supply/exploration goals run, even when those earlier checks find no work.
+                // Keep the fair one-batch queue below for probes earning a lease; holders use
+                // normal goal arbitration with each goal's bounded scans and retry cadence.
                 this.clearDenied(id);
                 return true;
             }
@@ -923,16 +896,6 @@ public final class PlayerNpcAiWorkBudget {
             excess.forEach(this::releaseWorker);
         }
 
-        private int runningWorkerCount() {
-            int count = 0;
-            for (ActiveWorker worker : this.activeWorkers.values()) {
-                if (worker.runningGoals > 0) {
-                    count++;
-                }
-            }
-            return count;
-        }
-
         private void markDenied(UUID id, long tick) {
             this.deniedAtTick.put(id, tick);
         }
@@ -951,8 +914,6 @@ public final class PlayerNpcAiWorkBudget {
         private final long startedTick;
         private long lastRequestTick;
         private long idleSinceTick = Long.MIN_VALUE;
-        private long lastExpensiveWorkTick = Long.MIN_VALUE;
-        private int expensiveWorkBatchesThisTick;
         private int runningGoals;
 
         private ActiveWorker(PlayerNpcEntity playerNpc, long tick) {

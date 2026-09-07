@@ -2,14 +2,20 @@
 
 ## Death Alerts
 
-`ChatUtil.warnDeath` is only for player-like killers:
+`ChatUtil.warnDeath` uses wildcard/default entries only for player-like killers:
 
 - `net.minecraft.world.entity.player.Player`
 - `PlayerNpcEntity`
 
-Do not show the "everyone be careful, <name> is griefing" style messages for zombies, creepers, or other monster kills.
+Other entity types only receive custom `warn_death` or `death_reaction` chat when a
+datapack entry explicitly targets that entity's namespaced registry ID. This supports
+modded threats without making wildcard/default griefing lines fire for ordinary monster
+kills. With no explicit match, the NPC keeps the vanilla death summary.
 
-Death warning chat is emitted from `PlayerNpcAlertManager.raiseDeathAlert`, not directly from `PlayerNpcEntity.handlePlayerNpcDeathChat`, so the warning and the AI alert stay paired. `PlayerNpcDeadEvent` also gates `PlayerNpcAlertManager.raiseDeathAlert` with the same player-like check, so nearby Player NPCs only choose to avoid/attack the death-alert threat when the killer is a player or Player NPC.
+Death event chat is emitted through `ChatUtil.reportDeath`; `PlayerNpcAlertManager.raiseDeathAlert`
+owns only the nearby AI alert. `PlayerNpcEntity` still gates the AI death alert to
+player-like killers, so an explicitly configured modded-mob chat reaction does not
+silently change nearby NPC combat/avoidance behavior.
 
 ## Movement Speed Cap
 

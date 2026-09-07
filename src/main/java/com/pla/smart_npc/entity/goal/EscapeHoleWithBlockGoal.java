@@ -239,6 +239,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private int openShaftProbeComponentSize;
     private int openShaftProbeRimGain;
     private BlockPos directOpenShaftRequestTarget;
+    private BlockPos ownedPocketExitTarget;
     private int directOpenShaftRequestUntilTick;
     private BlockPos trappedCaveRequestTarget;
     private BlockPos craftingPriorityHandoffTarget;
@@ -304,6 +305,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
         BlockPos feet = this.playerNpc.blockPosition();
         BlockPos requestedTarget = this.playerNpc.getUpwardEscapeTarget();
+        if (this.ownedPocketExitTarget != null && !this.ownedPocketExitTarget.equals(requestedTarget)) {
+            this.ownedPocketExitTarget = null;
+        }
         this.teamFollowerRecoveryEpisode = this.playerNpc.isTeamFollowUpwardEscapeRequested();
         if (this.teamFollowerRecoveryEpisode && this.playerNpc.tickCount < this.nextPillarPlanTick) {
             return false;
@@ -395,11 +399,15 @@ public class EscapeHoleWithBlockGoal extends Goal {
                     MAX_ROUTE_ESCAPE_BLOCKS,
                     Math.max(1, openShaftTarget.getY() - feet.getY() + 2)
             );
-            this.playerNpc.requestForcedUpwardEscapeTo(
-                    openShaftTarget,
-                    OPEN_SHAFT_REQUEST_TICKS,
-                    maxBlocks
-            );
+            if (this.playerNpc.isTemporaryPillarSupport(feet.below())) {
+                // An interrupted climb may leave a wide shallow pocket with no immediate body
+                // walls. Keep ownership through the proven rim landing instead of another nudge.
+                this.ownedPocketExitTarget = openShaftTarget.immutable();
+                this.playerNpc.requestExplorationUpwardEscapeTo(openShaftTarget, OPEN_SHAFT_REQUEST_TICKS, maxBlocks);
+            } else {
+                this.ownedPocketExitTarget = null;
+                this.playerNpc.requestForcedUpwardEscapeTo(openShaftTarget, OPEN_SHAFT_REQUEST_TICKS, maxBlocks);
+            }
             this.retainTeamFollowerRecoveryProvenance();
             requestedTarget = this.playerNpc.getUpwardEscapeTarget();
             this.directOpenShaftRequestTarget = openShaftTarget.immutable();
@@ -483,10 +491,12 @@ public class EscapeHoleWithBlockGoal extends Goal {
         boolean hasRequestedEscape = requestedTarget != null;
         boolean forceRequestedClimb = this.playerNpc.isForcedUpwardEscape()
                 && hasRequestedEscape
-                && requestedTarget.getY() > feet.getY() + 1;
+                && feet.getY() < this.minimumForcedRouteFeetY(requestedTarget);
         boolean explorationRequestedClimb = this.playerNpc.isExplorationUpwardEscapeRequested()
                 && hasRequestedEscape
-                && requestedTarget.getY() > feet.getY();
+                && (requestedTarget.getY() > feet.getY()
+                || requestedTarget.equals(this.ownedPocketExitTarget)
+                && this.playerNpc.isTemporaryPillarSupport(feet.below()));
         boolean requestedClimb = forceRequestedClimb || explorationRequestedClimb;
         BlockPos routeTarget = this.getUpwardRouteTarget(serverLevel, feet);
         boolean hasUpwardRouteTarget = routeTarget != null && this.isUsableUpwardRouteTarget(serverLevel, feet, routeTarget);
@@ -2539,11 +2549,19 @@ public class EscapeHoleWithBlockGoal extends Goal {
         this.explorationClimbStepOffTargetPos = stepOffTarget.immutable();
         this.explorationClimbStepOffTicks = EXPLORATION_CLIMB_STEP_OFF_TICKS;
         this.playerNpc.getNavigation().stop();
+        if (stepOffTarget.equals(this.ownedPocketExitTarget)) {
+            // The short, collision-checked crossing may span the one-cell lower pocket. A normal
+            // jump keeps the NPC from falling back into it before reaching the proven rim.
+            this.playerNpc.shortPillarJump();
+        }
         this.forceExplorationClimbStepOff();
         return true;
     }
 
     private BlockPos findExplorationClimbStepOffTarget(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
+        if (routeTarget != null && routeTarget.equals(this.ownedPocketExitTarget)) {
+            return this.hasClearPocketRimCrossing(serverLevel, feet, routeTarget) ? routeTarget.immutable() : null;
+        }
         List<BlockPos> candidates = new ArrayList<>();
         List<BlockPos> relaxedCandidates = new ArrayList<>();
         int radiusSqr = EXPLORATION_CLIMB_STEP_OFF_RADIUS * EXPLORATION_CLIMB_STEP_OFF_RADIUS;
@@ -2580,6 +2598,23 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
         selected = this.selectExplorationClimbStepOffTarget(relaxedCandidates, feet, routeTarget);
         return selected == null ? this.findOpenExplorationClimbPushTarget(serverLevel, feet, routeTarget) : selected;
+    }
+
+    private boolean hasClearPocketRimCrossing(ServerLevel serverLevel, BlockPos feet, BlockPos rim) {
+        if (horizontalDistanceSqr(feet, rim) > OPEN_SHAFT_COMPONENT_RADIUS * OPEN_SHAFT_COMPONENT_RADIUS
+                || rim.getY() > feet.getY() || feet.getY() - rim.getY() > 1
+                || !this.isSafeOpenShaftRimTarget(serverLevel, rim)) {
+            return false;
+        }
+        for (int step = 1; step <= 6; step++) {
+            BlockPos crossing = BlockPos.containing(feet.getX() + 0.5D + (rim.getX() - feet.getX()) * step / 6.0D,
+                    feet.getY(), feet.getZ() + 0.5D + (rim.getZ() - feet.getZ()) * step / 6.0D);
+            if (!serverLevel.hasChunkAt(crossing) || !this.hasOpenBodySpace(serverLevel, crossing)
+                    || !serverLevel.getFluidState(crossing).isEmpty()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Nullable
@@ -2666,7 +2701,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || feet.getZ() != this.explorationClimbStepOffStartPos.getZ();
         boolean movedAwayAndLanded = movedHorizontally
                 && this.playerNpc.onGround()
-                && !this.playerNpc.isTemporaryPillarSupport(feet.below());
+                && !this.playerNpc.isTemporaryPillarSupport(feet.below())
+                && (this.ownedPocketExitTarget == null
+                || feet.distSqr(this.ownedPocketExitTarget) <= 1.0D);
         if (movedAwayAndLanded) {
             this.explorationClimbStepOffCompleted = true;
             this.playerNpc.clearUpwardEscapeTarget();
@@ -3391,6 +3428,11 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         boolean forcedRequestedRoute = this.isForcedRequestedRoute(routeTarget);
+        int minimumRouteY = forcedRequestedRoute
+                ? this.minimumForcedRouteFeetY(routeTarget)
+                : routeTarget.getY() - 1;
+        boolean exactTerraformHeight = forcedRequestedRoute
+                && this.playerNpc.isTerraformSupportUpwardEscapeRequested();
         boolean requestedSurfaceRoute = !forcedRequestedRoute
                 && this.isRequestedSurfaceRoute(serverLevel, this.playerNpc.blockPosition(), routeTarget);
         int requestedSurfaceY = requestedSurfaceRoute ? this.nearbySurfaceY(serverLevel, routeTarget) : base.getY() + 1;
@@ -3410,12 +3452,14 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
             boolean reachesRoute = !requestedSurfaceRoute
                     && routeTarget != null
-                    && y >= routeTarget.getY() - 1
+                    && y >= minimumRouteY
                     && (forcedRequestedRoute || this.hasStepExitToward(serverLevel, feetAtY, routeTarget));
             boolean reachesSurface = serverLevel.canSeeSky(feetAtY.above())
                     && (requestedSurfaceRoute
                     ? y >= requestedSurfaceY
-                    : y >= Math.min(routeTarget.getY() - 1, base.getY() + MIN_ROUTE_ESCAPE_BLOCKS));
+                    : y >= (exactTerraformHeight
+                    ? minimumRouteY
+                    : Math.min(minimumRouteY, base.getY() + MIN_ROUTE_ESCAPE_BLOCKS)));
             if (reachesRoute || reachesSurface) {
                 int blocksNeeded = Math.max(1, y - base.getY());
                 if (blocksNeeded <= MAX_ROUTE_ESCAPE_BLOCKS || routeTarget == null) {
@@ -4049,7 +4093,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     }
 
     private boolean hasReachedForcedRequestedRoute(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
-        if (feet.getY() < routeTarget.getY() - 1
+        if (feet.getY() < this.minimumForcedRouteFeetY(routeTarget)
                 || !this.playerNpc.onGround()
                 || !this.canStandAt(serverLevel, feet)) {
             return false;
@@ -4060,8 +4104,18 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || this.hasReachedOpenSky(serverLevel, feet) && !this.isActuallyTrapped(serverLevel, feet);
     }
 
+    private int minimumForcedRouteFeetY(BlockPos routeTarget) {
+        // Terraform needs the body above the support it is about to fill. The normal route's
+        // one-block arrival tolerance leaves the builder inside that work level, so the resumed
+        // fill asks for another climb and generic descent can undo the previous attempt.
+        return routeTarget.getY() - (this.playerNpc.isTerraformSupportUpwardEscapeRequested() ? 0 : 1);
+    }
+
     private boolean hasReachedRequestedSurfaceExit(ServerLevel serverLevel, BlockPos feet, BlockPos routeTarget) {
         int requestedSurfaceY = this.nearbySurfaceY(serverLevel, routeTarget);
+        if (routeTarget != null && routeTarget.equals(this.ownedPocketExitTarget)) {
+            return feet.getY() >= requestedSurfaceY;
+        }
         if (feet.getY() < requestedSurfaceY - 1) {
             return false;
         }
@@ -4076,6 +4130,9 @@ public class EscapeHoleWithBlockGoal extends Goal {
         if (this.playerNpc.isExplorationUpwardEscapeRequested()) {
             return this.hasReachedRequestedSurfaceExit(serverLevel, feet, requestedTarget)
                     && this.hasReachedOpenSky(serverLevel, feet)
+                    && (!requestedTarget.equals(this.ownedPocketExitTarget)
+                    || !this.playerNpc.isTemporaryPillarSupport(feet.below())
+                    && feet.distSqr(requestedTarget) <= 1.0D)
                     && !this.isActuallyTrapped(serverLevel, feet);
         }
         if (requestedTarget.getY() > feet.getY() + 1) {
@@ -4489,7 +4546,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
         }
 
         this.openShaftProbeCacheFeet = feet.immutable();
-        this.openShaftProbeCacheUntilTick = this.playerNpc.tickCount + OPEN_SHAFT_PROBE_CACHE_TICKS;
+        this.openShaftProbeCacheUntilTick = this.playerNpc.tickCount
+                + (this.playerNpc.isTemporaryPillarSupport(feet.below()) ? 20 : OPEN_SHAFT_PROBE_CACHE_TICKS);
         this.openShaftProbeComponentSize = 0;
         this.openShaftProbeRimGain = 0;
         BlockPos target = this.computeConfinedOpenShaftSurfaceTarget(serverLevel, feet);
@@ -4499,10 +4557,10 @@ public class EscapeHoleWithBlockGoal extends Goal {
 
     @Nullable
     private BlockPos computeConfinedOpenShaftSurfaceTarget(ServerLevel serverLevel, BlockPos feet) {
+        boolean ownedSupport = this.playerNpc.isTemporaryPillarSupport(feet.below());
         if (!serverLevel.hasChunkAt(feet)
                 || !this.canStandAt(serverLevel, feet)
                 || !serverLevel.canSeeSky(feet.above())
-                || this.playerNpc.isTemporaryPillarSupport(feet.below())
                 || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, feet)
                 || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, feet.below())) {
             return null;
@@ -4513,7 +4571,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 blockedSides++;
             }
         }
-        if (blockedSides < 2) {
+        if (blockedSides < 2 && !ownedSupport) {
             // Ordinary open ground and a single cliff face never allocate the component scan.
             return null;
         }
@@ -4545,7 +4603,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                     }
                     BlockPos immutable = candidate.immutable();
                     if (chamber.add(immutable)) {
-                        if (chamber.size() > MAX_OPEN_SHAFT_COMPONENT_STANDS) {
+                        if (chamber.size() > (ownedSupport ? MAX_LOCAL_TRAP_STANDS : MAX_OPEN_SHAFT_COMPONENT_STANDS)) {
                             return null;
                         }
                         open.add(immutable);
@@ -4590,7 +4648,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
                         wall.getZ()
                 );
                 int gain = surfaceY - feet.getY();
-                if (gain < OPEN_SHAFT_MIN_RIM_GAIN || gain > OPEN_SHAFT_MAX_RIM_GAIN) {
+                if (gain < (ownedSupport ? 1 : OPEN_SHAFT_MIN_RIM_GAIN) || gain > OPEN_SHAFT_MAX_RIM_GAIN) {
                     continue;
                 }
                 elevatedWallDirections |= horizontalDirectionBit(direction);

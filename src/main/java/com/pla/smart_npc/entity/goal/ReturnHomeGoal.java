@@ -108,6 +108,36 @@ public class ReturnHomeGoal extends Goal {
                 || PlayerNpcBuildMaterialUtil.needsTorchCharcoalSmelting(serverLevel, playerNpc);
     }
 
+    /**
+     * Cheap cross-goal guard for a builder that is already committed to an uphill home return.
+     * This deliberately avoids blueprint, inventory, and path scans because descent rechecks it
+     * during block breaking as well as goal admission.
+     */
+    public static boolean hasUphillBuilderReturnIntent(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
+        if (playerNpc == null
+                || serverLevel == null
+                || !playerNpc.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
+            return false;
+        }
+        Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(playerNpc);
+        if (home.isEmpty()) {
+            return false;
+        }
+
+        PlayerNpcHomeUtil.HomeArea homeArea = home.get();
+        BlockPos feet = playerNpc.blockPosition();
+        BlockPos homeCenter = homeArea.origin().offset(homeArea.width() / 2, 1, homeArea.depth() / 2);
+        if (homeCenter.getY() <= feet.getY() + 1 || isInsideHomeWorkArea(playerNpc, homeArea)) {
+            return false;
+        }
+        return "ai.player_npc.returning_home".equals(playerNpc.getCurrentAiState())
+                || serverLevel.isNight()
+                || serverLevel.isThundering()
+                || playerNpc.hasExplorationReturnHomeRequest()
+                || shouldReturnAfterCompletedStoneTrip(playerNpc, serverLevel, homeArea)
+                || needsHomeSurfaceRecovery(playerNpc, serverLevel, homeArea);
+    }
+
     @Override
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
@@ -433,12 +463,9 @@ public class ReturnHomeGoal extends Goal {
                     ? 20 * 12 + this.playerNpc.getRandom().nextInt(20 * 12)
                     : 20 * 60 + this.playerNpc.getRandom().nextInt(20 * 60);
             this.playerNpc.setReturnHomeCooldown(cooldown);
-            if (!arrivedAtHome && this.homeCenter != null && this.playerNpc.blockPosition().getY() < this.homeCenter.getY() - 1) {
-                if (this.homeSurfaceRecoveryReturn) {
-                    this.requestHomeSurfaceEscape(serverLevel);
-                } else {
-                    this.playerNpc.requestForcedUpwardEscapeTo(this.homeCenter, 20 * 8, 10);
-                }
+            if (!arrivedAtHome && this.homeSurfaceRecoveryReturn && this.homeCenter != null
+                    && this.playerNpc.blockPosition().getY() < this.homeCenter.getY() - 1) {
+                this.requestHomeSurfaceEscape(serverLevel);
             }
             if (this.explorationRecoveryReturn && arrivedAtHome) {
                 this.playerNpc.clearExplorationReturnHomeRequest();

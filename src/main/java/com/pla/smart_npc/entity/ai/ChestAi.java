@@ -2,6 +2,7 @@ package com.pla.smart_npc.entity.ai;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.event.PlayerNpcChestProtectEvent;
+import com.pla.smart_npc.util.ChatUtil;
 import com.pla.smart_npc.util.PlayerNpcBuildLayout;
 import com.pla.smart_npc.util.PlayerNpcBuildLayoutLoader;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
@@ -35,7 +36,7 @@ public final class ChestAi {
         if (ownedChestPos != null && !serverLevel.hasChunkAt(ownedChestPos)) {
             ownedChestPos = null;
         } else if (ownedChestPos != null && !serverLevel.getBlockState(ownedChestPos).is(Blocks.CHEST)) {
-            playerNpc.setOwnedChestPos(null);
+            clearMissingOwnedChest(playerNpc);
             ownedChestPos = null;
         }
 
@@ -65,10 +66,17 @@ public final class ChestAi {
             return null;
         }
         if (!serverLevel.getBlockState(ownedChestPos).is(Blocks.CHEST)) {
-            playerNpc.setOwnedChestPos(null);
+            clearMissingOwnedChest(playerNpc);
             return null;
         }
         return ownedChestPos.immutable();
+    }
+
+    private static void clearMissingOwnedChest(PlayerNpcEntity playerNpc) {
+        // Clearing the retained position makes this a one-shot notification even though chest
+        // discovery is polled by several goals. Unloaded chunks do not reach this path.
+        playerNpc.setOwnedChestPos(null);
+        ChatUtil.missingHomeChest(playerNpc);
     }
 
     public static BlockPos findAdjacentStand(PlayerNpcEntity playerNpc, ServerLevel serverLevel, BlockPos chestPos) {

@@ -60,7 +60,6 @@ public final class WaterEscapeAi {
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
     private BlockPos waterPos;
-    private BlockPos plugPos;
     private BlockPos standPlacePos;
     private BlockPos dryExitPos;
     private BlockPos preferredDestination;
@@ -105,7 +104,6 @@ public final class WaterEscapeAi {
         return this.waterPos != null
                 || this.dryExitPos != null
                 || this.standPlacePos != null
-                || this.plugPos != null
                 || this.swimmingToDestination;
     }
 
@@ -196,16 +194,11 @@ public final class WaterEscapeAi {
 
         this.jumpAgainstCurrent(serverLevel);
         this.updateDetail();
-        if (this.plugPos != null && this.escapeTicks % 4 == 0 && this.tryPlugWater(serverLevel, this.plugPos)) {
-            this.stop();
-            return TickResult.DONE;
-        }
         return TickResult.RUNNING;
     }
 
     public void stop() {
         this.waterPos = null;
-        this.plugPos = null;
         this.standPlacePos = null;
         this.dryExitPos = null;
         this.preferredDestination = null;
@@ -255,7 +248,6 @@ public final class WaterEscapeAi {
             this.waterPos = standTarget.waterPos();
             this.standPlacePos = standTarget.placePos();
             this.dryExitPos = null;
-            this.plugPos = null;
             this.placingStandBlock = true;
             this.movingToDryExit = false;
             this.updateDetail();
@@ -263,11 +255,6 @@ public final class WaterEscapeAi {
         }
 
         WaterCurrentTarget currentTarget = this.findWaterCurrentTarget(serverLevel);
-        if (currentTarget != null && currentTarget.plugPos() != null) {
-            this.beginCurrentEscape(currentTarget);
-            return true;
-        }
-
         if (currentTarget == null) {
             return false;
         }
@@ -386,7 +373,6 @@ public final class WaterEscapeAi {
             this.waterPos = standTarget.waterPos();
             this.standPlacePos = standTarget.placePos();
             this.dryExitPos = null;
-            this.plugPos = null;
             this.placingStandBlock = true;
             this.movingToDryExit = false;
             this.swimmingToDestination = false;
@@ -405,7 +391,6 @@ public final class WaterEscapeAi {
     private void beginDestinationSwim(BlockPos feet, BlockPos destination, boolean newEpisode) {
         this.waterPos = feet.immutable();
         this.preferredDestination = destination.immutable();
-        this.plugPos = null;
         this.standPlacePos = null;
         this.dryExitPos = null;
         this.placingStandBlock = false;
@@ -432,7 +417,6 @@ public final class WaterEscapeAi {
     private void beginDryExit(BlockPos feet, BlockPos dryExit) {
         this.waterPos = feet.immutable();
         this.dryExitPos = dryExit.immutable();
-        this.plugPos = null;
         this.standPlacePos = null;
         this.placingStandBlock = false;
         this.movingToDryExit = true;
@@ -442,7 +426,6 @@ public final class WaterEscapeAi {
 
     private void beginCurrentEscape(WaterCurrentTarget target) {
         this.waterPos = target.waterPos();
-        this.plugPos = target.plugPos();
         this.standPlacePos = null;
         this.dryExitPos = null;
         this.placingStandBlock = false;
@@ -607,10 +590,9 @@ public final class WaterEscapeAi {
             }
 
             double flowStrength = horizontalFlowStrengthSqr(serverLevel, candidate, fluidState);
-            BlockPos plug = this.findPlugPos(serverLevel, candidate);
-            double score = flowStrength + (candidate.equals(feet) ? 1.0D : 0.0D) + (plug != null ? 0.25D : 0.0D);
+            double score = flowStrength + (candidate.equals(feet) ? 1.0D : 0.0D);
             if (best == null || score > bestScore) {
-                best = new WaterCurrentTarget(candidate.immutable(), plug);
+                best = new WaterCurrentTarget(candidate.immutable());
                 bestScore = score;
             }
         }
@@ -637,103 +619,46 @@ public final class WaterEscapeAi {
 
     @Nullable
     private WaterStandTarget findDestinationStandTarget(ServerLevel serverLevel, BlockPos feet) {
-        if (this.preferredDestination == null
-                || !this.hasWaterPlugBlock()
-                || !this.canBuildDestinationFooting(serverLevel, feet)) {
+        if (this.preferredDestination == null || !this.hasWaterPlugBlock()) {
             return null;
         }
 
-        List<BlockPos> candidates = new ArrayList<>();
-        candidates.add(feet);
-        candidates.add(feet.below());
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            candidates.add(feet.relative(direction));
-        }
-        candidates.removeIf(candidate -> !this.canPlaceStandBlockAt(serverLevel, candidate));
-        candidates.sort(Comparator
-                .comparingDouble((BlockPos candidate) -> horizontalDistanceSqr(candidate, this.preferredDestination))
-                .thenComparingDouble(feet::distSqr));
-        if (candidates.isEmpty()) {
-            return null;
-        }
-        return new WaterStandTarget(feet.immutable(), candidates.get(0).immutable());
+        BlockPos place = this.findDestinationFootingPos(serverLevel, feet);
+        return place != null && this.canPlaceStandBlockAt(serverLevel, place)
+                ? new WaterStandTarget(feet.immutable(), place.immutable())
+                : null;
     }
 
-    private boolean canBuildDestinationFooting(ServerLevel serverLevel, BlockPos feet) {
-        FluidState feetFluid = serverLevel.getFluidState(feet);
-        boolean oneBlockDeep = feetFluid.is(FluidTags.WATER)
-                && !serverLevel.getFluidState(feet.above()).is(FluidTags.WATER)
-                && !serverLevel.getFluidState(feet.below()).is(FluidTags.WATER)
-                && this.isWalkableFloor(serverLevel, feet.below());
+    @Nullable
+    private BlockPos findDestinationFootingPos(ServerLevel serverLevel, BlockPos feet) {
+        BlockPos currentWaterCell = serverLevel.getFluidState(feet).is(FluidTags.WATER)
+                ? feet
+                : serverLevel.getFluidState(feet.below()).is(FluidTags.WATER) ? feet.below() : null;
+        if (currentWaterCell == null) {
+            return null;
+        }
+        boolean oneBlockDeep = !serverLevel.getFluidState(currentWaterCell.above()).is(FluidTags.WATER)
+                && !serverLevel.getFluidState(currentWaterCell.below()).is(FluidTags.WATER)
+                && this.isWalkableFloor(serverLevel, currentWaterCell.below());
         if (oneBlockDeep) {
-            return true;
+            return currentWaterCell.immutable();
         }
 
         for (Direction direction : Direction.Plane.HORIZONTAL) {
-            if (this.hasBlockingCollision(serverLevel, feet.relative(direction))) {
-                return true;
+            BlockPos adjacent = currentWaterCell.relative(direction);
+            if (this.canStandDryAt(serverLevel, adjacent)
+                    || this.canStandDryAt(serverLevel, adjacent.above())) {
+                return currentWaterCell.immutable();
             }
         }
-        return false;
+        return null;
     }
 
     private BlockPos findStandPlacePos(ServerLevel serverLevel, BlockPos feet) {
-        List<BlockPos> sideCandidates = new ArrayList<>();
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            sideCandidates.add(feet.relative(direction));
-        }
-
-        // Prefer a step beside the NPC when its top is already dry. This avoids repeatedly
-        // jumping until the body clears its own water cell before a block can be placed there.
-        sideCandidates.sort(Comparator.comparingDouble(feet::distSqr));
-        for (BlockPos candidate : sideCandidates) {
-            BlockPos immutable = candidate.immutable();
-            if (this.canPlaceStandBlockAt(serverLevel, immutable)
-                    && this.hasDryStandingRoomAbove(serverLevel, immutable)) {
-                return immutable;
-            }
-        }
-
-        List<BlockPos> candidates = new ArrayList<>();
-        candidates.add(feet.below());
-        candidates.addAll(sideCandidates);
-        candidates.add(feet);
-        for (BlockPos candidate : candidates) {
-            BlockPos immutable = candidate.immutable();
-            if (this.canPlaceStandBlockAt(serverLevel, immutable)) {
-                return immutable;
-            }
-        }
-        return null;
-    }
-
-    private boolean hasDryStandingRoomAbove(ServerLevel serverLevel, BlockPos floorPos) {
-        BlockPos feetPos = floorPos.above();
-        return serverLevel.hasChunkAt(feetPos)
-                && serverLevel.hasChunkAt(feetPos.above())
-                && !serverLevel.getFluidState(feetPos).is(FluidTags.WATER)
-                && !serverLevel.getFluidState(feetPos.above()).is(FluidTags.WATER)
-                && !this.hasBlockingCollision(serverLevel, feetPos)
-                && !this.hasBlockingCollision(serverLevel, feetPos.above());
-    }
-
-    private BlockPos findPlugPos(ServerLevel serverLevel, BlockPos waterCandidate) {
-        List<BlockPos> candidates = new ArrayList<>();
-        candidates.add(waterCandidate);
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            candidates.add(waterCandidate.relative(direction));
-            candidates.add(waterCandidate.relative(direction).below());
-        }
-        candidates.add(waterCandidate.below());
-
-        BlockPos feet = this.playerNpc.blockPosition();
-        candidates.sort(Comparator.comparingDouble(feet::distSqr));
-        for (BlockPos candidate : candidates) {
-            if (this.canPlugWaterAt(serverLevel, candidate)) {
-                return candidate.immutable();
-            }
-        }
-        return null;
+        BlockPos place = this.findDestinationFootingPos(serverLevel, feet);
+        return place != null && this.canPlaceStandBlockAt(serverLevel, place)
+                ? place.immutable()
+                : null;
     }
 
     private void jumpAgainstCurrent(ServerLevel serverLevel) {
@@ -794,28 +719,6 @@ public final class WaterEscapeAi {
         this.playerNpc.hasImpulse = true;
     }
 
-    private boolean tryPlugWater(ServerLevel serverLevel, BlockPos pos) {
-        ItemStack blockStack = this.takeWaterPlugBlock();
-        if (blockStack.isEmpty() || !(blockStack.getItem() instanceof BlockItem blockItem)) {
-            this.returnStack(blockStack);
-            return false;
-        }
-
-        BlockState state = blockItem.getBlock().defaultBlockState();
-        if (!this.canPlugWaterAt(serverLevel, pos)
-                || !state.canSurvive(serverLevel, pos)
-                || !this.placingBlockAi.canPlaceWithoutClipping(serverLevel, pos, state)) {
-            this.returnStack(blockStack);
-            return false;
-        }
-
-        if (!this.placingBlockAi.placeBlock(serverLevel, pos, state)) {
-            this.returnStack(blockStack);
-            return false;
-        }
-        return true;
-    }
-
     private boolean tryPlaceStandBlock(ServerLevel serverLevel, BlockPos pos) {
         ItemStack blockStack = this.takeWaterPlugBlock();
         if (blockStack.isEmpty() || !(blockStack.getItem() instanceof BlockItem blockItem)) {
@@ -835,22 +738,8 @@ public final class WaterEscapeAi {
             this.returnStack(blockStack);
             return false;
         }
+        this.playerNpc.markTemporaryPillarSupport(pos);
         return true;
-    }
-
-    private boolean canPlugWaterAt(ServerLevel serverLevel, BlockPos pos) {
-        if (!serverLevel.isInWorldBounds(pos)
-                || !serverLevel.getWorldBorder().isWithinBounds(pos)
-                || !serverLevel.hasChunkAt(pos)
-                || this.isProtectedPlacementPos(pos)) {
-            return false;
-        }
-
-        FluidState fluidState = serverLevel.getFluidState(pos);
-        return isFlowingWater(serverLevel, pos, fluidState)
-                && serverLevel.getBlockState(pos).canBeReplaced()
-                && !new AABB(pos).intersects(this.playerNpc.getBoundingBox().inflate(0.05D))
-                && serverLevel.getEntities(this.playerNpc, new AABB(pos)).isEmpty();
     }
 
     private boolean canPlaceStandBlockAt(ServerLevel serverLevel, BlockPos pos) {
@@ -1051,8 +940,12 @@ public final class WaterEscapeAi {
     }
 
     private boolean isWalkableFloor(ServerLevel serverLevel, BlockPos pos) {
-        return serverLevel.hasChunkAt(pos)
-                && !serverLevel.getBlockState(pos).getCollisionShape(serverLevel, pos).isEmpty();
+        if (!serverLevel.hasChunkAt(pos)) {
+            return false;
+        }
+        BlockState floor = serverLevel.getBlockState(pos);
+        return floor.isFaceSturdy(serverLevel, pos, Direction.UP)
+                && !floor.getCollisionShape(serverLevel, pos).isEmpty();
     }
 
     private boolean hasStandPlacementClearance(BlockPos pos) {
@@ -1102,10 +995,7 @@ public final class WaterEscapeAi {
             return;
         }
 
-        String plug = this.plugPos == null
-                ? "jumping"
-                : "plugging @ " + posText(this.plugPos);
-        this.detail = "water escape: flow @ " + posText(this.waterPos) + " " + plug;
+        this.detail = "water escape: flow @ " + posText(this.waterPos) + " jumping";
     }
 
     private static boolean isFlowingWater(ServerLevel serverLevel, BlockPos pos, FluidState fluidState) {
@@ -1145,7 +1035,7 @@ public final class WaterEscapeAi {
         return pos.getX() + " " + pos.getY() + " " + pos.getZ();
     }
 
-    private record WaterCurrentTarget(BlockPos waterPos, BlockPos plugPos) {
+    private record WaterCurrentTarget(BlockPos waterPos) {
     }
 
     private record WaterStandTarget(BlockPos waterPos, BlockPos placePos) {

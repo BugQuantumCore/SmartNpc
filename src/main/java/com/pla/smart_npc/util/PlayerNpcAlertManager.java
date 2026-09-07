@@ -26,8 +26,7 @@ public class PlayerNpcAlertManager {
     }
 
     public static void raiseDeathAlert(PlayerNpcEntity reporter, LivingEntity threat) {
-        // The alert is AI state, not a second victim chat line. ChatUtil.reportDeath owns the
-        // single visible death message for this incident.
+        // ChatUtil.reportDeath owns the visible warning/reaction; this method owns AI state only.
         raiseAlert(reporter, threat, true);
     }
 

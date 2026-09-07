@@ -131,6 +131,9 @@ public class PickupNearbyItemGoal extends Goal {
 
     @Override
     public boolean canUse() {
+        if (this.playerNpc.isItemPickupSuppressed()) {
+            return false;
+        }
         if (!PlayerNpcAiWorkBudget.hasWorkerSlot(this.playerNpc)) {
             return false;
         }
@@ -181,6 +184,9 @@ public class PickupNearbyItemGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
+        if (this.playerNpc.isItemPickupSuppressed()) {
+            return false;
+        }
         if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
             this.workerSlotPaused = true;
             return false;
@@ -195,6 +201,10 @@ public class PickupNearbyItemGoal extends Goal {
 
     @Override
     public void start() {
+        if (this.playerNpc.isItemPickupSuppressed()) {
+            this.playerNpc.getNavigation().stop();
+            return;
+        }
         if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
             this.workerSlotPaused = true;
             this.playerNpc.getNavigation().stop();
@@ -235,6 +245,11 @@ public class PickupNearbyItemGoal extends Goal {
 
     @Override
     public void tick() {
+        if (this.playerNpc.isItemPickupSuppressed()) {
+            this.targetItem = null;
+            this.playerNpc.getNavigation().stop();
+            return;
+        }
         if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this.playerNpc)) {
             this.workerSlotPaused = true;
             this.playerNpc.getNavigation().stop();
@@ -380,7 +395,7 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private boolean canCollectRightNow() {
-        if (playerNpc.level().isClientSide) {
+        if (playerNpc.level().isClientSide || playerNpc.isItemPickupSuppressed()) {
             return false;
         }
         if (!playerNpc.isAlive() || playerNpc.isRemoved() || playerNpc.isDeadOrDying()) {
@@ -405,6 +420,9 @@ public class PickupNearbyItemGoal extends Goal {
     }
 
     private ItemEntity findTargetItem() {
+        if (this.playerNpc.isItemPickupSuppressed()) {
+            return null;
+        }
         this.plannedPickupPath = null;
         this.plannedPickupObstruction = null;
         this.plannedPickupPillar = false;

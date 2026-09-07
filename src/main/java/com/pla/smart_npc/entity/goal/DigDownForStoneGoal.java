@@ -435,10 +435,13 @@ public class DigDownForStoneGoal extends Goal {
                     ? MINING_PROSPECT_COOLDOWN_TICKS
                     : this.minedStone
                     ? COOLDOWN_TICKS
-                    : this.reachedDigSite
-                    ? COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 12)
                     : FAILED_WALK_COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 2);
             this.playerNpc.setGatherCooldown(cooldown);
+            if (!this.foundGatherStoneTarget && !miningProspecting && !this.minedStone) {
+                // A failed stair direction/site is not a completed supply run. Give the other
+                // supply goals a selector window to relocate before retrying this same site.
+                this.canUseThrottle.retryIn(this.playerNpc, cooldown + 20);
+            }
         }
         this.playerNpc.setIdleTraceDetail(this.stopTraceDetail(cooldown), IDLE_DIAGNOSTIC_TICKS);
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -668,7 +671,25 @@ public class DigDownForStoneGoal extends Goal {
             return null;
         }
 
-        return this.findDigTargetForOffset(serverLevel, feet, this.digStepOffset);
+        BlockPos originBefore = this.digOrigin;
+        BlockPos target = this.findDigTargetForOffset(serverLevel, feet, this.digStepOffset);
+        if (target != null || this.originChanged(originBefore)) {
+            return target;
+        }
+        // A single random direction may face protected terrain, water, or an open drop.
+        // Check the other seven adjacent stair directions before declaring the site exhausted.
+        // This is a fixed local block check, with no volume scan or path creation.
+        for (BlockPos offset : this.digStepOffsets()) {
+            if (offset.equals(this.digStepOffset)) {
+                continue;
+            }
+            target = this.findDigTargetForOffset(serverLevel, feet, offset);
+            if (target != null || this.originChanged(originBefore)) {
+                this.digStepOffset = offset;
+                return target;
+            }
+        }
+        return null;
     }
 
     private BlockPos findNextProspectingDigTarget(ServerLevel serverLevel) {
@@ -715,6 +736,9 @@ public class DigDownForStoneGoal extends Goal {
 
         BlockPos forwardHead = feet.offset(offset);
         BlockPos forwardFeet = forwardHead.below();
+        if (!serverLevel.hasChunkAt(forwardHead) || !serverLevel.hasChunkAt(forwardFeet)) {
+            return null;
+        }
 
         if (this.isDiggable(serverLevel, forwardHead, serverLevel.getBlockState(forwardHead))) {
             return forwardHead.immutable();

@@ -10,6 +10,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.MobSpawnType;
+import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
@@ -56,6 +57,11 @@ public final class PlayerNpcNaturalSpawnCap {
         return spawnType != MobSpawnType.SPAWN_EGG
                 && spawnType != MobSpawnType.COMMAND
                 && spawnType != MobSpawnType.STRUCTURE;
+    }
+
+    /** Custom automatic spawning must obey the same world rule as vanilla natural spawning. */
+    public static boolean isNaturalSpawningEnabled(ServerLevel level) {
+        return level != null && level.getGameRules().getBoolean(GameRules.RULE_DOMOBSPAWNING);
     }
 
     /**
@@ -249,13 +255,16 @@ public final class PlayerNpcNaturalSpawnCap {
          * reservation-protected attempt in already-loaded terrain; never generate/load a chunk.
          */
         private synchronized void tryLoadedWorldSpawn(MinecraftServer server) {
+            ServerLevel level = server.overworld();
+            if (!isNaturalSpawningEnabled(level)) {
+                return;
+            }
             long tick = server.getTickCount();
             if (tick < this.nextLoadedWorldSpawnTick || !this.hasCapacity(tick)) {
                 return;
             }
             this.nextLoadedWorldSpawnTick = tick + LOADED_WORLD_SPAWN_INTERVAL_TICKS;
-            ServerLevel level = server.overworld();
-            if (level == null || level.isNight() || level.players().isEmpty()) {
+            if (level.isNight() || level.players().isEmpty()) {
                 return;
             }
             ServerPlayer player = level.players().get(level.random.nextInt(level.players().size()));

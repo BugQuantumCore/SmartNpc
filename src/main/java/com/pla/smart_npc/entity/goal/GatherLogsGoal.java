@@ -186,9 +186,6 @@ public class GatherLogsGoal extends Goal {
     }
 
     public boolean hasNearbyUsableLogTarget(ServerLevel serverLevel) {
-        if (this.hasAuthoritativeLocalLogSelectionPending()) {
-            return true;
-        }
         BlockPos feet = this.playerNpc.blockPosition();
         if (this.targetPos != null
                 && this.isValidLog(serverLevel, this.targetPos)
@@ -203,23 +200,10 @@ public class GatherLogsGoal extends Goal {
             return this.nearbyUsableLogTargetCacheResult;
         }
         // Do not launch a second full TreeAi scan from an arbitration proxy. The authoritative
-        // canUse selector owns the incremental cursor and publishes pending/selected state.
+        // canUse selector owns the incremental cursor. An unfinished scan is not a usable
+        // target: treating it as one repeatedly cancels exploration without starting GatherLogs.
+        // The higher-priority goal pre-empts exploration when it actually selects a log.
         return false;
-    }
-
-    /**
-     * Cheap arbitration signal backed by this goal's own incremental selector. Exploration may
-     * wait while a bounded local TreeAi slice is unfinished, but must not run an independent broad
-     * proximity scan whose answer can disagree with the target this goal can actually claim.
-     */
-    public boolean hasAuthoritativeLocalLogSelectionPending() {
-        return this.logQueueSearchPending || this.logQueueSearchDeferredForAdmission();
-    }
-
-    private boolean logQueueSearchDeferredForAdmission() {
-        return this.logQueueSearchOrigin != null
-                && this.logQueueSearchRadius > 0
-                && this.logQueueSearchColumnIndex > 0;
     }
 
     public static boolean hasNearbyLogTarget(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {

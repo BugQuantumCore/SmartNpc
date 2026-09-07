@@ -91,6 +91,11 @@ public class RecoverWeaponInCombatGoal extends Goal {
             return true;
         }
 
+        if (mob instanceof PlayerNpcEntity playerNpcEntity
+                && playerNpcEntity.isItemPickupSuppressed()) {
+            return false;
+        }
+
         targetItem = findNearestWeaponItem();
         return targetItem != null;
     }
@@ -110,6 +115,10 @@ public class RecoverWeaponInCombatGoal extends Goal {
         }
 
         if (targetItem == null || !targetItem.isAlive() || targetItem.getItem().isEmpty()) {
+            return false;
+        }
+        if (mob instanceof PlayerNpcEntity playerNpcEntity
+                && playerNpcEntity.isItemPickupSuppressed()) {
             return false;
         }
 
@@ -138,7 +147,10 @@ public class RecoverWeaponInCombatGoal extends Goal {
 
         inventoryWeaponSlot = -1;
 
-        if (targetItem == null || !targetItem.isAlive() || targetItem.getItem().isEmpty()) {
+        if (mob instanceof PlayerNpcEntity playerNpcEntity
+                && playerNpcEntity.isItemPickupSuppressed()) {
+            targetItem = null;
+        } else if (targetItem == null || !targetItem.isAlive() || targetItem.getItem().isEmpty()) {
             targetItem = findNearestWeaponItem();
         }
 
@@ -250,6 +262,14 @@ public class RecoverWeaponInCombatGoal extends Goal {
     public void tick() {
         lockTicks++;
 
+        if (mob instanceof PlayerNpcEntity playerNpcEntity
+                && playerNpcEntity.isItemPickupSuppressed()) {
+            targetItem = null;
+            finished = true;
+            mob.getNavigation().stop();
+            return;
+        }
+
         if (targetItem == null || !targetItem.isAlive() || targetItem.getItem().isEmpty()) {
             return;
         }
@@ -284,6 +304,11 @@ public class RecoverWeaponInCombatGoal extends Goal {
             return;
         }
         if (this.mob instanceof PlayerNpcEntity playerNpc) {
+            if (playerNpc.isItemPickupSuppressed()) {
+                this.targetItem = null;
+                this.mob.getNavigation().stop();
+                return;
+            }
             Path path = PathNavigationAi.createBoundedPath(
                     playerNpc,
                     BlockPos.containing(this.targetItem.getX(), this.targetItem.getY(), this.targetItem.getZ()),
@@ -299,6 +324,10 @@ public class RecoverWeaponInCombatGoal extends Goal {
 
     private boolean forceEquipWeaponFromItemEntity(ItemEntity itemEntity) {
         if (itemEntity == null || !itemEntity.isAlive()) {
+            return false;
+        }
+        if (mob instanceof PlayerNpcEntity playerNpcEntity
+                && playerNpcEntity.isItemPickupSuppressed()) {
             return false;
         }
         if (!mob.getMainHandItem().isEmpty()) {
@@ -352,6 +381,10 @@ public class RecoverWeaponInCombatGoal extends Goal {
     }
 
     private ItemEntity findNearestWeaponItem() {
+        if (mob instanceof PlayerNpcEntity playerNpcEntity
+                && playerNpcEntity.isItemPickupSuppressed()) {
+            return null;
+        }
         List<ItemEntity> items = mob.level().getEntitiesOfClass(
                 ItemEntity.class,
                 mob.getBoundingBox().inflate(searchRadius),

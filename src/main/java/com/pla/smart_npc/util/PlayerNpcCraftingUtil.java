@@ -160,26 +160,34 @@ public final class PlayerNpcCraftingUtil {
             return Optional.empty();
         }
 
+        // Prove the complete mutation on a copy before consuming any real ingredient. A full
+        // inventory can still accept the result when this recipe empties an input slot, while a
+        // recipe whose inputs remain stacked fails without deleting either inputs or output.
+        SimpleContainer committed = copyContainer(inventory);
         for (int inventorySlot : craftingPlan.inventorySlots()) {
             if (inventorySlot < 0) {
                 continue;
             }
-            ItemStack stack = inventory.getItem(inventorySlot);
+            ItemStack stack = committed.getItem(inventorySlot);
             if (!stack.isEmpty()) {
                 stack.shrink(1);
                 if (stack.isEmpty()) {
-                    inventory.setItem(inventorySlot, ItemStack.EMPTY);
+                    committed.setItem(inventorySlot, ItemStack.EMPTY);
                 }
             }
         }
 
         NonNullList<ItemStack> remainingItems = craftingPlan.recipe().getRemainingItems(craftingPlan.grid());
         for (ItemStack remaining : remainingItems) {
-            if (!remaining.isEmpty()) {
-                InventoryUtils.addItem(inventory, remaining.copy());
+            if (!remaining.isEmpty() && !InventoryUtils.addItem(committed, remaining.copy())) {
+                return Optional.empty();
             }
         }
-        inventory.setChanged();
+        SimpleContainer capacityCheck = copyContainer(committed);
+        if (!InventoryUtils.addItem(capacityCheck, crafted.copy())) {
+            return Optional.empty();
+        }
+        copyContainerContents(committed, inventory);
         return Optional.of(crafted);
     }
 
@@ -592,6 +600,14 @@ public final class PlayerNpcCraftingUtil {
         return copy;
     }
 
+    private static void copyContainerContents(SimpleContainer from, SimpleContainer to) {
+        int size = Math.min(from.getContainerSize(), to.getContainerSize());
+        for (int i = 0; i < size; i++) {
+            to.setItem(i, from.getItem(i).copy());
+        }
+        to.setChanged();
+    }
+
     public static int countItem(SimpleContainer inventory, Predicate<ItemStack> matcher) {
         int count = 0;
         for (int i = 0; i < inventory.getContainerSize(); i++) {
@@ -665,12 +681,17 @@ public final class PlayerNpcCraftingUtil {
                 continue;
             }
 
-            stack.shrink(1);
-            if (stack.isEmpty()) {
-                inventory.setItem(i, ItemStack.EMPTY);
+            SimpleContainer converted = copyContainer(inventory);
+            ItemStack convertedLog = converted.getItem(i);
+            convertedLog.shrink(1);
+            if (convertedLog.isEmpty()) {
+                converted.setItem(i, ItemStack.EMPTY);
             }
-            inventory.setChanged();
-            return InventoryUtils.addItem(inventory, new ItemStack(planks, 4));
+            if (!InventoryUtils.addItem(converted, new ItemStack(planks, 4))) {
+                continue;
+            }
+            copyContainerContents(converted, inventory);
+            return true;
         }
         return false;
     }

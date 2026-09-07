@@ -314,12 +314,29 @@ public final class ReturnPositionAi {
                     MAX_SAFE_DROP_BLOCKS,
                     LOCAL_ROUTE_HORIZONTAL_RADIUS,
                     LOCAL_ROUTE_VERTICAL_DOWN,
-                    LOCAL_ROUTE_VERTICAL_UP);
+                    LOCAL_ROUTE_VERTICAL_UP,
+                    useHistoricalBuilderFallback);
         } else {
-            moved = this.pathNavigationAi.moveTo(serverLevel, target, this.speed, MAX_SAFE_DROP_BLOCKS);
+            moved = useHistoricalBuilderFallback
+                    ? this.pathNavigationAi.moveToAllowingUsefulUphillPartial(
+                    serverLevel,
+                    target,
+                    this.speed,
+                    MAX_SAFE_DROP_BLOCKS)
+                    : this.pathNavigationAi.moveTo(serverLevel, target, this.speed, MAX_SAFE_DROP_BLOCKS);
         }
         this.repathTicks = REPATH_DELAY_TICKS + this.playerNpc.getRandom().nextInt(REPATH_JITTER_TICKS + 1);
         this.lastRouteDebug = this.pathNavigationAi.lastMoveFailureDetail();
+        BlockPos uphillPartialRoute = this.pathNavigationAi.lastUphillPartialRouteTarget();
+        if (moved && uphillPartialRoute != null) {
+            this.routeAttempts = 0;
+            this.failedLocalRouteCooldownTicks = 0;
+            this.resetBuilderProgressWatch();
+            this.lastRouteDebug = "partial uphill path end=" + posText(uphillPartialRoute)
+                    + " endDist=" + Math.round(uphillPartialRoute.distSqr(target));
+            this.detail = moveDetail + " (uphill route @ " + posText(uphillPartialRoute) + ")";
+            return;
+        }
         boolean acceptedWithoutProgress = moved
                 && useHistoricalBuilderFallback
                 && builderClearReady;
@@ -398,9 +415,10 @@ public final class ReturnPositionAi {
             return;
         }
 
-        boolean requestUpwardEscape = useHistoricalBuilderFallback
-                ? this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_ESCAPE || verticalEscapeNeeded
-                : verticalEscapeNeeded && this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_ESCAPE;
+        boolean requestUpwardEscape = verticalEscapeNeeded
+                && !this.playerNpc.isTemporaryPillarSupport(this.playerNpc.blockPosition().below())
+                && (useHistoricalBuilderFallback
+                || this.routeAttempts >= CLEAR_ATTEMPTS_BEFORE_ESCAPE);
         if (requestUpwardEscape) {
             this.playerNpc.requestForcedUpwardEscapeTo(target, UPWARD_ESCAPE_REQUEST_TICKS, MAX_RETURN_PILLAR_BLOCKS);
             this.detail = moveDetail + " (escaping upward)";
@@ -490,6 +508,10 @@ public final class ReturnPositionAi {
         boolean targetAbove = target.getY() > feet.getY() + 1;
         if (!targetAbove) {
             this.lastPillarDebug = "pillar skipped targetY=" + target.getY() + " feetY=" + feet.getY();
+            return false;
+        }
+        if (!forceAfterFailedRoute) {
+            this.lastPillarDebug = "pillar waiting for route retries=" + this.routeAttempts;
             return false;
         }
         if (this.directPillarsPlaced >= MAX_DIRECT_RETURN_PILLAR_BLOCKS) {

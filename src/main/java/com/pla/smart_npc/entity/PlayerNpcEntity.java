@@ -13,6 +13,7 @@ import com.pla.smart_npc.entity.ai.ResourceAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.entity.goal.AiBudgetWaitingStrollGoal;
 import com.pla.smart_npc.entity.goal.BeingAtHomeGoal;
+import com.pla.smart_npc.entity.goal.BurnNearbyItemGoal;
 import com.pla.smart_npc.entity.goal.BuildHouseGoal;
 import com.pla.smart_npc.entity.goal.BreakTargetObstructionGoal;
 import com.pla.smart_npc.entity.goal.BoatStockpileGoal;
@@ -305,6 +306,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private int combatFishingCooldown = 0;
     private int shieldCraftCooldown = 0;
     private int shieldGuardCooldown = 0;
+    private int itemPickupSuppressionTicks = 0;
     private boolean boatCollector = new Random().nextFloat() < 0.35F;
     private int desiredBoatCount = new Random().nextInt(2, 4);
     private int rawLogReserveTarget = 24;
@@ -583,6 +585,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public int getShieldGuardCooldown() {
         return shieldGuardCooldown;
+    }
+
+    public boolean isItemPickupSuppressed() {
+        return this.itemPickupSuppressionTicks > 0;
+    }
+
+    public void suppressItemPickupFor(int ticks) {
+        this.itemPickupSuppressionTicks = Math.max(
+                this.itemPickupSuppressionTicks,
+                normalizeCooldown(ticks)
+        );
     }
 
     public int getStunEscapeCooldown() {
@@ -1265,7 +1278,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public boolean hasCollectableSupplyDropNearby(double radius) {
-        if (this.level().isClientSide || radius <= 0.0D) {
+        if (this.level().isClientSide || radius <= 0.0D || this.isItemPickupSuppressed()) {
             return false;
         }
 
@@ -1276,6 +1289,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 item -> item.isAlive()
                         && !item.isRemoved()
                         && !item.getItem().isEmpty()
+                        && !PlayerNpcTrashUtil.isDiscarded(item.getItem())
                         && InventoryUtils.isInventoryBackedSupplyDrop(item.getItem())
                         && this.canAcceptInventoryStack(item.getItem())
         ).isEmpty();
@@ -1893,7 +1907,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     private boolean shouldCustomInventoryPickup(ItemStack stack) {
-        if (stack.isEmpty() || PlayerNpcTrashUtil.isDiscarded(stack)) {
+        if (this.isItemPickupSuppressed() || stack.isEmpty() || PlayerNpcTrashUtil.isDiscarded(stack)) {
             return false;
         }
 
@@ -1922,7 +1936,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public boolean wantsToPickUp(@NotNull ItemStack stack) {
-        if (stack.isEmpty() || PlayerNpcTrashUtil.isDiscarded(stack)) {
+        if (this.isItemPickupSuppressed() || stack.isEmpty() || PlayerNpcTrashUtil.isDiscarded(stack)) {
             return false;
         }
 
@@ -2021,6 +2035,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.addWorkGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
         this.addWorkGoal(4, new ManageHomeBaseGoal(this, true));
         this.addWorkGoal(4, new MiningNightCampGoal(this, 1.0D));
+        this.addWorkGoal(5, new BurnNearbyItemGoal(this, 1.0D, 10.0D));
         this.addWorkGoal(5, new CookFoodGoal(this));
         this.addWorkGoal(5, this.gated(new FarmSetupGoal(this), PlayerNpcInterest.FARMING));
         this.addWorkGoal(5, this.gated(new FarmCropGoal(this), PlayerNpcInterest.FARMING));
@@ -2063,9 +2078,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                         && !this.shouldStayHomeForWeather(level)
                         && !ReturnHomeGoal.shouldSuppressExplorationForHome(this, level),
                 // GatherLogs has higher priority and remains the authority for local tree work.
-                // This signal reads only its retained bounded-search/selected-target state; it does
+                // This signal reads only its retained selected-target state; it does
                 // not run the old independent broad proxy that could cancel exploration without a
-                // successor. Pending slices resolve into GatherLogs or release exploration.
+                // successor. Pending slices leave exploration available until a log is selected.
                 level -> BuildHouseGoal.shouldYieldSupplyWorkForBuild(this, level)
                         || gatherLogsGoal.hasNearbyUsableLogTarget(level),
                 true,
@@ -2226,9 +2241,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         // sticks (and, when no table is available, the crafting table).  Treat that bootstrap
         // supply route like the mining/exploring routes above.  Otherwise any roof or cave mouth
         // makes this predicate false after GatherLogs finishes its bounded local pass, leaving
-        // the admitted fisher idle forever instead of roaming to a tree.  The priority-1 hole
+        // the admitted fisher idle forever instead of roaming to a tree. Farmers need the same
+        // bootstrap route for their required wood/tool supply. The priority-1 hole
         // escape goal still pre-empts this lower-priority exploration when the NPC is trapped.
-        if (this.isDailyJobActive(PlayerNpcInterest.FISHING)) {
+        if (this.isDailyJobActive(PlayerNpcInterest.FISHING)
+                || this.isDailyJobActive(PlayerNpcInterest.FARMING)) {
             return true;
         }
         if (this.hasInterest(PlayerNpcInterest.BUILDING) && this.isDailyJobActive(PlayerNpcInterest.BUILDING)) {
@@ -2780,7 +2797,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     private void pickupNearbyItems() {
-        if (!isAlive() || isRemoved() || this.isDeadOrDying()) return;
+        if (!isAlive() || isRemoved() || this.isDeadOrDying() || this.isItemPickupSuppressed()) return;
 
         AABB box = this.getBoundingBox().inflate(
                 ITEM_PICKUP_REACH.getX(),
@@ -2833,6 +2850,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     private boolean tryPickupItemEntity(ItemEntity itemEntity, boolean equipAfterPickup) {
         if (this.level().isClientSide
+                || this.isItemPickupSuppressed()
                 || itemEntity == null
                 || !itemEntity.isAlive()
                 || itemEntity.isRemoved()
@@ -3033,6 +3051,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.combatFishingCooldown = tickCooldown(this.combatFishingCooldown);
         this.shieldCraftCooldown = tickCooldown(this.shieldCraftCooldown);
         this.shieldGuardCooldown = tickCooldown(this.shieldGuardCooldown);
+        this.itemPickupSuppressionTicks = tickCooldown(this.itemPickupSuppressionTicks);
         this.placeBlockParryCooldown = tickCooldown(this.placeBlockParryCooldown);
         this.stunEscapeCooldown = tickCooldown(this.stunEscapeCooldown);
         this.playingIdleCooldown = tickCooldown(this.playingIdleCooldown);
@@ -4711,6 +4730,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                                    MobSpawnType spawnType, BlockPos position, RandomSource random) {
         ServerLevel serverLevel = level.getLevel();
         boolean naturalSpawn = PlayerNpcNaturalSpawnCap.isNaturalSpawnType(spawnType);
+        if ((spawnType == MobSpawnType.NATURAL || spawnType == MobSpawnType.CHUNK_GENERATION)
+                && !PlayerNpcNaturalSpawnCap.isNaturalSpawningEnabled(serverLevel)) {
+            return false;
+        }
         if (naturalSpawn && !PlayerNpcNaturalSpawnCap.mayAttemptNaturalSpawn(serverLevel.getServer())) {
             return false;
         }

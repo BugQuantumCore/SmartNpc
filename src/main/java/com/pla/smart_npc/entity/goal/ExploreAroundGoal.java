@@ -42,6 +42,7 @@ import javax.annotation.Nullable;
 
 public class ExploreAroundGoal extends Goal {
     private static final String LOG_EXPLORATION_DETAIL = "exploring for logs";
+    private static final String FARM_AREA_EXPLORATION_DETAIL = "exploring for a farm area";
     private static final String STONE_EXPLORATION_DETAIL = "exploring for stone";
     private static final int[][] SEARCH_DISTANCE_BANDS = {
             {12, 18},
@@ -83,6 +84,11 @@ public class ExploreAroundGoal extends Goal {
     private static final int RETURN_HOME_REQUEST_TICKS = 20 * 120;
     private static final int RETURN_HOME_RETRY_COOLDOWN_TICKS = 20 * 15;
     private static final int MIN_LOCAL_SURFACE_NEIGHBORS = 2;
+    private static final int MAINLAND_SCAN_RADIUS = 18;
+    private static final int MAINLAND_COLUMNS_PER_SLICE = 192;
+    private static final int MAINLAND_SCAN_STRIDE = 73;
+    private static final int MIN_MAINLAND_SURFACE_NEIGHBORS = 3;
+    private static final int[][] MAINLAND_COLUMN_OFFSETS = createMainlandColumnOffsets();
     private static final int RECENT_ROUTE_MEMORY_TICKS = 20;
     private static final int ROUTE_FOLIAGE_NODE_LOOKAHEAD = 3;
     private static final int MAX_ROUTE_FOLIAGE_CLEAR_ATTEMPTS = 4;
@@ -154,6 +160,9 @@ public class ExploreAroundGoal extends Goal {
     private boolean explorationSprinting;
     private boolean failedClimbFallbackWalk;
     private boolean localWaterEscape;
+    private boolean mainlandWaterRecovery;
+    private BlockPos mainlandScanOrigin;
+    private int mainlandScanCursor;
     private final Set<BlockPos> skippedRouteFoliage = new HashSet<>();
     private List<BlockPos> recentRouteNodes = List.of();
     private BlockPos recentRouteTarget;
@@ -504,6 +513,24 @@ public class ExploreAroundGoal extends Goal {
                 return;
             }
 
+            if (this.mainlandWaterRecovery && this.isStrandedOverWater(serverLevel)) {
+                this.playerNpc.getNavigation().stop();
+                this.playerNpc.getJumpControl().jump();
+                this.playerNpc.getMoveControl().setWantedPosition(
+                        this.targetPos.getX() + 0.5D,
+                        this.playerNpc.getY(),
+                        this.targetPos.getZ() + 0.5D,
+                        Math.min(1.0D, this.speed)
+                );
+                this.playerNpc.setCurrentAiDetail("leaving water support toward mainland");
+                return;
+            }
+            if (this.mainlandWaterRecovery
+                    && this.pathNavigationAi.tickWaterTravel(serverLevel, this.targetPos, this.speed)) {
+                this.initialRoutePending = false;
+                return;
+            }
+
             if (this.initialRoutePending) {
                 this.initialRoutePending = false;
                 this.moveToTarget(serverLevel);
@@ -592,6 +619,7 @@ public class ExploreAroundGoal extends Goal {
         this.cancelLogRetryRelocation();
         this.failedClimbFallbackWalk = false;
         this.localWaterEscape = false;
+        this.mainlandWaterRecovery = false;
         this.routeFoliageClearBlockAi.stop();
         this.routeFoliageToolAi.restoreMainHand();
         this.skippedRouteFoliage.clear();
@@ -626,7 +654,17 @@ public class ExploreAroundGoal extends Goal {
         this.plannedTargetPath = null;
         BlockPos center = this.playerNpc.blockPosition();
         boolean waterTravel = this.isInWater(serverLevel);
+        boolean strandedOverWater = this.isStrandedOverWater(serverLevel);
         this.localWaterEscape = false;
+        this.mainlandWaterRecovery = false;
+        if ((waterTravel || strandedOverWater) && this.shouldSeekMainlandFirst()) {
+            BlockPos mainland = this.findDryMainlandTarget(serverLevel, center);
+            if (mainland != null) {
+                this.mainlandWaterRecovery = true;
+                this.searchRadiusIndex = 0;
+                return mainland;
+            }
+        }
         if (waterTravel) {
             if (this.pathNavigationAi.canStartLocalWaterEscape(serverLevel)) {
                 this.localWaterEscape = true;
@@ -668,6 +706,87 @@ public class ExploreAroundGoal extends Goal {
             return this.findBuildingLogLocalSurfaceTarget(serverLevel, center);
         }
         return null;
+    }
+
+    private boolean shouldSeekMainlandFirst() {
+        return LOG_EXPLORATION_DETAIL.equals(this.detail)
+                || FARM_AREA_EXPLORATION_DETAIL.equals(this.detail);
+    }
+
+    @Nullable
+    private BlockPos findDryMainlandTarget(ServerLevel serverLevel, BlockPos center) {
+        if (this.mainlandScanOrigin == null
+                || this.mainlandScanOrigin.distSqr(center) > 16.0D) {
+            this.mainlandScanOrigin = center.immutable();
+            this.mainlandScanCursor = 0;
+        }
+        List<BlockPos> candidates = new ArrayList<>();
+        int total = MAINLAND_COLUMN_OFFSETS.length;
+        int examined = Math.min(MAINLAND_COLUMNS_PER_SLICE, total);
+        for (int attempt = 0; attempt < examined; attempt++) {
+            int index = Math.floorMod(this.mainlandScanCursor + attempt * MAINLAND_SCAN_STRIDE, total);
+            int[] offset = MAINLAND_COLUMN_OFFSETS[index];
+            int x = this.mainlandScanOrigin.getX() + offset[0];
+            int z = this.mainlandScanOrigin.getZ() + offset[1];
+            if (!isColumnLoaded(serverLevel, x, z)) {
+                continue;
+            }
+            int y = serverLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+            BlockPos candidate = new BlockPos(x, y, z);
+            if (this.isSafeExploreTarget(serverLevel, center, candidate)
+                    && this.hasMainlandSurfaceRoom(serverLevel, candidate)) {
+                candidates.add(candidate.immutable());
+            }
+        }
+        this.mainlandScanCursor = Math.floorMod(
+                this.mainlandScanCursor + examined * MAINLAND_SCAN_STRIDE,
+                total
+        );
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> horizontalDistanceSqr(center, pos))
+                .thenComparingInt(pos -> Math.abs(pos.getY() - center.getY())));
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private boolean isStrandedOverWater(ServerLevel serverLevel) {
+        if (this.isInWater(serverLevel)) {
+            return false;
+        }
+        BlockPos feet = this.playerNpc.blockPosition();
+        int waterSides = 0;
+        int connectedDrySides = 0;
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos adjacent = feet.relative(direction);
+            if (!serverLevel.hasChunkAt(adjacent)) {
+                continue;
+            }
+            if (serverLevel.getFluidState(adjacent).is(FluidTags.WATER)
+                    || serverLevel.getFluidState(adjacent.below()).is(FluidTags.WATER)) {
+                waterSides++;
+            }
+            for (int dy = -1; dy <= 1; dy++) {
+                if (this.canStandAt(serverLevel, adjacent.offset(0, dy, 0))) {
+                    connectedDrySides++;
+                    break;
+                }
+            }
+        }
+        return connectedDrySides == 0 && waterSides >= 2;
+    }
+
+    private boolean hasMainlandSurfaceRoom(ServerLevel serverLevel, BlockPos pos) {
+        int neighbors = 0;
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            for (int dy = -1; dy <= 1; dy++) {
+                BlockPos adjacent = pos.relative(direction).offset(0, dy, 0);
+                if (this.isTerrainSupportedStand(serverLevel, adjacent)
+                        && serverLevel.canSeeSky(adjacent.above())) {
+                    neighbors++;
+                    break;
+                }
+            }
+        }
+        return neighbors >= MIN_MAINLAND_SURFACE_NEIGHBORS;
     }
 
     private boolean shouldUseBuildingSupplyLocalSurfaceFallback() {
@@ -842,7 +961,9 @@ public class ExploreAroundGoal extends Goal {
         BlockPos feet = this.playerNpc.blockPosition();
         return this.playerNpc.isInWaterOrBubble()
                 || serverLevel.getFluidState(feet).is(FluidTags.WATER)
-                || serverLevel.getFluidState(feet.above()).is(FluidTags.WATER);
+                || serverLevel.getFluidState(feet.above()).is(FluidTags.WATER)
+                || !this.playerNpc.onGround()
+                && serverLevel.getFluidState(feet.below()).is(FluidTags.WATER);
     }
 
     private void scheduleWaterEscapeRetry() {
@@ -1570,6 +1691,21 @@ public class ExploreAroundGoal extends Goal {
         for (int dx = -STALLED_SURFACE_SCAN_RADIUS; dx <= STALLED_SURFACE_SCAN_RADIUS; dx++) {
             for (int dz = -STALLED_SURFACE_SCAN_RADIUS; dz <= STALLED_SURFACE_SCAN_RADIUS; dz++) {
                 if (dx * dx + dz * dz <= radiusSqr) {
+                    offsets.add(new int[]{dx, dz});
+                }
+            }
+        }
+        offsets.sort(Comparator.comparingInt(offset -> offset[0] * offset[0] + offset[1] * offset[1]));
+        return offsets.toArray(new int[0][]);
+    }
+
+    private static int[][] createMainlandColumnOffsets() {
+        List<int[]> offsets = new ArrayList<>();
+        int radiusSqr = MAINLAND_SCAN_RADIUS * MAINLAND_SCAN_RADIUS;
+        for (int dx = -MAINLAND_SCAN_RADIUS; dx <= MAINLAND_SCAN_RADIUS; dx++) {
+            for (int dz = -MAINLAND_SCAN_RADIUS; dz <= MAINLAND_SCAN_RADIUS; dz++) {
+                int distanceSqr = dx * dx + dz * dz;
+                if (distanceSqr > 0 && distanceSqr <= radiusSqr) {
                     offsets.add(new int[]{dx, dz});
                 }
             }

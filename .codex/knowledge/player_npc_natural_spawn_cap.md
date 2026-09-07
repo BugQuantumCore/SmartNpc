@@ -7,6 +7,17 @@ spawn attempt every 20 seconds, 24-48 blocks from an overworld player, using onl
 surface column. It neither loads/generates chunks nor bypasses names, daylight, placement, collision,
 or automatic/fixed population-cap checks.
 
+`/gamerule doMobSpawning false` also disables this loaded-world fallback. Its server-tick entry
+checks `PlayerNpcNaturalSpawnCap.isNaturalSpawningEnabled(level)` before timers, player selection,
+terrain reads, or reservations, because calling a custom spawner directly does not inherit vanilla
+`NaturalSpawner`'s gamerule gate. The shared `PlayerNpcEntity.canSpawn(...)` predicate applies the
+same rule to `NATURAL` and `CHUNK_GENERATION` candidates. Command, spawn-egg,
+and structure sources retain their existing bypass; `SPAWNER` creation also remains independent
+of this gamerule, following vanilla semantics, while retaining its existing population-cap checks.
+The broad `isNaturalSpawnType` population classification is unchanged. Disabling the rule does not remove existing
+NPCs, alter their work, or reset the population controller. Re-enabling it resumes automatic
+attempts subject to all existing population and placement checks.
+
 ## Sources
 
 - `src/main/java/com/pla/smart_npc/util/PlayerNpcNaturalSpawnCap.java`

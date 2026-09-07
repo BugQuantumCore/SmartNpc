@@ -1,5 +1,9 @@
 # Smart NPC Common Modding Rules
 
+## User Verification Preference (2026-09-06)
+
+The user requested removal of `src/test` and the GameTest Gradle run configuration, and does not want automated tests run or recreated for routine fixes. Validate future changes by focused code review and Java compilation/packaging (`gradlew.bat assemble`, which does not run tests) unless the user explicitly changes this preference. Earlier notes mentioning passing GameTests describe historical verification, not an active test package or a requirement to restore it.
+
 ## Project Baseline
 
 - Smart NPC targets Minecraft Forge `1.20.1` with Forge `47.4.4`, Parchment `2023.06.26-1.20.1`, and Java `17`.

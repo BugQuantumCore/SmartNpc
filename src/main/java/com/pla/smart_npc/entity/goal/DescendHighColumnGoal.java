@@ -68,6 +68,7 @@ public class DescendHighColumnGoal extends Goal {
                 || this.playerNpc.getUpwardEscapeTarget() != null
                 || this.playerNpc.getHoleEscapeCooldown() > 0
                 || this.terraformBuildSiteGoal.hasPendingSupportFillEscapeHandoff(serverLevel)
+                || ReturnHomeGoal.hasUphillBuilderReturnIntent(this.playerNpc, serverLevel)
                 || this.shouldYieldToMiningSupplyWork()
                 || !this.shouldRunForCurrentState()) {
             return false;
@@ -106,7 +107,9 @@ public class DescendHighColumnGoal extends Goal {
                 && this.playerNpc.getTarget() == null
                 && this.playerNpc.getUpwardEscapeTarget() == null
                 && this.playerNpc.getHoleEscapeCooldown() <= 0
-                && this.playerNpc.level() instanceof ServerLevel;
+                && this.playerNpc.level() instanceof ServerLevel serverLevel
+                && !this.terraformBuildSiteGoal.hasPendingSupportFillEscapeHandoff(serverLevel)
+                && !ReturnHomeGoal.hasUphillBuilderReturnIntent(this.playerNpc, serverLevel);
     }
 
     @Override
@@ -133,6 +136,13 @@ public class DescendHighColumnGoal extends Goal {
             return;
         }
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)) {
+            this.finished = true;
+            return;
+        }
+        if (this.playerNpc.getUpwardEscapeTarget() != null
+                || this.terraformBuildSiteGoal.hasPendingSupportFillEscapeHandoff(serverLevel)
+                || ReturnHomeGoal.hasUphillBuilderReturnIntent(this.playerNpc, serverLevel)) {
+            this.breakingBlockAi.stop();
             this.finished = true;
             return;
         }
@@ -167,11 +177,20 @@ public class DescendHighColumnGoal extends Goal {
             }
         }
 
+        if (!this.hasSafeLandingAfterDescent(serverLevel, this.floorTarget)) {
+            this.breakingBlockAi.stop();
+            this.traceUnsafeLanding(this.floorTarget);
+            this.finished = true;
+            return;
+        }
+
         this.playerNpc.getNavigation().stop();
         BreakingBlockAi.TickResult result = this.breakingBlockAi.tick(
                 serverLevel,
                 this.floorTarget,
-                state -> this.canBreakColumnBlock(serverLevel, this.floorTarget, state),
+                state -> this.canBreakColumnBlock(serverLevel, this.floorTarget, state)
+                        && this.hasSafeLandingAfterDescent(serverLevel, this.floorTarget)
+                        && !ReturnHomeGoal.hasUphillBuilderReturnIntent(this.playerNpc, serverLevel),
                 REQUIRED_BREAK_TICKS,
                 "pillar down"
         );
@@ -246,25 +265,14 @@ public class DescendHighColumnGoal extends Goal {
         BlockPos floor = feet.below();
         BlockState floorState = serverLevel.getBlockState(floor);
         boolean ownedTemporarySupport = this.playerNpc.isTemporaryPillarSupport(floor);
-        if (!this.canBreakColumnBlock(serverLevel, floor, floorState)
-                || !serverLevel.getBlockState(floor.below()).isSolidRender(serverLevel, floor.below())) {
+        if (!this.canBreakColumnBlock(serverLevel, floor, floorState)) {
+            return null;
+        }
+        if (!this.hasSafeLandingAfterDescent(serverLevel, floor)) {
+            this.traceUnsafeLanding(floor);
             return null;
         }
         if (ownedTemporarySupport) {
-            // Stacked owned supports remain a valid interrupted-pillar descent. At the final
-            // support, however, prove that the landing cell has an ordinary same-level exterior
-            // exit. Merely finding a walkable cell beside the lower landing is insufficient: an
-            // irregular pocket inside the same shaft passes that test, then EscapeHole immediately
-            // replaces the removed dirt and produces an endless descend/pillar cooldown cycle.
-            boolean continuesOwnedColumn = this.playerNpc.isTemporaryPillarSupport(floor.below());
-            if (!continuesOwnedColumn && !this.hasSafeSurfaceExitAfterLanding(serverLevel, floor)) {
-                this.playerNpc.setIdleTraceDetail(
-                        "pillar descent deferred: final support still covers enclosed hole @ "
-                                + floor.getX() + " " + floor.getY() + " " + floor.getZ(),
-                        30
-                );
-                return null;
-            }
             this.floorTargetOwnedTemporary = true;
             return floor.immutable();
         }
@@ -274,6 +282,27 @@ public class DescendHighColumnGoal extends Goal {
             return null;
         }
         return floor.immutable();
+    }
+
+    private boolean hasSafeLandingAfterDescent(ServerLevel serverLevel, BlockPos landingFeet) {
+        if (landingFeet == null
+                || !serverLevel.hasChunkAt(landingFeet)
+                || !serverLevel.getBlockState(landingFeet.below()).isSolidRender(serverLevel, landingFeet.below())
+                || this.isInsideEnclosedBodyColumn(serverLevel, landingFeet)) {
+            return false;
+        }
+        // Evaluate the body position AFTER removing this floor, not only the current feet.
+        // Another owned support below proves support, not an exit: a stacked column can pass
+        // back through a mine's rim and make EscapeHole immediately replace the removed block.
+        // Keep open stacked-column descent, and require a surface exit at its final support.
+        return !this.playerNpc.isTemporaryPillarSupport(landingFeet)
+                || this.playerNpc.isTemporaryPillarSupport(landingFeet.below())
+                || this.hasSafeSurfaceExitAfterLanding(serverLevel, landingFeet);
+    }
+
+    private void traceUnsafeLanding(BlockPos landingFeet) {
+        this.playerNpc.setIdleTraceDetail("pillar descent deferred: unsafe landing @ "
+                + landingFeet.getX() + " " + landingFeet.getY() + " " + landingFeet.getZ(), 40);
     }
 
     private boolean hasSafeSurfaceExitAfterLanding(ServerLevel serverLevel, BlockPos landingFeet) {
@@ -295,6 +324,7 @@ public class DescendHighColumnGoal extends Goal {
         // requires either conservative natural-column evidence or an owned-support landing exit.
         return pos != null
                 && serverLevel.isInWorldBounds(pos)
+                && serverLevel.hasChunkAt(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
                 && !this.isProtectedHomeBlock(pos)
                 && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)
@@ -306,7 +336,10 @@ public class DescendHighColumnGoal extends Goal {
 
     private boolean isProtectedHomeBlock(BlockPos pos) {
         Optional<PlayerNpcHomeUtil.HomeArea> home = PlayerNpcHomeUtil.getHome(this.playerNpc);
-        return home.isPresent() && PlayerNpcHomeUtil.isInside(home.get(), pos);
+        // Foundation supports below the home origin are part of the build footprint too.
+        // Removing them immediately after Terraform's escape recreates the same fill/climb job.
+        return home.isPresent() && (PlayerNpcHomeUtil.isInside(home.get(), pos)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos));
     }
 
     private boolean isNarrowColumnTop(ServerLevel serverLevel, BlockPos floor) {

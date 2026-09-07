@@ -55,9 +55,20 @@ staggered by at least 20 ticks, tree work is local, and both outer targets and i
 checks have hard budgets.
 
 Footing placement is recovery, not the first action after entering water. It is considered only
-after destination swimming stalls, and only in one-block-deep water or while next to a solid wall or
-shore obstruction. The placed position is biased toward the owning destination. Ordinary river
-crossings do not place blocks or switch banks.
+after destination swimming stalls, and only when the current underfoot water cell is one block deep
+over a solid floor or directly adjacent to a validated dry stand. The selected placement is that
+exact original water cell at the NPC's feet or one block below a surface-bobbing body; it is retained
+while the NPC jumps clear. Side cells and cells above the feet are never footing candidates. A
+successful footing is remembered as an owned temporary support. Ordinary river crossings do not
+place blocks or switch banks.
+
+Farm-area and log exploration detect both fluid-aware wet bodies and a dry body stranded on a tiny
+support with water on at least two sides and no connected dry step. Before cycling ordinary random
+distance bands, one admitted pass samples at most 192 loaded columns within radius 18 and accepts
+only sky-visible terrain stands with at least three connected terrain neighbors. The selected mainland
+stand becomes the water destination; an NPC perched on a crafting table/support first jumps and
+steers off it, then the normal destination swim owns the crossing. No scan reads an unloaded column
+or creates a land path across the water.
 
 Land pillar requests are invalid while the NPC is fluid-aware wet (entity water flag, feet fluid,
 head fluid, or water directly below an airborne surface-bobbing body). `PlayerNpcEntity` clears stale upward requests centrally, and

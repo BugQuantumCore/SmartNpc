@@ -1,15 +1,16 @@
 package com.pla.smart_npc.entity.goal;
 
-import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.FarmAi;
+import com.pla.smart_npc.util.ChatUtil;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
+import com.pla.smart_npc.util.PlayerNpcTrashUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.particles.ParticleTypes;
-import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
@@ -23,8 +24,10 @@ import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.*;
+import net.minecraft.world.level.block.BaseFireBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.gameevent.GameEvent;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraftforge.registries.ForgeRegistries;
 
@@ -62,15 +65,6 @@ public class BurnNearbyItemGoal extends Goal {
     private static final int MAX_OBSTRUCTION_BREAK_TICKS = 20 * 4;
     private static final double OBSTRUCTION_BREAK_DISTANCE_SQR = 3.2D * 3.2D;
 
-    private static List<String> keys(String prefix, int count) {
-        List<String> list = new ArrayList<>(count);
-        for (int i = 1; i <= count; i++) {
-            list.add(prefix + "." + i);
-        }
-        return List.copyOf(list);
-    }
-
-    private static final List<String> burnMessageKeys = keys("burn_item.player_npc", 56);
     private enum BurnTool {
         FLINT_AND_STEEL,
         LAVA_BUCKET
@@ -89,7 +83,7 @@ public class BurnNearbyItemGoal extends Goal {
             giveUpCooldownTicks--;
             return false;
         }
-        if (mob.level().isClientSide) return false;
+        if (!(mob.level() instanceof ServerLevel serverLevel)) return false;
         if (!mob.isAlive() || mob.isRemoved() || mob.isDeadOrDying()) return false;
         if (mob.isPassenger()) return false;
         if (mob.getTarget() != null) return false;
@@ -97,7 +91,7 @@ public class BurnNearbyItemGoal extends Goal {
         if (mob instanceof PlayerNpcEntity playerNpcEntity && playerNpcEntity.isHealing()) {
             return false;
         }
-        targetItem = findTargetItem();
+        targetItem = findTargetItem(serverLevel);
         return targetItem != null;
     }
 
@@ -111,7 +105,8 @@ public class BurnNearbyItemGoal extends Goal {
 
         return targetItem != null
                 && (burnTicks > 0 || targetItem.isAlive())
-                && (burnTicks > 0 || !targetItem.getItem().isEmpty());
+                && (burnTicks > 0 || !targetItem.getItem().isEmpty())
+                && (burnTicks > 0 || !isSuppressedPickupCandidate(targetItem.getItem()));
     }
 
     @Override
@@ -148,11 +143,16 @@ public class BurnNearbyItemGoal extends Goal {
         if (!mob.isAlive() || mob.isRemoved() || mob.isDeadOrDying()) return;
         if (!(mob.level() instanceof ServerLevel serverLevel)) return;
         if (burnTicks > 0) {
-            tickBurningGround(serverLevel);
+            tickBurningGround();
             return;
         }
 
         if (targetItem == null || !targetItem.isAlive() || targetItem.getItem().isEmpty()) {
+            return;
+        }
+        if (isSuppressedPickupCandidate(targetItem.getItem())) {
+            targetItem = null;
+            mob.getNavigation().stop();
             return;
         }
 
@@ -249,6 +249,19 @@ public class BurnNearbyItemGoal extends Goal {
         }
 
         restorePreviousMainHand();
+        boolean burnTarget = !shouldPickupOrEquipInsteadOfBurn(targetItem.getItem());
+        if (burnTarget) {
+            BlockPos burnStand = findStandNearItem(targetItem);
+            Path burnStandPath = burnStand == null ? null : mob.getNavigation().createPath(burnStand, 0);
+            if (burnStandPath != null
+                    && burnStandPath.canReach()
+                    && mob.getNavigation().moveTo(burnStandPath, speed)) {
+                return true;
+            }
+            return tryStartPathObstructionMining(burnStand)
+                    || tryStartPathObstructionMining(targetItem.blockPosition());
+        }
+
         Path itemPath = mob.getNavigation().createPath(targetItem, 0);
         if (itemPath != null && itemPath.canReach() && mob.getNavigation().moveTo(itemPath, speed)) {
             return true;
@@ -283,7 +296,17 @@ public class BurnNearbyItemGoal extends Goal {
         double bestDistance = Double.MAX_VALUE;
         for (BlockPos pos : BlockPos.betweenClosed(itemPos.offset(-2, -2, -2), itemPos.offset(2, 2, 2))) {
             BlockPos stand = pos.immutable();
-            if (!canStandAt(serverLevel, stand)) {
+            if (!canStandAt(serverLevel, stand)
+                    || item.distanceToSqr(
+                    stand.getX() + 0.5D,
+                    stand.getY(),
+                    stand.getZ() + 0.5D
+            ) > 1.5D * 1.5D
+                    || mob.getDimensions(mob.getPose()).makeBoundingBox(
+                    stand.getX() + 0.5D,
+                    stand.getY(),
+                    stand.getZ() + 0.5D
+            ).intersects(new net.minecraft.world.phys.AABB(itemPos))) {
                 continue;
             }
             double distance = mob.distanceToSqr(stand.getX() + 0.5D, stand.getY(), stand.getZ() + 0.5D);
@@ -468,7 +491,11 @@ public class BurnNearbyItemGoal extends Goal {
     }
 
     private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
-        if (!serverLevel.isInWorldBounds(pos) || !serverLevel.getWorldBorder().isWithinBounds(pos)) {
+        if (!serverLevel.isInWorldBounds(pos)
+                || !serverLevel.getWorldBorder().isWithinBounds(pos)
+                || !serverLevel.hasChunkAt(pos)
+                || !serverLevel.hasChunkAt(pos.above())
+                || !serverLevel.hasChunkAt(pos.below())) {
             return false;
         }
 
@@ -659,21 +686,11 @@ public class BurnNearbyItemGoal extends Goal {
         );
     }
 
-    private void tryBroadcastBurnMessage(ServerLevel serverLevel, ItemStack burnedStack) {
-        if (!SmartNpcConfig.TURN_ON_NPC_CHAT.get()) return;
-        if (!(mob instanceof PlayerNpcEntity)) return;
+    private void tryBroadcastBurnMessage(ItemStack burnedStack) {
+        if (!(mob instanceof PlayerNpcEntity playerNpc)) return;
+        if (PlayerNpcTrashUtil.isDiscarded(burnedStack)) return;
         if (mob.getRandom().nextFloat() >= 0.05F) return;
-
-        String key = burnMessageKeys.get(mob.getRandom().nextInt(burnMessageKeys.size()));
-
-        serverLevel.getServer().getPlayerList().broadcastSystemMessage(
-                Component.empty()
-                        .append(Component.literal("<"))
-                        .append(mob.getDisplayName())
-                        .append(Component.literal("> "))
-                        .append(Component.translatable(key, burnedStack.getHoverName())),
-                false
-        );
+        ChatUtil.burnItem(playerNpc, targetItem, burnedStack.getHoverName());
     }
 
     private void restoreMainWeapon(boolean addIdleCooldown) {
@@ -697,7 +714,7 @@ public class BurnNearbyItemGoal extends Goal {
         }
     }
 
-    private ItemEntity findTargetItem() {
+    private ItemEntity findTargetItem(ServerLevel serverLevel) {
         List<ItemEntity> items = mob.level().getEntitiesOfClass(
                 ItemEntity.class,
                 mob.getBoundingBox().inflate(searchRadius),
@@ -705,16 +722,32 @@ public class BurnNearbyItemGoal extends Goal {
                         && !e.hasPickUpDelay()
                         && e.onGround()
                         && !e.getItem().isEmpty()
-                        && (shouldPickupOrEquipInsteadOfBurn(e.getItem())
-                        || (hasAnyBurnTool() && !shouldReserveInsteadOfBurn(e.getItem())))
+                        && (!isSuppressedPickupCandidate(e.getItem())
+                        && shouldPickupOrEquipInsteadOfBurn(e.getItem())
+                        || canBurnItem(serverLevel, e))
         );
 
         if (items.isEmpty()) return null;
         return items.get(mob.getRandom().nextInt(items.size()));
     }
 
+    private boolean canBurnItem(ServerLevel serverLevel, ItemEntity itemEntity) {
+        return itemEntity != null
+                && itemEntity.isAlive()
+                && itemEntity.onGround()
+                && !itemEntity.getItem().isEmpty()
+                && !itemEntity.getItem().getItem().isFireResistant()
+                && !isSuppressedPickupCandidate(itemEntity.getItem())
+                && (PlayerNpcTrashUtil.isDiscarded(itemEntity.getItem())
+                || !shouldReserveInsteadOfBurn(itemEntity.getItem()))
+                && selectBurnTarget(serverLevel, itemEntity.blockPosition()) != null;
+    }
+
     private void igniteGroundAtItem(ServerLevel serverLevel) {
-        if (targetItem == null || !targetItem.isAlive() || targetItem.getItem().isEmpty()) {
+        if (targetItem == null
+                || !targetItem.isAlive()
+                || !targetItem.onGround()
+                || targetItem.getItem().isEmpty()) {
             return;
         }
 
@@ -724,40 +757,45 @@ public class BurnNearbyItemGoal extends Goal {
             return;
         }
 
+        BlockState ignitionState = burnTarget.tool() == BurnTool.LAVA_BUCKET
+                ? Blocks.LAVA.defaultBlockState()
+                : BaseFireBlock.getState(serverLevel, burnTarget.pos());
+        if (!serverLevel.setBlockAndUpdate(burnTarget.pos(), ignitionState)) {
+            targetItem = null;
+            return;
+        }
+
         burningStack = targetItem.getItem().copy();
         burningStack.setCount(Math.min(burningStack.getCount(), 1));
         firePos = burnTarget.pos();
-        burnTicks = 24;
-        if (mob instanceof PlayerNpcEntity playerNpcEntity) {
-            playerNpcEntity.setCurrentAiState("ai.player_npc.burning_item");
-        }
-
+        // Lava destroys ordinary item entities quickly and must be reclaimed before its first
+        // Nether fluid tick can spread it. Ordinary fire remains for the existing short window.
+        burnTicks = burnTarget.tool() == BurnTool.LAVA_BUCKET ? 8 : 24;
         mob.getNavigation().stop();
         mob.getLookControl().setLookAt(firePos.getX() + 0.5D, firePos.getY() + 0.5D, firePos.getZ() + 0.5D, 40.0F, 40.0F);
         mob.swing(InteractionHand.MAIN_HAND, true);
         if (burnTarget.tool() == BurnTool.LAVA_BUCKET) {
-            serverLevel.setBlockAndUpdate(firePos, Blocks.LAVA.defaultBlockState());
             convertActiveLavaBucketToEmptyBucket();
             serverLevel.playSound(null, firePos, SoundEvents.BUCKET_EMPTY_LAVA, SoundSource.HOSTILE, 1.0F, 1.0F);
         } else {
-            serverLevel.setBlockAndUpdate(firePos, Blocks.FIRE.defaultBlockState());
             serverLevel.sendParticles(ParticleTypes.FLAME, firePos.getX() + 0.5D, firePos.getY() + 0.2D, firePos.getZ() + 0.5D, 8, 0.25D, 0.1D, 0.25D, 0.01D);
             serverLevel.playSound(null, firePos, SoundEvents.FLINTANDSTEEL_USE, SoundSource.HOSTILE, 1.0F, 1.0F);
         }
+        serverLevel.gameEvent(mob, GameEvent.BLOCK_PLACE, firePos);
+        if (mob instanceof PlayerNpcEntity playerNpcEntity) {
+            playerNpcEntity.setCurrentAiState("ai.player_npc.burning_item");
+        }
     }
 
-    private void tickBurningGround(ServerLevel serverLevel) {
+    private void tickBurningGround() {
         burnTicks--;
-        if (firePos != null && burnTicks == 10) {
-            burnItemsOnFire(serverLevel);
-        }
         if (burnTicks > 0) {
             return;
         }
 
         clearTemporaryFire();
         if (!burningStack.isEmpty()) {
-            tryBroadcastBurnMessage(serverLevel, burningStack);
+            tryBroadcastBurnMessage(burningStack);
         }
         burningStack = ItemStack.EMPTY;
         targetItem = null;
@@ -766,49 +804,24 @@ public class BurnNearbyItemGoal extends Goal {
         }
     }
 
-    private void burnItemsOnFire(ServerLevel serverLevel) {
-        if (firePos == null) {
-            return;
-        }
-
-        List<ItemEntity> burningItems = serverLevel.getEntitiesOfClass(
-                ItemEntity.class,
-                new net.minecraft.world.phys.AABB(firePos).inflate(0.75D),
-                item -> item.isAlive() && !item.getItem().isEmpty()
-        );
-
-        if (burningItems.isEmpty()) {
-            return;
-        }
-
-        ItemEntity item = burningItems.get(0);
-        burningStack = item.getItem().copy();
-        burningStack.setCount(Math.min(burningStack.getCount(), 1));
-        item.discard();
-        mob.swing(InteractionHand.MAIN_HAND, true);
-    }
-
     private void clearTemporaryFire() {
-        if (firePos != null
-                && mob.level() instanceof ServerLevel serverLevel
-                && (serverLevel.getBlockState(firePos).is(Blocks.FIRE) || serverLevel.getBlockState(firePos).is(Blocks.LAVA))) {
+        if (firePos != null && mob.level() instanceof ServerLevel serverLevel) {
+            BlockState state = serverLevel.getBlockState(firePos);
+            boolean ownsCurrentState = burnTool == BurnTool.LAVA_BUCKET
+                    ? state.is(Blocks.LAVA)
+                    : state.getBlock() instanceof BaseFireBlock;
+            if (!ownsCurrentState) {
+                return;
+            }
             mob.swing(InteractionHand.MAIN_HAND, true);
             serverLevel.removeBlock(firePos, false);
         }
     }
 
     private BlockPos findFirePos(ServerLevel serverLevel, BlockPos itemPos) {
-        BlockPos[] candidates = {
-                itemPos,
-                itemPos.above(),
-                itemPos.below().above()
-        };
-
-        for (BlockPos candidate : candidates) {
-            if (serverLevel.getBlockState(candidate).isAir()
-                    && Blocks.FIRE.defaultBlockState().canSurvive(serverLevel, candidate)) {
-                return candidate.immutable();
-            }
+        if (canUseIgnitionCell(serverLevel, itemPos)
+                && BaseFireBlock.getState(serverLevel, itemPos).canSurvive(serverLevel, itemPos)) {
+            return itemPos.immutable();
         }
         return null;
     }
@@ -832,19 +845,48 @@ public class BurnNearbyItemGoal extends Goal {
     }
 
     private BlockPos findLavaPos(ServerLevel serverLevel, BlockPos itemPos) {
-        BlockPos[] candidates = {
-                itemPos,
-                itemPos.above()
-        };
-
-        for (BlockPos candidate : candidates) {
-            if (serverLevel.isInWorldBounds(candidate)
-                    && serverLevel.getWorldBorder().isWithinBounds(candidate)
-                    && serverLevel.getBlockState(candidate).isAir()) {
-                return candidate.immutable();
-            }
+        if (canUseIgnitionCell(serverLevel, itemPos)) {
+            return itemPos.immutable();
         }
         return null;
+    }
+
+    private boolean canUseIgnitionCell(ServerLevel serverLevel, BlockPos pos) {
+        return serverLevel.isInWorldBounds(pos)
+                && serverLevel.getWorldBorder().isWithinBounds(pos)
+                && hasLoadedIgnitionNeighborhood(serverLevel, pos)
+                && serverLevel.getBlockState(pos).isAir()
+                && !new net.minecraft.world.phys.AABB(pos).intersects(mob.getBoundingBox())
+                && serverLevel.getEntitiesOfClass(
+                LivingEntity.class,
+                new net.minecraft.world.phys.AABB(pos),
+                entity -> entity.isAlive() && entity != mob
+        ).isEmpty()
+                && !isProtectedIgnitionPosition(pos)
+                && !isProtectedIgnitionPosition(pos.below());
+    }
+
+    private boolean hasLoadedIgnitionNeighborhood(ServerLevel serverLevel, BlockPos pos) {
+        if (!serverLevel.hasChunkAt(pos) || !serverLevel.hasChunkAt(pos.below())) {
+            return false;
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            if (!serverLevel.hasChunkAt(pos.relative(direction))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isProtectedIgnitionPosition(BlockPos pos) {
+        if (!(mob instanceof PlayerNpcEntity playerNpc)) {
+            return false;
+        }
+        Optional<PlayerNpcHomeUtil.HomeArea> homeArea = PlayerNpcHomeUtil.getHome(playerNpc);
+        return homeArea.map(home -> PlayerNpcHomeUtil.isInside(home, pos)).orElse(false)
+                || PlayerNpcHomeUtil.isInsideBuildFootprint(playerNpc, pos)
+                || FarmAi.isProtectedFarmBlock(playerNpc, pos)
+                || FarmAi.isInsideOwnedFarmWorkOrEntranceFootprint(playerNpc, pos);
     }
 
     private boolean equipBurnTool(BurnTool tool) {
@@ -866,11 +908,6 @@ public class BurnNearbyItemGoal extends Goal {
 
         mob.setItemSlot(EquipmentSlot.MAINHAND, activeBurnToolStack.copy());
         return true;
-    }
-
-    private boolean hasAnyBurnTool() {
-        return InventoryUtils.hasItem(mob, Items.FLINT_AND_STEEL)
-                || InventoryUtils.hasItem(mob, Items.LAVA_BUCKET);
     }
 
     private void convertActiveLavaBucketToEmptyBucket() {
@@ -896,7 +933,7 @@ public class BurnNearbyItemGoal extends Goal {
     }
 
     private boolean shouldPickupOrEquipInsteadOfBurn(ItemStack stack) {
-        if (stack.isEmpty()) {
+        if (stack.isEmpty() || PlayerNpcTrashUtil.isDiscarded(stack)) {
             return false;
         }
 
@@ -912,11 +949,23 @@ public class BurnNearbyItemGoal extends Goal {
     }
 
     private boolean shouldReserveInsteadOfBurn(ItemStack stack) {
-        return InventoryUtils.isInventoryBackedSupplyDrop(stack);
+        return !PlayerNpcTrashUtil.isDiscarded(stack)
+                && InventoryUtils.isInventoryBackedSupplyDrop(stack);
+    }
+
+    private boolean isSuppressedPickupCandidate(ItemStack stack) {
+        return mob instanceof PlayerNpcEntity playerNpc
+                && playerNpc.isItemPickupSuppressed()
+                && !PlayerNpcTrashUtil.isDiscarded(stack)
+                && shouldPickupOrEquipInsteadOfBurn(stack);
     }
 
     private boolean tryHandleItemWithoutBurning(ItemEntity itemEntity) {
-        if (itemEntity == null || !itemEntity.isAlive() || itemEntity.getItem().isEmpty()) {
+        if (itemEntity == null
+                || !itemEntity.isAlive()
+                || itemEntity.getItem().isEmpty()
+                || PlayerNpcTrashUtil.isDiscarded(itemEntity.getItem())
+                || isSuppressedPickupCandidate(itemEntity.getItem())) {
             return false;
         }
 
@@ -938,7 +987,10 @@ public class BurnNearbyItemGoal extends Goal {
     private boolean tryEquipWeaponFromGround(ItemEntity itemEntity) {
         ItemStack groundStack = itemEntity.getItem();
 
-        if (groundStack.isEmpty() || !isUsefulWeapon(groundStack)) {
+        if (groundStack.isEmpty()
+                || PlayerNpcTrashUtil.isDiscarded(groundStack)
+                || isSuppressedPickupCandidate(groundStack)
+                || !isUsefulWeapon(groundStack)) {
             return false;
         }
 
@@ -976,7 +1028,9 @@ public class BurnNearbyItemGoal extends Goal {
     private boolean tryEquipArmorFromGround(ItemEntity itemEntity) {
         ItemStack groundStack = itemEntity.getItem();
 
-        if (groundStack.isEmpty()) {
+        if (groundStack.isEmpty()
+                || PlayerNpcTrashUtil.isDiscarded(groundStack)
+                || isSuppressedPickupCandidate(groundStack)) {
             return false;
         }
 
@@ -1020,7 +1074,11 @@ public class BurnNearbyItemGoal extends Goal {
     private boolean tryInsertIntoNpcInventory(ItemEntity itemEntity) {
         SimpleContainer inventory = getNpcInventory();
 
-        if (inventory == null || itemEntity == null || itemEntity.getItem().isEmpty()) {
+        if (inventory == null
+                || itemEntity == null
+                || itemEntity.getItem().isEmpty()
+                || PlayerNpcTrashUtil.isDiscarded(itemEntity.getItem())
+                || isSuppressedPickupCandidate(itemEntity.getItem())) {
             return false;
         }
 
