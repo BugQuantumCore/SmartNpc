@@ -33,6 +33,7 @@ public class UseLavaBucketGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
+                || this.playerNpc.isClearingCombatObstruction()
                 || !InventoryUtils.hasItem(this.playerNpc, Items.LAVA_BUCKET)
                 || this.playerNpc.getBucketCooldown() > 0) {
             return false;
@@ -58,7 +59,9 @@ public class UseLavaBucketGoal extends Goal {
     @Override
     public void start() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || this.playerNpc.isClearingCombatObstruction()
                 || this.placePos == null
+                || !this.canPlaceLava(serverLevel, this.placePos)
                 || InventoryUtils.consumeItem(this.playerNpc, Items.LAVA_BUCKET, 1).isEmpty()) {
             this.placePos = null;
             return;
@@ -67,8 +70,13 @@ public class UseLavaBucketGoal extends Goal {
         this.playerNpc.getNavigation().stop();
         this.playerNpc.getLookControl().setLookAt(this.placePos.getX() + 0.5D, this.placePos.getY() + 0.5D, this.placePos.getZ() + 0.5D, 40.0F, 40.0F);
         this.playerNpc.setCurrentAiState("ai.player_npc.using_lava_bucket");
+        if (!serverLevel.setBlockAndUpdate(this.placePos, Blocks.LAVA.defaultBlockState())) {
+            this.giveOrDrop(new ItemStack(Items.LAVA_BUCKET));
+            this.placePos = null;
+            this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
+            return;
+        }
         this.playerNpc.triggerMainHandUseAnimation();
-        serverLevel.setBlockAndUpdate(this.placePos, Blocks.LAVA.defaultBlockState());
         this.giveOrDrop(new ItemStack(Items.BUCKET));
         serverLevel.playSound(null, this.placePos, SoundEvents.BUCKET_EMPTY_LAVA, SoundSource.BLOCKS, 1.0F, 1.0F);
         this.playerNpc.setBucketCooldown();
@@ -98,6 +106,7 @@ public class UseLavaBucketGoal extends Goal {
 
     private boolean canPlaceLava(ServerLevel serverLevel, BlockPos pos) {
         return serverLevel.isInWorldBounds(pos)
+                && serverLevel.hasChunkAt(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
                 && serverLevel.getBlockState(pos).isAir();
     }

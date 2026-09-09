@@ -1,9 +1,11 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.entity.ai.FarmAi;
+import com.pla.smart_npc.entity.ai.ToolAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -34,18 +36,20 @@ public class LowHealthFleeGoal extends Goal {
     private static final double RUN_SPEED = 1.0D;
     private static final int MIN_FLEE_TICKS = 70;
     private static final int MAX_FLEE_TICKS = 130;
-    private static final int PATH_RECALCULATE_TICKS = 10;
+    private static final int PATH_RECALCULATE_TICKS = 20;
     private static final int MIN_JUMP_COOLDOWN_TICKS = 12;
     private static final int MAX_JUMP_COOLDOWN_TICKS = 28;
     private static final int POST_FLEE_ESCAPE_COOLDOWN_TICKS = 20 * 5;
     private static final float PATH_NODE_MULTIPLIER = 0.15F;
-    private static final int SUPPORT_JUMP_CHANCE_BOUND = 3;
+    private static final float SUPPORT_JUMP_CHANCE = 0.30F;
     private static final int MAX_SUPPORT_PLACE_TICKS = 10;
     private static final double MIN_SUPPORT_PLACE_Y_OFFSET = 1.01D;
     private static final double MAX_SUPPORT_HORIZONTAL_DRIFT_SQR = 1.5D * 1.5D;
 
     private final PlayerNpcEntity playerNpc;
     private final PlacingBlockAi placingBlockAi;
+    private final ToolAi toolAi;
+    private final CanUseThrottle activationThrottle = new CanUseThrottle();
     private LivingEntity threat;
     private Vec3 fleePos;
     private int fleeTicks;
@@ -57,6 +61,7 @@ public class LowHealthFleeGoal extends Goal {
     public LowHealthFleeGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
         this.placingBlockAi = new PlacingBlockAi(playerNpc);
+        this.toolAi = new ToolAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK, Flag.JUMP));
     }
 
@@ -67,6 +72,10 @@ public class LowHealthFleeGoal extends Goal {
 
     @Override
     public boolean canUse() {
+        if (!this.playerNpc.hasInterest(PlayerNpcInterest.COWARD)
+                || !this.canMoveForFlee() || !this.activationThrottle.canCheck(this.playerNpc)) {
+            return false;
+        }
         LivingEntity target = this.playerNpc.getTarget();
         if (target == null || !target.isAlive()) {
             return false;
@@ -98,7 +107,8 @@ public class LowHealthFleeGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
-        return this.fleeTicks > 0
+        return this.playerNpc.hasInterest(PlayerNpcInterest.COWARD)
+                && this.fleeTicks > 0
                 && this.threat != null
                 && this.threat.isAlive()
                 && this.canMoveForFlee()
@@ -127,8 +137,8 @@ public class LowHealthFleeGoal extends Goal {
         this.fleeTicks = 0;
         this.pathRecalculateTicks = 0;
         this.jumpCooldownTicks = 0;
-        this.jumpSupportPos = null;
-        this.jumpSupportTicks = 0;
+        this.clearJumpSupport();
+        this.playerNpc.getNavigation().stop();
         this.playerNpc.clearUpwardEscapeTarget();
         this.playerNpc.setHoleEscapeCooldown(POST_FLEE_ESCAPE_COOLDOWN_TICKS);
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
@@ -136,6 +146,10 @@ public class LowHealthFleeGoal extends Goal {
 
     @Override
     public void tick() {
+        if (!this.playerNpc.hasInterest(PlayerNpcInterest.COWARD) || !this.canMoveForFlee()) {
+            this.clearJumpSupport();
+            return;
+        }
         this.fleeTicks--;
         this.playerNpc.setTarget(null);
 
@@ -165,7 +179,7 @@ public class LowHealthFleeGoal extends Goal {
     }
 
     private boolean canMoveForFlee() {
-        return this.playerNpc.isAlive()
+        return !this.playerNpc.level().isClientSide && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
                 && !this.playerNpc.isPassenger()
                 && !this.playerNpc.isInWaterOrBubble()
@@ -230,8 +244,8 @@ public class LowHealthFleeGoal extends Goal {
                 && !this.playerNpc.isInWaterOrBubble()
                 && !this.playerNpc.isInLava()) {
             BlockPos feet = this.playerNpc.blockPosition();
-            if (this.playerNpc.getRandom().nextInt(SUPPORT_JUMP_CHANCE_BOUND) == 0
-                    && this.canPrepareJumpSupport(feet)) {
+            if (this.playerNpc.getRandom().nextFloat() < SUPPORT_JUMP_CHANCE
+                    && this.canPrepareJumpSupport(feet) && this.equipJumpSupport()) {
                 this.jumpSupportPos = feet.immutable();
                 this.jumpSupportTicks = 0;
                 this.lookDownAt(feet);
@@ -248,6 +262,7 @@ public class LowHealthFleeGoal extends Goal {
                 || ++this.jumpSupportTicks > MAX_SUPPORT_PLACE_TICKS
                 || this.playerNpc.isInWaterOrBubble()
                 || this.playerNpc.isInLava()
+                || this.playerNpc.onGround() && this.jumpSupportTicks > 1
                 || this.horizontalDistanceSqr(supportPos) > MAX_SUPPORT_HORIZONTAL_DRIFT_SQR) {
             this.clearJumpSupport();
             return;
@@ -265,15 +280,19 @@ public class LowHealthFleeGoal extends Goal {
             return;
         }
 
-        ItemStack consumed = InventoryUtils.consumeItem(this.playerNpc, this::isEscapeSupportBlock, 1)
-                .orElse(ItemStack.EMPTY);
-        BlockState state = InventoryUtils.getBlockState(consumed);
-        if (consumed.isEmpty()
+        ItemStack held = this.playerNpc.getMainHandItem();
+        BlockState state = InventoryUtils.getBlockState(held);
+        if (!this.isEscapeSupportBlock(held)
                 || state == null
-                || !state.canOcclude()
-                || !this.placingBlockAi.canPlaceWithoutClipping(serverLevel, supportPos, state)
-                || !this.placingBlockAi.placeBlock(serverLevel, supportPos, state)) {
-            this.giveOrDrop(consumed);
+                || !state.isCollisionShapeFullBlock(serverLevel, supportPos)) {
+            this.clearJumpSupport();
+            return;
+        }
+        // Expected body overlap before the jump apex is a wait, not a failed attempt.
+        if (!this.placingBlockAi.canPlaceWithoutClipping(serverLevel, supportPos, state)) {
+            return;
+        }
+        if (!this.placingBlockAi.placeHeldBlock(serverLevel, supportPos, state)) {
             this.clearJumpSupport();
             return;
         }
@@ -284,7 +303,8 @@ public class LowHealthFleeGoal extends Goal {
 
     private boolean canPrepareJumpSupport(BlockPos feet) {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
-                || !InventoryUtils.hasItem(this.playerNpc, this::isEscapeSupportBlock)
+                || !(this.isEscapeSupportBlock(this.playerNpc.getMainHandItem())
+                || InventoryUtils.hasItem(this.playerNpc, this::isEscapeSupportBlock))
                 || !this.canPlaceJumpSupport(serverLevel, feet)) {
             return false;
         }
@@ -299,13 +319,19 @@ public class LowHealthFleeGoal extends Goal {
         if (!serverLevel.isInWorldBounds(pos)
                 || !serverLevel.getWorldBorder().isWithinBounds(pos)
                 || !serverLevel.hasChunkAt(pos)
+                || !serverLevel.hasChunkAt(pos.below())
                 || PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
                 || FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos)) {
             return false;
         }
 
         FluidState fluidState = serverLevel.getFluidState(pos);
-        return fluidState.isEmpty() && serverLevel.getBlockState(pos).canBeReplaced();
+        BlockPos below = pos.below();
+        BlockState support = serverLevel.getBlockState(below);
+        return fluidState.isEmpty() && serverLevel.getBlockState(pos).isAir()
+                && serverLevel.getBlockEntity(pos) == null
+                && support.getFluidState().isEmpty()
+                && support.isFaceSturdy(serverLevel, below, Direction.UP);
     }
 
     private boolean isEscapeSupportBlock(ItemStack stack) {
@@ -355,12 +381,25 @@ public class LowHealthFleeGoal extends Goal {
     private void clearJumpSupport() {
         this.jumpSupportPos = null;
         this.jumpSupportTicks = 0;
+        this.toolAi.restoreMainHand();
     }
 
-    private void giveOrDrop(ItemStack stack) {
-        if (!stack.isEmpty() && !InventoryUtils.addItem(this.playerNpc, stack)) {
-            this.playerNpc.spawnAtLocation(stack);
+    private boolean equipJumpSupport() {
+        if (this.isEscapeSupportBlock(this.playerNpc.getMainHandItem())) {
+            return true;
         }
+        for (int slot = 0; slot < this.playerNpc.getInventory().getContainerSize(); slot++) {
+            ItemStack stack = this.playerNpc.getInventory().getItem(slot);
+            if (this.isEscapeSupportBlock(stack)) {
+                if (this.toolAi.equipItem(stack.getItem())
+                        && this.isEscapeSupportBlock(this.playerNpc.getMainHandItem())) {
+                    return true;
+                }
+                this.toolAi.restoreMainHand();
+                return false;
+            }
+        }
+        return false;
     }
 
     private int nextJumpCooldown() {

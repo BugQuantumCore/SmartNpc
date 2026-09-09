@@ -1,11 +1,13 @@
 package com.pla.smart_npc.compat.epicfight;
 
 import com.pla.smart_npc.SmartNpc;
+import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedMobPatch;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.init.SmartNpcModEntities;
 import yesman.epicfight.api.animation.LivingMotions;
 import yesman.epicfight.api.animation.types.StaticAnimation;
 import yesman.epicfight.api.asset.AssetAccessor;
+import yesman.epicfight.api.client.animation.ClientAnimator;
 import yesman.epicfight.gameasset.Animations;
 import yesman.epicfight.gameasset.Armatures;
 import yesman.epicfight.world.capabilities.EpicFightCapabilities;
@@ -14,6 +16,7 @@ import yesman.epicfight.world.capabilities.entitypatch.LivingEntityPatch;
 public final class EpicFight {
     private static boolean warnedMissingDigAnimation;
     private static boolean warnedMissingUseAnimation;
+    private static boolean warnedMissingEatAnimation;
     private static boolean warnedMissingSleepAnimation;
 
     private EpicFight() {
@@ -45,6 +48,7 @@ public final class EpicFight {
         LivingEntityPatch<?> patch = getPatch(playerNpc);
         AssetAccessor<? extends StaticAnimation> animation = diggingAnimation();
         if (patch != null && animation != null) {
+            cancelUtilityGuard(patch);
             patch.currentLivingMotion = LivingMotions.DIGGING;
             patch.currentCompositeMotion = LivingMotions.DIGGING;
             patch.playAnimationSynchronized(animation, 0.0F);
@@ -59,10 +63,88 @@ public final class EpicFight {
         LivingEntityPatch<?> patch = getPatch(playerNpc);
         AssetAccessor<? extends StaticAnimation> animation = mainHandUseAnimation();
         if (patch != null && animation != null) {
+            cancelUtilityGuard(patch);
             patch.playAnimationSynchronized(animation, 0.0F);
             return true;
         }
         return false;
+    }
+
+    public static void playEatingAnimation(PlayerNpcEntity playerNpc) {
+        if (!canAnimate(playerNpc)) {
+            return;
+        }
+        LivingEntityPatch<?> patch = getPatch(playerNpc);
+        AssetAccessor<? extends StaticAnimation> animation = eatingAnimation();
+        if (patch != null && animation != null) {
+            cancelUtilityGuard(patch);
+            patch.currentCompositeMotion = LivingMotions.EAT;
+            patch.playAnimationSynchronized(animation, 0.0F);
+        }
+    }
+
+    public static void keepEatingAnimation(PlayerNpcEntity playerNpc) {
+        if (!canAnimate(playerNpc) || !playerNpc.isHealing() || !playerNpc.isUsingItem()) {
+            return;
+        }
+        LivingEntityPatch<?> patch = getPatch(playerNpc);
+        AssetAccessor<? extends StaticAnimation> animation = eatingAnimation();
+        if (patch == null || animation == null) {
+            return;
+        }
+        patch.currentCompositeMotion = LivingMotions.EAT;
+        var player = patch.getAnimator().getPlayerFor(animation);
+        if (player == null || player.isEmpty() || !animation.equals(player.getRealAnimation())) {
+            patch.playAnimationSynchronized(animation, 0.0F);
+        }
+    }
+
+    public static void stopEatingAnimation(PlayerNpcEntity playerNpc) {
+        if (playerNpc == null) {
+            return;
+        }
+        LivingEntityPatch<?> patch = getPatch(playerNpc);
+        AssetAccessor<? extends StaticAnimation> animation = eatingAnimation();
+        if (patch != null && animation != null) {
+            patch.stopPlaying(animation);
+            patch.currentCompositeMotion = LivingMotions.IDLE;
+        }
+    }
+
+    /** Called by the patch's client motion update using synchronized healing state. */
+    static void updateClientEatingAnimation(LivingEntityPatch<?> patch, boolean eating) {
+        if (!patch.getOriginal().level().isClientSide()) {
+            return;
+        }
+        AssetAccessor<? extends StaticAnimation> animation = eatingAnimation();
+        if (animation == null || !(patch.getAnimator() instanceof ClientAnimator animator)) {
+            return;
+        }
+        if (!eating) {
+            var player = animator.getPlayerFor(animation);
+            if (player != null && animation.equals(player.getRealAnimation())) {
+                animator.stopPlaying(animation);
+            }
+            return;
+        }
+        // ClientAnimator separates composite motions from getLivingAnimations(). Equipment
+        // preset resets can therefore lose/replace EAT despite the server retaining its loop.
+        // Repair the actual composite binding, then inspect its layer rather than the base
+        // player's animation. Do not restart a healthy loop or its transition every tick.
+        if (!animation.equals(animator.getCompositeLivingMotion(LivingMotions.EAT))) {
+            animator.addLivingAnimation(LivingMotions.EAT, animation);
+        }
+        patch.currentCompositeMotion = LivingMotions.EAT;
+        var player = animator.getPlayerFor(animation);
+        if (player == null || player.isEmpty() || !animation.equals(player.getRealAnimation())) {
+            animator.playAnimation(animation, 0.0F);
+        }
+    }
+
+    private static void cancelUtilityGuard(LivingEntityPatch<?> patch) {
+        if (patch instanceof AdvancedMobPatch<?> advanced) {
+            advanced.cancelGuard();
+        }
     }
 
     public static void stopDiggingAnimation(PlayerNpcEntity playerNpc) {
@@ -157,6 +239,18 @@ public final class EpicFight {
         return null;
     }
 
+    static AssetAccessor<? extends StaticAnimation> eatingAnimation() {
+        AssetAccessor<? extends StaticAnimation> animation = EpicFightCloneAnimations.EAT_MAINHAND;
+        if (isEatingAnimationUsable(animation)) {
+            return animation;
+        }
+        if (!warnedMissingEatAnimation) {
+            warnedMissingEatAnimation = true;
+            SmartNpc.LOGGER.warn("Smart NPC Epic Fight eating animation is unavailable.");
+        }
+        return null;
+    }
+
     private static LivingEntityPatch<?> getPatch(PlayerNpcEntity playerNpc) {
         return EpicFightCapabilities.getEntityPatch(playerNpc, LivingEntityPatch.class);
     }
@@ -212,6 +306,22 @@ public final class EpicFight {
             if (!warnedMissingUseAnimation) {
                 warnedMissingUseAnimation = true;
                 SmartNpc.LOGGER.warn("Smart NPC Epic Fight main-hand use animation could not be resolved; using the vanilla swing instead.", exception);
+            }
+            return false;
+        }
+    }
+
+    private static boolean isEatingAnimationUsable(AssetAccessor<? extends StaticAnimation> animation) {
+        if (animation == null) {
+            return false;
+        }
+
+        try {
+            return animation.isPresent();
+        } catch (RuntimeException exception) {
+            if (!warnedMissingEatAnimation) {
+                warnedMissingEatAnimation = true;
+                SmartNpc.LOGGER.warn("Smart NPC Epic Fight eating animation could not be resolved.", exception);
             }
             return false;
         }

@@ -1,6 +1,5 @@
 package com.pla.smart_npc.entity.ai;
 
-import com.pla.smart_npc.compat.EpicFightCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -102,9 +101,7 @@ public final class PlacingBlockAi {
     }
 
     public void playMainHandAction() {
-        if (!EpicFightCompat.playMainHandUseAnimation(this.playerNpc)) {
-            this.playerNpc.triggerMainHandUseAnimation();
-        }
+        this.playerNpc.triggerMainHandUseAnimation();
     }
 
     public boolean canPlaceWithoutClipping(ServerLevel serverLevel, BlockPos pos, BlockState state) {

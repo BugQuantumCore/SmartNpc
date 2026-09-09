@@ -130,7 +130,7 @@ public final class ToolAi {
         this.currentMainHandSource = MainHandSource.NONE;
     }
 
-    private void equipEmptyMainHand() {
+    public void equipEmptyMainHand() {
         ItemStack current = this.playerNpc.getMainHandItem().copy();
         if (current.isEmpty()) {
             return;

@@ -2,6 +2,7 @@ package com.pla.smart_npc.compat.epicfight.advancedmobpatch;
 
 import com.pla.smart_npc.compat.epicfight.WeaponCapabilityRedirect;
 import com.pla.smart_npc.mixin.WeaponCapabilityAccessor;
+import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.DamageTypeTags;
@@ -111,6 +112,9 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
     @Override
     public void tick(LivingTickEvent livingTickEvent) {
         super.tick(livingTickEvent);
+        if (this.isLogicalClient()) {
+            return;
+        }
         this.tickLocalGuard();
 
         float maxStamina = this.getMaxStamina();
@@ -120,7 +124,7 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
         if (status == AdvancedStaminaStatus.COMMON) {
             this.recoverTickCount = 0;
             if (stamina <= 0.0F) {
-                this.staminaStatus = AdvancedStaminaStatus.BREAK;
+                this.beginStaminaBreak(null);
                 return;
             }
 
@@ -154,18 +158,40 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
 
         AdvancedCombatBehaviors.Builder<MobPatch<?>> builder = this.createCombatBehaviorBuilder();
         this.combatBehaviors = builder.build();
-        this.getOriginal().goalSelector.addGoal(0, new AdvancedAnimationAttackGoal<>(
+        Goal attackGoal = new AdvancedAnimationAttackGoal<>(
                 this,
                 this.combatBehaviors,
                 this::areCombatActionsAllowed,
                 this::tryStartLocalGuard
-        ));
-        this.getOriginal().goalSelector.addGoal(1, new AdvancedChasingGoal(
+        );
+        Goal chasingGoal = new AdvancedChasingGoal(
                 this,
                 this.attackRadius,
                 this.chasingSpeed,
                 this::areCombatActionsAllowed
-        ));
+        );
+        this.configureCombatGoalControls(attackGoal, chasingGoal);
+        this.getOriginal().goalSelector.addGoal(this.getAttackGoalPriority(), attackGoal);
+        this.getOriginal().goalSelector.addGoal(this.getChasingGoalPriority(), chasingGoal);
+    }
+
+    protected void configureCombatGoalControls(Goal attackGoal, Goal chasingGoal) {
+    }
+
+    protected int getAttackGoalPriority() {
+        return 0;
+    }
+
+    protected int getChasingGoalPriority() {
+        return 1;
+    }
+
+    protected boolean isUtilityActionActive() {
+        return false;
+    }
+
+    protected boolean isCombatEnabled() {
+        return true;
     }
 
     @Override
@@ -278,8 +304,7 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
 
     protected boolean canPerformGeneratedAttack() {
         LivingEntity target = this.getTarget();
-        return !this.guardingLocally
-                && !this.isCombatActionLocked()
+        return this.areCombatActionsAllowed()
                 && !this.isStunned()
                 && this.getEntityState().canBasicAttack()
                 && target != null
@@ -403,15 +428,27 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
             InteractionHand hand
     ) {
         super.updateHeldItem(fromCap, toCap, from, to, hand);
+        if (hasSameCombatEquipment(from, to)) {
+            return;
+        }
         this.modifyLivingMotionByCurrentItem(!this.getOriginal().level().isClientSide());
 
-        // HumanoidMobPatch rebuilds its combat AI on every equipment change. Smart
-        // NPC also swaps/caches weapons dynamically, so do the same on the server.
-        // Otherwise a patch created while the hand was empty can keep an empty
-        // AdvancedCombatBehaviors instance after a weapon is equipped.
+        // Rebuild for real equipment/preset changes, never for hit durability or count.
+        // Removing the attack goal here stops its animation and loses its combo root.
         if (!this.getOriginal().level().isClientSide()) {
             this.initAI();
         }
+    }
+
+    private static boolean hasSameCombatEquipment(ItemStack from, ItemStack to) {
+        if (!ItemStack.isSameItem(from, to)) {
+            return false;
+        }
+        ItemStack previous = from.copy();
+        ItemStack current = to.copy();
+        previous.removeTagKey("Damage");
+        current.removeTagKey("Damage");
+        return ItemStack.isSameItemSameTags(previous, current);
     }
 
     /**
@@ -549,7 +586,9 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
     }
 
     private boolean areCombatActionsAllowed() {
-        return !this.guardingLocally && !this.isCombatActionLocked();
+        return this.isCombatEnabled() && this.staminaStatus != AdvancedStaminaStatus.BREAK
+                && !this.guardingLocally && !this.isCombatActionLocked()
+                && !this.isUtilityActionActive();
     }
 
     public final float getStamina() {
@@ -557,7 +596,16 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
     }
 
     public final void setStamina(float stamina) {
+        if (!Float.isFinite(stamina)) {
+            return;
+        }
+        if (stamina < this.stamina) {
+            this.lastActionTime = this.getOriginal().tickCount;
+        }
         this.stamina = Mth.clamp(stamina, 0.0F, this.getMaxStamina());
+        if (!this.isLogicalClient() && this.stamina <= 0.0F) {
+            this.beginStaminaBreak(null);
+        }
     }
 
     public final void addStamina(float amount) {
@@ -621,6 +669,7 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
     private boolean canStartLocalGuard(LivingEntity target) {
         return this.canGuard()
                 && !this.isCombatActionLocked()
+                && !this.isUtilityActionActive()
                 && this.isValidGuardTarget(target)
                 && !this.isStunned()
                 && !this.getEntityState().inaction()
@@ -638,6 +687,7 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
     private boolean canContinueLocalGuard(LivingEntity target) {
         return this.getOriginal().tickCount < this.guardEndTick
                 && this.canGuard()
+                && !this.isUtilityActionActive()
                 && this.isValidGuardTarget(target)
                 && !this.isStunned()
                 && this.staminaStatus == AdvancedStaminaStatus.COMMON
@@ -738,21 +788,64 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
     }
 
     public boolean dealStaminaDamage(DamageSource damageSource, float amount) {
-        if (this.staminaStatus != AdvancedStaminaStatus.COMMON) {
+        if (this.isLogicalClient() || !Float.isFinite(amount) || amount <= 0.0F
+                || this.staminaStatus != AdvancedStaminaStatus.COMMON) {
             return false;
         }
 
-        float stamina = this.stamina;
-        this.setStamina(stamina - amount);
-        if (amount < stamina) {
+        this.lastActionTime = this.getOriginal().tickCount;
+        this.stamina = Math.max(0.0F, this.stamina - amount);
+        if (this.stamina > 0.0F) {
             return false;
+        }
+
+        this.beginStaminaBreak(damageSource);
+        return true;
+    }
+
+    private void beginStaminaBreak(DamageSource damageSource) {
+        if (this.staminaStatus != AdvancedStaminaStatus.COMMON) {
+            return;
         }
 
         this.staminaStatus = AdvancedStaminaStatus.BREAK;
+        this.recoverTickCount = 0;
         this.stopLocalGuard();
-        this.applyStun(StunType.NEUTRALIZE, 0.0F);
-        this.playGuardBreakSound();
-        return true;
+        if (this.combatBehaviors != null) {
+            this.combatBehaviors.clearCurrentBehavior();
+        }
+        this.getOriginal().getNavigation().stop();
+
+        // The triggering hit must not replace neutralize with its ordinary hit stun.
+        if (damageSource instanceof EpicFightDamageSource source) {
+            source.setStunType(StunType.NONE);
+            source.addRuntimeTag(EpicFightDamageTypeTags.NO_STUN);
+        }
+        if (damageSource != null && damageSource.getSourcePosition() != null) {
+            this.getOriginal().lookAt(EntityAnchorArgument.Anchor.FEET, damageSource.getSourcePosition());
+        }
+        if (super.applyStun(StunType.NEUTRALIZE, 0.0F)) {
+            this.playGuardBreakSound();
+            if (this.getOriginal().level() instanceof ServerLevel serverLevel) {
+                Vec3 position = this.getOriginal().getEyePosition().add(this.getOriginal().getLookAngle().scale(2.0D));
+                serverLevel.sendParticles(EpicFightParticles.NEUTRALIZE.get(), position.x, position.y, position.z,
+                        1, 0.0D, 0.0D, 0.0D, 0.0D);
+            }
+        }
+    }
+
+    @Override
+    public boolean applyStun(StunType stunType, float stunTime) {
+        // Match CE's break/recovery stun protection without requiring its effects.
+        // Execution animations use playAnimationSynchronized and remain available.
+        if (this.staminaStatus != AdvancedStaminaStatus.COMMON) {
+            return false;
+        }
+        boolean applied = super.applyStun(stunType, stunTime);
+        if (applied) {
+            this.stopLocalGuard();
+        }
+        return applied;
     }
 
     public void onGuardHit(DamageSource damageSource) {
@@ -784,20 +877,20 @@ public abstract class AdvancedMobPatch<T extends Mob> extends MobPatch<T> {
         }
 
         if (damageSource.getDirectEntity() == null
-                || result.resultType != ResultType.SUCCESS
                 || !this.guardingLocally
-                || this.isStunned()
                 || damageSource.is(DamageTypeTags.BYPASSES_INVULNERABILITY)
                 || damageSource.is(EpicFightDamageTypeTags.UNBLOCKALBE)
                 || damageSource.is(EpicFightDamageTypeTags.GUARD_PUNCTURE)) {
             return result;
         }
 
-        this.onGuardHit(damageSource);
-        Entity attacker = damageSource.getEntity() == null ? damageSource.getDirectEntity() : damageSource.getEntity();
-        LivingEntityPatch<?> attackerPatch = EpicFightCapabilities.getEntityPatch(attacker, LivingEntityPatch.class);
-        if (attackerPatch != null) {
-            attackerPatch.onAttackBlocked(damageSource, this);
+        if (result.resultType == ResultType.SUCCESS) {
+            this.onGuardHit(damageSource);
+            Entity attacker = damageSource.getEntity() == null ? damageSource.getDirectEntity() : damageSource.getEntity();
+            LivingEntityPatch<?> attackerPatch = EpicFightCapabilities.getEntityPatch(attacker, LivingEntityPatch.class);
+            if (attackerPatch != null) {
+                attackerPatch.onAttackBlocked(damageSource, this);
+            }
         }
         return AttackResult.blocked(0.0F);
     }

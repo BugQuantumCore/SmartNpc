@@ -34,9 +34,19 @@ public class PlayerNpcRangedBowAttackGoal extends RangedBowAttackGoal<PlayerNpcE
 
     @Override
     public void start() {
+        if (this.playerNpc.isClearingCombatObstruction()) {
+            return;
+        }
         this.equipInventoryBowIfNeeded();
         this.playerNpc.setCurrentAiState("ai.player_npc.ranged_bow");
         super.start();
+    }
+
+    @Override
+    public void tick() {
+        if (!this.playerNpc.isClearingCombatObstruction()) {
+            super.tick();
+        }
     }
 
     @Override
@@ -60,6 +70,7 @@ public class PlayerNpcRangedBowAttackGoal extends RangedBowAttackGoal<PlayerNpcE
                 && !this.playerNpc.isNoAi()
                 && !this.playerNpc.isPassenger()
                 && !this.playerNpc.isHealing()
+                && !this.playerNpc.isClearingCombatObstruction()
                 && !this.playerNpc.isOnFire()
                 && !this.playerNpc.isInLava()
                 && this.playerNpc.isUseBow()

@@ -81,13 +81,13 @@ public class UseWaterBucketGoal extends Goal {
         this.playerNpc.getNavigation().stop();
         this.playerNpc.getLookControl().setLookAt(this.placePos.getX() + 0.5D, this.placePos.getY() + 0.5D, this.placePos.getZ() + 0.5D, 40.0F, 40.0F);
         this.playerNpc.setCurrentAiState("ai.player_npc.using_water_bucket");
-        this.playerNpc.triggerMainHandUseAnimation();
         if (!serverLevel.setBlockAndUpdate(this.placePos, Blocks.WATER.defaultBlockState())) {
             this.giveOrDrop(new ItemStack(Items.WATER_BUCKET));
             this.placePos = null;
             this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
             return;
         }
+        this.playerNpc.triggerMainHandUseAnimation();
         this.placedWaterPos = this.placePos.immutable();
         this.pickupDelayTicks = PICKUP_DELAY_TICKS;
         this.pickupTicks = 0;

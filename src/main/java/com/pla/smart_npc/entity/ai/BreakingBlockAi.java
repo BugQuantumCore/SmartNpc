@@ -1,6 +1,6 @@
 package com.pla.smart_npc.entity.ai;
 
-import com.pla.smart_npc.compat.EpicFightCompat;
+import com.pla.smart_npc.compat.epicfight.EpicFight;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -13,6 +13,7 @@ import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraftforge.fml.ModList;
 
 import java.util.function.Predicate;
 
@@ -41,6 +42,7 @@ public final class BreakingBlockAi {
     private int nextBreakStartTick;
     private String detail = "breaking block";
     private String toolDetail = "";
+    private boolean paused;
 
     public BreakingBlockAi(PlayerNpcEntity playerNpc, ToolAi toolAi) {
         this.playerNpc = playerNpc;
@@ -120,10 +122,13 @@ public final class BreakingBlockAi {
                 40.0F,
                 40.0F
         );
+        this.paused = false;
         this.sneakingAi.tickHeldSneak();
         this.breakTicks++;
 
-        EpicFightCompat.keepDiggingState(this.playerNpc);
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.keepDiggingState(this.playerNpc);
+        }
         this.tickMiningSwing();
         this.playerNpc.showBlockBreakProgress(targetPos, this.breakTicks, this.requiredTicks);
         if (this.breakTicks % HIT_SOUND_INTERVAL_TICKS == 0) {
@@ -241,6 +246,19 @@ public final class BreakingBlockAi {
         };
     }
 
+    /** Suspend visible mining without discarding progress while a caller revalidates its ray. */
+    public void pause() {
+        if (this.targetPos == null || this.paused) {
+            return;
+        }
+        this.paused = true;
+        this.playerNpc.clearBlockBreakProgress(this.targetPos);
+        this.sneakingAi.stopSneaking();
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.stopDiggingAnimation(this.playerNpc);
+        }
+    }
+
     public void stop() {
         this.playerNpc.clearBlockBreakProgress(this.targetPos);
         this.sneakingAi.stopSneaking();
@@ -249,7 +267,10 @@ public final class BreakingBlockAi {
         this.requiredTicks = 0;
         this.detail = "breaking block";
         this.toolDetail = "";
-        EpicFightCompat.stopDiggingAnimation(this.playerNpc);
+        this.paused = false;
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.stopDiggingAnimation(this.playerNpc);
+        }
     }
 
     public String detail() {
@@ -313,6 +334,8 @@ public final class BreakingBlockAi {
         this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
         this.playerNpc.triggerMainHandAttackAnimation();
 
-        EpicFightCompat.playDiggingAnimation(this.playerNpc);
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.playDiggingAnimation(this.playerNpc);
+        }
     }
 }

@@ -33,18 +33,23 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
     private static final double HEALTHY_RATIO = 0.55D;
     private static final float RARE_PLAYER_ATTACK_CHANCE = 0.08F;
     private static final float RARE_VILLAGER_ATTACK_CHANCE = 0.02F;
+    private static final int HIDDEN_TARGET_MEMORY_TICKS = 20 * 8;
 
     private final PlayerNpcEntity playerNpc;
     private final TargetingConditions targetConditions;
+    private final TargetingConditions obstructionTargetConditions;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle();
     @Nullable
     private LivingEntity nextTarget;
     private String nextState = PlayerNpcEntity.AI_IDLE;
+    private int retainedTargetId = -1;
+    private int lastVisibleTargetTick;
 
     public PlayerNpcSmartTargetGoal(PlayerNpcEntity playerNpc) {
         super(playerNpc, true, false);
         this.playerNpc = playerNpc;
         this.targetConditions = TargetingConditions.forCombat().range(this.getFollowDistance());
+        this.obstructionTargetConditions = this.targetConditions.copy().ignoreLineOfSight();
         this.setFlags(EnumSet.of(Flag.TARGET));
     }
 
@@ -57,9 +62,24 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
         }
 
         LivingEntity currentTarget = this.playerNpc.getTarget();
-        if (currentTarget != null && currentTarget.isAlive() && this.canAttack(currentTarget, this.targetConditions)) {
-            return false;
+        if (currentTarget != null && currentTarget.isAlive()) {
+            if (this.retainedTargetId != currentTarget.getId()) {
+                this.retainedTargetId = currentTarget.getId();
+                this.lastVisibleTargetTick = this.playerNpc.tickCount;
+            }
+            if (this.canAttack(currentTarget, this.targetConditions)) {
+                this.lastVisibleTargetTick = this.playerNpc.tickCount;
+                return false;
+            }
+            // Give pathing/obstruction activation time to take ownership after sight is lost.
+            // Once clearing owns the action, its bounded lifecycle retains this valid enemy.
+            if (this.canAttack(currentTarget, this.obstructionTargetConditions)
+                    && (this.playerNpc.isClearingCombatObstruction()
+                    || this.playerNpc.tickCount - this.lastVisibleTargetTick <= HIDDEN_TARGET_MEMORY_TICKS)) {
+                return false;
+            }
         }
+        this.retainedTargetId = -1;
         if (currentTarget != null) {
             this.playerNpc.setTarget(null);
             if (this.isTargetCombatState(this.playerNpc.getCurrentAiState())) {

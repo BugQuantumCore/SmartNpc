@@ -24,6 +24,107 @@ Lets Player NPCs escape simple holes by jumping and placing a block at their fee
 
 ## Behavior
 
+The 21:38 Skeppy trace never started escape while carrying 17 sand: the former dirt/plank/stone
+whitelist counted zero material even during the recorded live-target +3-height episodes. Sand,
+red sand and gravel now share one explicit carried-material predicate for counting and equipping.
+They follow the existing physical jump, collision-safe placement and guarded hand restoration;
+immediately before committing, gravity blocks require a loaded, dry full-collision support below.
+Air, fluid and partial supports cannot receive them. Existing temporary-column validation remains.
+
+Without a combat target or routine worker slot, an ordinary NPC with carried material may now
+borrow emergency execution only after the bounded open-shaft proof succeeds outside its owned
+build footprint/farm. This runs at the existing >=20-tick stagger with shared admission, carries
+the exception through placement/settlement, and never gathers materials. Cautious NPCs retain
+their threat requirement. Routine worker and team handoffs remain available independently.
+Existing no-worker farm-gate egress is checked first and retains its block-free admission;
+the passive pillar material/protection guards must not suppress that safety handoff.
+
+The middle side cell of a 2x3 shaft touches only one wall. All shaft probes can now pass that
+cheap wall gate through the bounded four-direction nearby-wall check, then must still complete
+the loaded component proof with no walking exit, no open drop and elevated safe rims on all sides.
+The ordinary six-stand cap already fits 2x3; the emergency cap remains 24 and radius remains three.
+Generic nonforced upward hints also receive a staggered shaft probe, so a stale chase hint does
+not hide this geometric evidence once the target disappears. Terraform/forced handoffs retain
+their existing admission and protection rules.
+
+Live combat admission is height-directed: only a living target more than two blocks above
+the NPC can start an upward episode. Same/lower targets belong to combat obstruction clearing;
+the intermediate zero-to-two-block rise stays with ordinary navigation/obstruction handling.
+At a randomized >=20-tick cadence, a grounded NPC with carried pillar material and a loaded
+safe current stand requests one shared-admitted 0.01 bounded path to the elevated target.
+A reachable route keeps normal pursuit. The complete local chunk corridor is preflighted
+before the admitted path probe, so a null/incomplete result may permit a bounded direct-current-
+column pillar plan even from a completely confined stand. Unknown/unloaded corridors decline.
+Current support, clearable headroom, height limit, placement collision and protection still apply.
+Live combat no longer depends on any fixed shaft footprint or number of floor cells.
+
+The initial target height is retained through the ascent, so gaining one block and reducing the
+height difference below two does not restart the goal. Completion uses safe grounded footing at
+that cached height minus the ordinary one-block route tolerance. Visible sky cannot stop it early,
+and a roof or the enemy's occupied feet do not require extra ascent/horizontal arrival to finish.
+The direct plan uses that same latched height; combat disables the generic two-block open-sky
+planning shortcut before scanning the column, so the planned budget matches completion.
+If the enemy moves down to or below the
+NPC, recovery yields only on grounded footing outside a pending placement/settlement/clear.
+Death/loss of the enemy does not cancel an airborne placement. Cautious/no-target and team
+recovery retain the separate confined-shaft proofs below.
+
+The 21:20 Sapnap trace already reached `pillaring 0/2`, then lost ownership to priority-zero
+weapon recovery while holding its temporary block. This is execution/hand ownership evidence,
+not another shaft-size detection failure. The entity's short jump must authorize this running
+emergency episode without requiring a routine worker, and weapon recovery must respect its
+temporary pillar hand. The goal continues to request the ordinary physical short pillar jump.
+
+The 2026-09-09 Sapnap trace remained in priority-6 vanilla melee at floor Y99 under a Y102
+rim, despite 19 carried planks. Emergency material counting formerly applied the routine log
+reserve and could report zero usable blocks before any trap probe. Combat/team/cautious
+emergency episodes now bypass the wood reserve consistently for counting, equipping, and
+placing carried planks; ordinary worker pillar material policy remains unchanged.
+
+The earlier confined-shaft proof can also cover nine floor cells: the ordinary six-stand cap rejected a 3x3
+chamber, and its center/edges do not necessarily touch two immediate walls. Cautious recovery
+may pass that cheap wall gate only after finding a loaded body-height wall within three cells
+in each cardinal direction. It then uses the existing radius-three loaded component proof,
+capped at 24 stands and 24 boundary columns, requiring no walking exit and elevated safe rims
+in all four directions. That proof remains for cautious and passive recovery without a live combat
+target; live combat now uses the height/path rule above. Ordinary noncombat shaft probes retain
+their smaller cap.
+
+The 2026-09-09 combat trace placed mossy cobblestone at (-84,108,17), then recorded the NPC
+knocked sideways onto (-83,108,18). The block remained intact; the old 30-tick landing timeout
+incorrectly reported missing solid support and abandoned the escape. Settlement now separates
+destroyed support from displacement. Once grounded away from the intended support, it may
+replan only its current safe feet column under shared admission at >=20-tick cadence, retaining
+the escape target and goal controls. At most three successful displacement replans occur in one
+activation; each missed landing has a 60-tick limit. A displaced confirmed landing follows the
+same recovery. No snap onto the old column, knockback cancellation, or unrelated side clearing
+is permitted. Existing support blocks remain remembered/validated; unloaded support is unsafe.
+
+Combat recovery retains the live attack target while the goal owns MOVE, JUMP, and LOOK. A
+CAUTIOUS NPC deliberately retains no attack target, but receives the same local emergency
+admission when a valid attacker remains within 28 blocks and the last hit was within 200 ticks,
+or an admitted radius-14 cautious threat search succeeds. The cached attacker check is O(1);
+the fallback search runs only after a proven trap/open shaft, on the existing >=20-tick stagger
+and shared optional admission. It uses the same carried-block requirement, direct current-column
+planner, and complete-episode execution access without assigning an attack target.
+This exemption applies when ordinary worker/team recovery is unavailable; cautious NPCs with
+an existing worker lease or team recovery retain their ordinary climb requests even without threats.
+
+A grounded NPC carrying usable pillar blocks may start an emergency escape without a routine
+worker lease. Live combat uses the height and failed-route checks above; cautious/passive recovery
+with no live target still requires its loaded, bounded trap/open-shaft proof. These use the randomized
+>=20-tick cadence, shared admission and bounded path helper also used by the team-follow
+exception, and neither starts escape-material gathering. The exception
+is retained through the complete escape episode, including the final placement/settlement if the
+enemy dies or disappears, then cleared on stop. Normal utility/combat goal arbitration must keep
+attack animation and damage stopped throughout this MOVE/LOOK-owning escape.
+
+Combat recovery always plans the pillar at the NPC's current feet column and resets the retained
+pillar candidate cursor. It may clear a real obstruction in that vertical column, but collision and
+adjacent-wall recovery fallbacks are disabled for this episode: surrounding blocks must not replace
+the ready pillar placement. This prevents a boxed combatant from spending
+the escape timeout mining dirt or cobblestone walls without a preferred tool.
+
 When the NPC is boxed in by at least three two-block-tall collision barriers, has no adjacent walkable open body space, and has a normal placeable block, it jumps first, waits a few ticks until its body is clear of the target block space, then consumes one block, places it below itself, swings, and returns to idle.
 
 The same goal also handles the cave return-home case where the navigation/home target is above the NPC, the route is blocked by a tall wall, and normal pathing is done or stuck. In that mode it first finds a nearby pillar column with clear body space upward to a step-out or sky-visible surface route. It chooses a random 16-32 block escape budget, gathers nearby stone/cobblestone/deepslate only with a usable pickaxe if it has too few blocks, then moves to that pillar column.

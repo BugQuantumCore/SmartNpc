@@ -31,6 +31,7 @@ Characteristic interests:
 - `TROLL_HIT`
 - `LOOTING`
 - `CAUTIOUS`
+- `COWARD`
 
 Default interests for custom or unknown names are `BUILDING`.
 
@@ -68,6 +69,16 @@ Examples:
 - `EXPLORING`: no-target roaming exploration for the day, plus explorer utility behavior such as spyglass/boat support.
 - `LOOTING`: chest looting.
 - `CAUTIOUS`: avoids nearby survival/adventure players, hostile mobs, other Player NPCs, and compatibility threats. Rare sneak and scared hide use the same threat rules, hold crouch, and watch their cached threat; creative/spectator players and unrelated passive entities are ignored.
+- `COWARD`: enables LowHealthFleeGoal's low-health retreat. Normal characters no longer flee
+  solely because this goal's health threshold is met. It is a characteristic, not a daily job,
+  and no existing name receives it automatically. Each fleeing jump has a 30% chance to attempt
+  a protected, physically clear placement of one carried full block underneath the jump.
+
+CAUTIOUS supersedes retaliation and hunting: `PlayerNpcEntity.setTarget` rejects combat targets,
+`doHurtTarget` rejects damage, and AdvancedPlayerNpcPatch disables attack/chase/weapon-guard
+selection even between avoidance activations or when an escape path is unavailable. Hurt memory
+is retained so avoidance can flee even a normally passive attacker. Healing and emergency escape
+remain available; healing movement retreats from nearby threats rather than chasing them.
 
 Emergency and survival behaviors such as floating, hole escape, help calls, obstruction breaking, pickup, cooking, and basic gear crafting remain outside daily-job gating where needed. Water travel itself is destination-aware and owned by the active movement goal; there is no global MOVE-owning water-escape goal.
 

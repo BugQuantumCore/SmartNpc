@@ -2,8 +2,15 @@ package com.pla.smart_npc.compat.epicfight;
 
 import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedCombatBehaviors;
 import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedMobPatch;
+import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedAnimationAttackGoal;
+import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedChasingGoal;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import net.minecraft.world.entity.PathfinderMob;
+import net.minecraft.world.entity.ai.goal.Goal;
+import net.minecraft.world.entity.ai.goal.WrappedGoal;
+import net.minecraft.world.InteractionHand;
+import net.minecraftforge.fml.ModList;
 import yesman.epicfight.api.animation.Animator;
 import yesman.epicfight.api.animation.LivingMotions;
 import yesman.epicfight.gameasset.Animations;
@@ -13,10 +20,58 @@ import yesman.epicfight.world.capabilities.item.CapabilityItem;
 import yesman.epicfight.world.capabilities.item.Style;
 
 import java.util.List;
+import java.util.EnumSet;
 
 public class AdvancedPlayerNpcPatch<T extends PathfinderMob> extends AdvancedMobPatch<T> {
     public AdvancedPlayerNpcPatch() {
         super(Factions.NEUTRAL);
+        this.setChasingSpeed(1.0D);
+    }
+
+    @Override
+    protected void configureCombatGoalControls(Goal attackGoal, Goal chasingGoal) {
+        attackGoal.setFlags(EnumSet.of(Goal.Flag.LOOK));
+        chasingGoal.setFlags(EnumSet.of(Goal.Flag.MOVE));
+    }
+
+    @Override
+    protected int getAttackGoalPriority() {
+        return 6;
+    }
+
+    @Override
+    protected int getChasingGoalPriority() {
+        return 6;
+    }
+
+    @Override
+    protected boolean isCombatEnabled() {
+        return !(this.getOriginal() instanceof PlayerNpcEntity npc)
+                || !npc.hasInterest(PlayerNpcInterest.CAUTIOUS);
+    }
+
+    @Override
+    protected boolean isUtilityActionActive() {
+        if (this.getOriginal() instanceof PlayerNpcEntity npc
+                && (npc.isHealing() || npc.isUsingItem() || npc.isEpicFightDigging() || npc.isSleeping())) {
+            return true;
+        }
+        // Include the recovery frames of atomic item uses after their goal stops.
+        var player = this.getAnimator().getPlayerFor(null);
+        if (player != null && !player.isEmpty()
+                && player.getRealAnimation().equals(EpicFightCloneAnimations.USE_MAINHAND)) {
+            return true;
+        }
+        // Cheap selector state only; never call another goal's eligibility or paths here.
+        for (WrappedGoal wrapped : this.getOriginal().goalSelector.getAvailableGoals()) {
+            if (wrapped.isRunning()
+                    && !(wrapped.getGoal() instanceof AdvancedAnimationAttackGoal<?>)
+                    && !(wrapped.getGoal() instanceof AdvancedChasingGoal)
+                    && (wrapped.getFlags().contains(Goal.Flag.MOVE) || wrapped.getFlags().contains(Goal.Flag.LOOK))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
@@ -35,28 +90,20 @@ public class AdvancedPlayerNpcPatch<T extends PathfinderMob> extends AdvancedMob
         if (EpicFightCloneAnimations.DIG_MAINHAND != null) {
             animator.addLivingAnimation(LivingMotions.DIGGING, EpicFightCloneAnimations.DIG_MAINHAND);
         }
+        if (EpicFightCloneAnimations.EAT_MAINHAND != null) {
+            animator.addLivingAnimation(LivingMotions.EAT, EpicFightCloneAnimations.EAT_MAINHAND);
+        }
     }
 
     @Override
     protected void addCustomBehaviorRoots(AdvancedCombatBehaviors.Builder<MobPatch<?>> builder,
                                           CapabilityItem mainHandCap,
                                           CapabilityItem offHandCap, Style style) {
-        builder
-                .newBehaviorRoot(
-                        AdvancedCombatBehaviors.BehaviorRoot.builder()
-                                .priority(4.0D)
-                                .weight(1000.0D)
-                                .maxCooldown(0)
-                                .waitForAnimationCompletion()
-                                .addFirstBehavior(
-                                        AdvancedCombatBehaviors.Behavior.builder()
-                                                .custom(CombatEvolution::canExecute)
-                                                .withinDistance(0.0D, 5.0D)
-                                                .animationBehavior(Animations.BIPED_SNEAK, 0.0F)
-                                                .addExBehavior(CombatEvolution::performExecute)
-                                )
-                )
-                .newBehaviorRoot(
+        if (ModList.get().isLoaded("combat_evolution")) {
+            CombatEvolutionBehaviorProvider.addTo(builder);
+        }
+
+        builder.newBehaviorRoot(
                         AdvancedCombatBehaviors.BehaviorRoot.builder()
                                 .priority(1.0D)
                                 .weight(10.0D)
@@ -72,62 +119,11 @@ public class AdvancedPlayerNpcPatch<T extends PathfinderMob> extends AdvancedMob
                                                 .withinDistance(0.0D, 5.0D)
                                                 .animationBehavior(Animations.BIPED_ROLL_BACKWARD, 0.0F)
                                 )
-                )
-                .newBehaviorRoot(
-                        AdvancedCombatBehaviors.BehaviorRoot.builder()
-                                .priority(1.0D)
-                                .weight(5.0D)
-                                .maxCooldown(200)
-                                .waitForAnimationCompletion()
-                                .addFirstBehavior(
-                                        AdvancedCombatBehaviors.Behavior.builder()
-                                                .custom(EFKick::isEfKickInstalled)
-                                                .withinDistance(0.0D, 3.0D)
-                                                .animationBehavior(EFKick.getEFKick1(), 0.0F)
-                                )
-                                .addFirstBehavior(
-                                        AdvancedCombatBehaviors.Behavior.builder()
-                                                .custom(EFKick::isEfKickInstalled)
-                                                .withinDistance(0.0D, 3.0D)
-                                                .animationBehavior(EFKick.getEFKick2(), 0.0F)
-                                )
-                                .addFirstBehavior(
-                                        AdvancedCombatBehaviors.Behavior.builder()
-                                                .custom(EFKick::isEfKickInstalled)
-                                                .withinDistance(0.0D, 3.0D)
-                                                .animationBehavior(EFKick.getEFKick3(), 0.0F)
-                                )
-                                .addFirstBehavior(
-                                        AdvancedCombatBehaviors.Behavior.builder()
-                                                .custom(EFKick::isEfKickInstalled)
-                                                .withinDistance(0.0D, 3.0D)
-                                                .animationBehavior(EFKick.getEFKick4(), 0.0F)
-                                )
-                                .addFirstBehavior(
-                                        AdvancedCombatBehaviors.Behavior.builder()
-                                                .custom(EFKick::isEfKickInstalled)
-                                                .withinDistance(0.0D, 3.0D)
-                                                .animationBehavior(EFKick.getEFKickH(), 0.0F)
-                                )
-                                .addFirstBehavior(
-                                        AdvancedCombatBehaviors.Behavior.builder()
-                                                .custom(EFKick::isEfKickInstalled)
-                                                .withinDistance(0.0D, 3.0D)
-                                                .animationBehavior(EFKick.getEFKickC(), 0.0F)
-                                )
-                                .addFirstBehavior(
-                                        AdvancedCombatBehaviors.Behavior.builder()
-                                                .custom(EFKick::isEfKickInstalled)
-                                                .withinDistance(0.0D, 3.0D)
-                                                .animationBehavior(EFKick.getEFKickRush(), 0.0F)
-                                )
-                                .addFirstBehavior(
-                                        AdvancedCombatBehaviors.Behavior.builder()
-                                                .custom(EFKick::isEfKickInstalled)
-                                                .withinDistance(0.0D, 3.0D)
-                                                .animationBehavior(EFKick.getEFKickCombo(), 0.0F)
-                                )
                 );
+
+        if (ModList.get().isLoaded("efkick")) {
+            EFKickBehaviorProvider.addTo(builder);
+        }
     }
 
     @Override
@@ -182,9 +178,14 @@ public class AdvancedPlayerNpcPatch<T extends PathfinderMob> extends AdvancedMob
     public void updateMotion(boolean considerInaction) {
         super.updateMotion(considerInaction);
         if (this.getOriginal() instanceof PlayerNpcEntity playerNpc) {
+            boolean eating = !playerNpc.isSleeping() && playerNpc.isAlive()
+                    && playerNpc.isHealing() && playerNpc.getMainHandItem().isEdible();
+            EpicFight.updateClientEatingAnimation(this, eating);
             if (playerNpc.isSleeping()) {
                 this.currentLivingMotion = LivingMotions.SLEEP;
                 this.currentCompositeMotion = LivingMotions.SLEEP;
+            } else if (eating) {
+                this.currentCompositeMotion = LivingMotions.EAT;
             } else if (playerNpc.isEpicFightDigging()) {
                 this.currentLivingMotion = LivingMotions.DIGGING;
                 this.currentCompositeMotion = LivingMotions.DIGGING;

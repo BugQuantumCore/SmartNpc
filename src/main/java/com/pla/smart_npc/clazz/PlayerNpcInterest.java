@@ -13,6 +13,7 @@ public enum PlayerNpcInterest {
     TROLL_HIT("Troll Hit"),
     LOOTING("Looting"),
     CAUTIOUS("Cautious"),
+    COWARD("Coward"),
     CHEST_PROTECT("Chest Protect"),
     TEAMUP("Team Up");
 

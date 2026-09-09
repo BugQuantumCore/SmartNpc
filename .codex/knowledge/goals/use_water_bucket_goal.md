@@ -25,3 +25,7 @@ Consumes one water bucket, places a water source at the NPC, above/below it, or 
 After a short delay, the goal tries to pick the placed source back up: it consumes the empty bucket, removes the water source if it is still present, and returns a water bucket to the inventory.
 
 `UseWaterBucketGoal` and `UseLavaBucketGoal` both call `PlayerNpcEntity.setBucketCooldown()`, so water and lava bucket use cannot chain immediately.
+
+Water placement and pickup signal one main-hand use only after the mutation succeeds.
+Epic Fight attack/chase yield to the goal's MOVE/LOOK flags for the entire placement
+and pickup lifecycle, and cannot resume over remaining USE_MAINHAND recovery frames.

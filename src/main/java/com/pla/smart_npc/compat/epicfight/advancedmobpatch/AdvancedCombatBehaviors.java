@@ -32,12 +32,8 @@ public final class AdvancedCombatBehaviors<T extends MobPatch<?>> {
         this.behaviorRoots.forEach(BehaviorRoot::tickCooldown);
 
         if (this.currentBehavior == null) {
-            // A behavior may have completed its scheduler state while its Epic
-            // Fight animation is still visually active (for example a dodge's
-            // recovery frames or an animation started by another compatibility
-            // task). Never open a new root over that animation.
-            var animationPlayer = patch.getAnimator().getPlayerFor(null);
-            if (animationPlayer != null && !animationPlayer.isEmpty()) {
+            // CE opens a new root only after the previous action releases inaction.
+            if (patch.getEntityState().inaction()) {
                 return;
             }
             Behavior<T> selected = this.selectOpeningBehavior(patch);
@@ -352,7 +348,11 @@ public final class AdvancedCombatBehaviors<T extends MobPatch<?>> {
                 var animationPlayer = patch.getAnimator().getPlayerFor(null);
                 return animationPlayer == null || animationPlayer.isEmpty();
             }
-            return patch.getEntityState().canBasicAttack() || !patch.getEntityState().inaction();
+            // Match CECombatBehaviors.running(): child animations chain at the advertised
+            // basic-attack window; a terminal animation completes when inaction is released.
+            return this.nextBehaviors.isEmpty()
+                    ? !patch.getEntityState().inaction()
+                    : patch.getEntityState().canBasicAttack();
         }
 
         private AttackResult executeOnHurt(T patch, DamageSource source, AttackResult result) {

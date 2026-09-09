@@ -76,8 +76,10 @@ public final class PathNavigationAi {
      * PathNavigation constructs a region wider than the route itself. Reject speculative paths
      * whose route corridor touches an unloaded chunk so EmptyLevelChunk fringes cannot turn a
      * futile activation probe into a large synchronous region/path build.
+     * Recovery callers can preflight this before treating a null bounded path as a failed
+     * walking route; an unloaded corridor instead leaves reachability unknown.
      */
-    private static boolean hasLoadedChunkCorridor(
+    public static boolean hasLoadedChunkCorridor(
             ServerLevel serverLevel,
             BlockPos from,
             BlockPos to,

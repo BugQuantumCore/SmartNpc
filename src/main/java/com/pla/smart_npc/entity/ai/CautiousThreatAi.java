@@ -39,7 +39,8 @@ public final class CautiousThreatAi {
         if (candidate instanceof Player || candidate instanceof PlayerNpcEntity) {
             return true;
         }
-        return candidate instanceof Enemy
+        return candidate == playerNpc.getLastHurtByMob()
+                || candidate instanceof Enemy
                 || candidate instanceof Monster
                 || candidate.getType().getCategory() == MobCategory.MONSTER
                 || candidate instanceof Mob mob && mob.getTarget() == playerNpc

@@ -41,6 +41,7 @@ public class ThrowEnderPearlGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
+                || this.playerNpc.isClearingCombatObstruction()
                 || this.playerNpc.getEnderPearlCooldown() > 0
                 || !InventoryUtils.hasItem(this.playerNpc, Items.ENDER_PEARL)) {
             return false;
@@ -80,6 +81,7 @@ public class ThrowEnderPearlGoal extends Goal {
     public boolean canContinueToUse() {
         return this.throwTicks > 0
                 && this.playerNpc.isAlive()
+                && !this.playerNpc.isClearingCombatObstruction()
                 && !this.equippedPearl.isEmpty()
                 && this.pearlTarget != null;
     }
@@ -87,6 +89,7 @@ public class ThrowEnderPearlGoal extends Goal {
     @Override
     public void start() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
+                || this.playerNpc.isClearingCombatObstruction()
                 || this.pearlTarget == null
                 || !this.equipPearl()) {
             this.reset();
@@ -151,6 +154,9 @@ public class ThrowEnderPearlGoal extends Goal {
     }
 
     private void throwPearl(ServerLevel serverLevel) {
+        if (this.playerNpc.isClearingCombatObstruction()) {
+            return;
+        }
         ItemStack heldPearl = this.playerNpc.getOffhandItem();
         if (!this.isSamePearl(heldPearl)) {
             return;

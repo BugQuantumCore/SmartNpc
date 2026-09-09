@@ -1,6 +1,9 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.clazz.PlayerNpcInterest;
+import com.pla.smart_npc.entity.ai.CautiousThreatAi;
+import com.pla.smart_npc.compat.epicfight.EpicFight;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.core.BlockPos;
@@ -27,12 +30,13 @@ import net.minecraft.world.item.SwordItem;
 import net.minecraft.world.item.TridentItem;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.fml.ModList;
 
 import java.util.EnumSet;
 
 public class EatHealingFoodGoal extends Goal {
     private static final int EAT_TICKS = 32;
-    private static final int PATH_RECALCULATE_TICKS = 8;
+    private static final int PATH_RECALCULATE_TICKS = 20;
     private static final double EATING_COMBAT_SPEED = 0.65D;
     private static final double EATING_WANDER_SPEED = 0.55D;
     private static final double CLOSE_COMBAT_DISTANCE_SQR = 5.0D * 5.0D;
@@ -61,6 +65,12 @@ public class EatHealingFoodGoal extends Goal {
     }
 
     @Override
+    public boolean requiresUpdateEveryTick() {
+        // Only the use timer/sounds advance per tick; movement planning is throttled.
+        return true;
+    }
+
+    @Override
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
                 || !this.playerNpc.isAlive()
@@ -85,6 +95,9 @@ public class EatHealingFoodGoal extends Goal {
     public boolean canContinueToUse() {
         return this.eatTicks > 0
                 && this.playerNpc.isAlive()
+                && !this.playerNpc.isNoAi()
+                && !this.playerNpc.isPassenger()
+                && this.isHoldingFood()
                 && !this.foodStack.isEmpty()
                 && this.playerNpc.getHealth() < this.playerNpc.getMaxHealth();
     }
@@ -109,16 +122,24 @@ public class EatHealingFoodGoal extends Goal {
         this.playerNpc.setHealing(true);
         this.playerNpc.setSprinting(false);
         this.playerNpc.setCurrentAiState("ai.player_npc.eating");
-        this.playerNpc.setItemInHand(InteractionHand.MAIN_HAND, this.foodStack.copy());
+        this.playerNpc.setMainHandItemForAi(this.foodStack);
         this.playerNpc.startUsingItem(InteractionHand.MAIN_HAND);
-        this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.playEatingAnimation(this.playerNpc);
+        }
         this.updateEatingMovement();
     }
 
     @Override
     public void stop() {
+        if (!this.usingTemporaryFood && !this.finishedEating) {
+            return;
+        }
         boolean shouldApplyCooldown = this.usingTemporaryFood || this.finishedEating;
         this.playerNpc.stopUsingItem();
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.stopEatingAnimation(this.playerNpc);
+        }
         if (this.usingTemporaryFood) {
             ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
             if (!this.finishedEating && this.isSameFood(currentMainHand)) {
@@ -128,7 +149,7 @@ public class EatHealingFoodGoal extends Goal {
                     && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)) {
                 this.giveOrDrop(currentMainHand);
             }
-            this.playerNpc.setItemInHand(InteractionHand.MAIN_HAND, this.previousMainHand.copy());
+            this.playerNpc.setMainHandItemForAi(this.previousMainHand);
         }
 
         this.eatTicks = 0;
@@ -153,11 +174,16 @@ public class EatHealingFoodGoal extends Goal {
         if (this.eatTicks <= 0) {
             return;
         }
+        if (!this.canContinueToUse()) {
+            this.stop();
+            return;
+        }
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.keepEatingAnimation(this.playerNpc);
+        }
 
         if (this.eatTicks % 8 == 0) {
             this.playerNpc.level().playSound(null, this.playerNpc.blockPosition(), SoundEvents.GENERIC_EAT, SoundSource.HOSTILE, 0.8F, 1.0F);
-            this.playerNpc.startUsingItem(InteractionHand.MAIN_HAND);
-            this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
         }
 
         if (this.pathRecalculateTicks-- <= 0) {
@@ -212,6 +238,9 @@ public class EatHealingFoodGoal extends Goal {
 
     private void updateEatingMovement() {
         LivingEntity threat = this.playerNpc.getTarget();
+        if (this.playerNpc.hasInterest(PlayerNpcInterest.CAUTIOUS)) {
+            threat = CautiousThreatAi.findNearestThreat(this.playerNpc, 14.0D);
+        }
         boolean hasThreat = threat != null && threat.isAlive();
         boolean chasing = hasThreat && this.shouldChaseWhileEating(threat);
         Vec3 movePos;
@@ -248,6 +277,9 @@ public class EatHealingFoodGoal extends Goal {
     }
 
     private boolean shouldChaseWhileEating(LivingEntity threat) {
+        if (this.playerNpc.hasInterest(PlayerNpcInterest.CAUTIOUS)) {
+            return false;
+        }
         double distanceSqr = this.playerNpc.distanceToSqr(threat);
         if (distanceSqr <= CLOSE_COMBAT_DISTANCE_SQR) {
             return false;
@@ -331,8 +363,9 @@ public class EatHealingFoodGoal extends Goal {
     }
 
     private void giveOrDrop(ItemStack stack) {
-        if (!stack.isEmpty() && !InventoryUtils.addItem(this.playerNpc, stack)) {
-            this.playerNpc.spawnAtLocation(stack);
+        ItemStack remainder = InventoryUtils.addItemAndReturnRemainder(this.playerNpc, stack);
+        if (!remainder.isEmpty()) {
+            this.playerNpc.spawnAtLocation(remainder);
         }
     }
 

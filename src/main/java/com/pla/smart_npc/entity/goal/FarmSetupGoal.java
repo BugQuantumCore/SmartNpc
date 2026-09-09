@@ -1,6 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
-import com.pla.smart_npc.compat.EpicFightCompat;
+import com.pla.smart_npc.compat.epicfight.EpicFight;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
@@ -39,6 +39,7 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.fml.ModList;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -508,7 +509,7 @@ public final class FarmSetupGoal extends Goal {
         this.restoreActionItem();
         this.placingBlockAi.resetDelay();
         if (this.playerNpc.isEpicFightDigging()) {
-            EpicFightCompat.stopDiggingAnimation(this.playerNpc);
+            if (ModList.get().isLoaded("epicfight")) EpicFight.stopDiggingAnimation(this.playerNpc);
         }
         this.playerNpc.getNavigation().stop();
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);

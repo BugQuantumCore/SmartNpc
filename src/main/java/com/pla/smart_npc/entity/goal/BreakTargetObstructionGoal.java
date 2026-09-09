@@ -1,25 +1,20 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.BreakingBlockAi;
+import com.pla.smart_npc.entity.ai.ClearBlockAi;
+import com.pla.smart_npc.entity.ai.CombatToolCraftAi;
+import com.pla.smart_npc.entity.ai.FarmAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
-import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
-import com.pla.smart_npc.util.InventoryUtils;
-import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
+import com.pla.smart_npc.entity.ai.ToolAi;
+import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.tags.BlockTags;
-import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
-import net.minecraft.world.item.AxeItem;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
-import net.minecraft.world.item.PickaxeItem;
-import net.minecraft.world.item.ShovelItem;
 import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.BlockHitResult;
@@ -36,94 +31,91 @@ import java.util.Optional;
 public class BreakTargetObstructionGoal extends Goal {
     private static final double MAX_TARGET_DISTANCE_SQR = 28.0D * 28.0D;
     private static final double BREAK_DISTANCE_SQR = 3.25D * 3.25D;
-    private static final int REPATH_INTERVAL_TICKS = 12;
-    private static final int MAX_GOAL_TICKS = 20 * 10;
-    private static final int MAX_MINE_TICKS = 20 * 8;
-    private static final double HIGH_TARGET_PILLAR_HORIZONTAL_DISTANCE_SQR = 12.0D * 12.0D;
+    private static final int REPATH_INTERVAL_TICKS = 20;
+    private static final int MAX_GOAL_TICKS = 20 * 40;
     private static final int HIGH_TARGET_PILLAR_REQUEST_TICKS = 20 * 8;
-    private static final int CAN_USE_CHECK_INTERVAL_TICKS = 10;
+    private static final int CAN_USE_CHECK_INTERVAL_TICKS = 20;
     private static final float COMBAT_PATH_NODE_MULTIPLIER = 0.15F;
 
     private final PlayerNpcEntity playerNpc;
+    private final ToolAi toolAi;
+    private final BreakingBlockAi breakingBlockAi;
+    private final CombatToolCraftAi combatToolCraftAi;
     private final CanUseThrottle canUseThrottle = new CanUseThrottle(CAN_USE_CHECK_INTERVAL_TICKS);
     private LivingEntity target;
     private BlockPos obstructionPos;
-    private ItemStack previousMainHand = ItemStack.EMPTY;
-    private int mineTicks;
-    private int repathTicks;
+    private int obstructionRay;
+    private int nextSelectionTick;
+    private int nextRepathTick;
     private int goalTicks;
-    private boolean usingTemporaryTool;
     private boolean finished;
     private int standSearchCursor;
+    private long pathAdmissionTick = Long.MIN_VALUE;
+    private int pathAttemptsThisTick;
 
     public BreakTargetObstructionGoal(PlayerNpcEntity playerNpc) {
         this.playerNpc = playerNpc;
+        this.toolAi = new ToolAi(playerNpc);
+        this.breakingBlockAi = new BreakingBlockAi(playerNpc, this.toolAi);
+        this.combatToolCraftAi = new CombatToolCraftAi(playerNpc);
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK));
     }
 
     @Override
     public boolean canUse() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
-                || !this.playerNpc.isAlive()
-                || this.playerNpc.isNoAi()
-                || this.playerNpc.isPassenger()
-                || this.playerNpc.isHealing()) {
+                || !this.playerNpc.isAlive() || this.playerNpc.isNoAi()
+                || this.playerNpc.isPassenger() || this.playerNpc.isHealing()) {
             return false;
         }
-
         LivingEntity currentTarget = this.playerNpc.getTarget();
         if (!this.isValidTarget(currentTarget)
-                || this.playerNpc.distanceToSqr(currentTarget) > MAX_TARGET_DISTANCE_SQR) {
+                || this.playerNpc.distanceToSqr(currentTarget) > MAX_TARGET_DISTANCE_SQR
+                || !this.canUseThrottle.canCheck(this.playerNpc)
+                || !this.hasLoadedTargetCorridor(serverLevel, currentTarget)
+                || !this.tryAcquirePathBatch()) {
             return false;
         }
-        if (!this.canUseThrottle.canCheck(this.playerNpc)) {
+        Path targetPath = this.createBoundedPath(currentTarget.blockPosition());
+        if (isReachablePath(targetPath)) {
             return false;
         }
-
-        boolean hasLineOfSight = this.playerNpc.hasLineOfSight(currentTarget);
-        boolean highTarget = this.isHighTargetPillarCandidate(currentTarget);
-        Path targetPath = hasLineOfSight || highTarget
-                ? this.createBoundedPath(currentTarget.blockPosition())
-                : null;
-        if (hasLineOfSight && isReachablePath(targetPath)) {
-            return false;
-        }
-        if (highTarget && !isReachablePath(targetPath)) {
+        if (this.isHighTargetPillarCandidate(currentTarget)) {
             this.playerNpc.requestUpwardEscapeTo(currentTarget.blockPosition(), HIGH_TARGET_PILLAR_REQUEST_TICKS);
             return false;
         }
-
-        BlockPos obstruction = this.findTargetObstruction(serverLevel, currentTarget);
-        if (obstruction == null) {
+        Obstruction candidate = this.findTargetObstruction(serverLevel, currentTarget);
+        if (candidate == null) {
             return false;
         }
-
         this.target = currentTarget;
-        this.obstructionPos = obstruction;
-        this.standSearchCursor = 0;
+        this.selectObstruction(candidate);
         return true;
     }
 
     @Override
     public boolean canContinueToUse() {
-        return !this.finished
-                && this.goalTicks < MAX_GOAL_TICKS
-                && this.isValidTarget(this.target)
-                && this.playerNpc.isAlive()
-                && !this.playerNpc.isNoAi()
-                && !this.playerNpc.isPassenger()
-                && !this.playerNpc.isHealing();
+        return !this.finished && this.goalTicks < MAX_GOAL_TICKS
+                && this.isValidTarget(this.target) && this.playerNpc.getTarget() == this.target
+                && this.playerNpc.distanceToSqr(this.target) <= MAX_TARGET_DISTANCE_SQR
+                && !this.isHighTargetPillarCandidate(this.target)
+                && this.playerNpc.isAlive() && !this.playerNpc.isNoAi()
+                && !this.playerNpc.isPassenger() && !this.playerNpc.isHealing();
+    }
+
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        // Physical mining advances in server ticks. Discovery, A* and approach decisions keep
+        // their explicit >=20-tick deadlines; the intervening ticks only validate/work one block.
+        return true;
     }
 
     @Override
     public void start() {
-        this.mineTicks = 0;
-        this.repathTicks = 0;
         this.goalTicks = 0;
-        this.previousMainHand = ItemStack.EMPTY;
-        this.usingTemporaryTool = false;
         this.finished = false;
-        this.standSearchCursor = 0;
+        this.nextRepathTick = this.playerNpc.tickCount;
+        this.nextSelectionTick = this.playerNpc.tickCount + CAN_USE_CHECK_INTERVAL_TICKS;
         this.playerNpc.markCombatProgress();
         this.playerNpc.setCurrentAiState("ai.player_npc.breaking_target_obstruction");
         this.updateTaskDetail();
@@ -131,91 +123,95 @@ public class BreakTargetObstructionGoal extends Goal {
 
     @Override
     public void tick() {
-        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || !this.isValidTarget(this.target)) {
+        if (!(this.playerNpc.level() instanceof ServerLevel serverLevel) || !this.canContinueToUse()) {
+            this.finished = true;
+            return;
+        }
+        this.goalTicks++;
+        // Damage callbacks may publish "retaliating" while this goal still owns the action.
+        this.playerNpc.setCurrentAiState("ai.player_npc.breaking_target_obstruction");
+        if (!this.hasLoadedTargetCorridor(serverLevel, this.target)) {
             this.finished = true;
             return;
         }
 
-        this.goalTicks++;
-        if (this.obstructionPos == null
-                || !this.isCombatObstruction(serverLevel, this.obstructionPos, serverLevel.getBlockState(this.obstructionPos))) {
-            this.playerNpc.clearBlockBreakProgress(this.obstructionPos);
-            this.obstructionPos = this.findTargetObstruction(serverLevel, this.target);
-            this.standSearchCursor = 0;
-            this.mineTicks = 0;
-            if (this.obstructionPos == null || this.playerNpc.hasLineOfSight(this.target)
-                    && isReachablePath(this.createBoundedPath(this.target.blockPosition()))) {
-                this.finished = true;
-                return;
+        // Opening eye-level glass is not completion: path/body passage decides the next block.
+        // Discovery/reachability is cadenced; the current exact ray is revalidated before mining.
+        if (this.playerNpc.tickCount >= this.nextSelectionTick) {
+            this.nextSelectionTick = this.playerNpc.tickCount + CAN_USE_CHECK_INTERVAL_TICKS;
+            if (this.tryAcquirePathBatch()) {
+                if (isReachablePath(this.createBoundedPath(this.target.blockPosition()))) {
+                    this.finished = true;
+                    return;
+                }
+                Obstruction candidate = this.findTargetObstruction(serverLevel, this.target);
+                if (candidate == null) {
+                    this.finished = true;
+                    return;
+                }
+                this.selectObstruction(candidate);
             }
         }
-
-        BlockState state = serverLevel.getBlockState(this.obstructionPos);
-        this.playerNpc.getLookControl().setLookAt(
-                this.obstructionPos.getX() + 0.5D,
-                this.obstructionPos.getY() + 0.5D,
-                this.obstructionPos.getZ() + 0.5D,
-                40.0F,
-                40.0F
-        );
-
-        if (this.playerNpc.distanceToSqr(
-                this.obstructionPos.getX() + 0.5D,
-                this.obstructionPos.getY() + 0.5D,
-                this.obstructionPos.getZ() + 0.5D
-        ) > BREAK_DISTANCE_SQR) {
-            this.playerNpc.clearBlockBreakProgress(this.obstructionPos);
-            if (this.repathTicks-- <= 0) {
-                this.moveNearObstruction(serverLevel);
-                this.repathTicks = REPATH_INTERVAL_TICKS;
+        if (this.obstructionPos == null) {
+            return;
+        }
+        BlockPos selected = this.obstructionPos;
+        if (!serverLevel.hasChunkAt(selected)
+                || !this.isCombatObstruction(serverLevel, selected, serverLevel.getBlockState(selected))) {
+            this.breakingBlockAi.stop();
+            this.combatToolCraftAi.stop();
+            this.obstructionPos = null;
+            return;
+        }
+        if (!this.isCurrentRayHit(serverLevel, this.target, selected, this.obstructionRay)) {
+            // A small target/stance movement can move the old sample off this block while
+            // another body sample still hits it. Wait for the admitted ray pass without
+            // discarding earned progress or mining an unvalidated target in the meantime.
+            this.breakingBlockAi.pause();
+            return;
+        }
+        if (this.distanceToBlockCenterSqr(selected) > BREAK_DISTANCE_SQR
+                || !ClearBlockAi.canBreakFromCurrentStand(serverLevel, this.playerNpc, selected)) {
+            this.breakingBlockAi.pause();
+            this.combatToolCraftAi.stop();
+            if (this.playerNpc.tickCount >= this.nextRepathTick) {
+                this.nextRepathTick = this.playerNpc.tickCount + REPATH_INTERVAL_TICKS;
+                if (this.tryAcquirePathBatch()) {
+                    this.moveNearObstruction(serverLevel);
+                }
             }
             this.updateTaskDetail();
             return;
         }
-
-        if (!this.equipToolFor(state)) {
-            this.finished = true;
-            return;
-        }
-
         this.playerNpc.getNavigation().stop();
         this.playerNpc.markCombatProgress();
-        if (this.mineTicks % 8 == 0) {
-            this.playerNpc.triggerMainHandAttackAnimation();
-            PlayerNpcBlockSoundUtil.playMiningHitSound(serverLevel, this.obstructionPos, state, this.playerNpc);
-        }
-
-        this.mineTicks++;
-        int requiredTicks = this.getRequiredMineTicks(serverLevel, this.obstructionPos, state);
-        this.playerNpc.showBlockBreakProgress(this.obstructionPos, this.mineTicks, requiredTicks);
-        this.updateTaskDetail();
-        if (this.mineTicks < requiredTicks) {
+        BlockState state = serverLevel.getBlockState(selected);
+        if (!this.breakingBlockAi.isRunning()
+                && this.combatToolCraftAi.tick(serverLevel, state, selected)) {
             return;
         }
-
-        BlockPos brokenPos = this.obstructionPos;
-        if (PlayerNpcBlockBreakUtil.destroyBlock(serverLevel, brokenPos, state, this.playerNpc)) {
-            this.playerNpc.hurtMainHandItem(1);
-            this.playerNpc.markCombatProgress();
+        if (!this.toolAi.hasPreferredToolFor(state)) {
+            this.toolAi.equipEmptyMainHand();
         }
-        this.playerNpc.clearBlockBreakProgress(brokenPos);
-        this.obstructionPos = this.findTargetObstruction(serverLevel, this.target);
-        this.standSearchCursor = 0;
-        this.mineTicks = 0;
-        this.repathTicks = 0;
-        if (this.obstructionPos == null) {
+        BreakingBlockAi.TickResult result = this.breakingBlockAi.tick(serverLevel, selected,
+                current -> this.isCombatObstruction(serverLevel, selected, current), 0,
+                "clearing target passage");
+        if (result == BreakingBlockAi.TickResult.FAILED) {
             this.finished = true;
+        } else if (result == BreakingBlockAi.TickResult.DONE) {
+            this.obstructionPos = null;
+            // Keep the existing discovery deadline. Adding a fresh twenty-tick delay here
+            // used to stack idle time onto every successful block in the same passage.
         }
     }
 
     @Override
     public void stop() {
-        this.playerNpc.clearBlockBreakProgress(this.obstructionPos);
-        this.restorePreviousMainHand();
+        this.breakingBlockAi.stop();
+        this.combatToolCraftAi.stop();
+        this.toolAi.restoreMainHand();
         this.target = null;
         this.obstructionPos = null;
-        this.mineTicks = 0;
-        this.repathTicks = 0;
         this.goalTicks = 0;
         this.finished = false;
         this.standSearchCursor = 0;
@@ -224,220 +220,131 @@ public class BreakTargetObstructionGoal extends Goal {
     }
 
     private boolean isValidTarget(LivingEntity candidate) {
-        return candidate != null
-                && candidate.isAlive()
-                && !candidate.isRemoved()
+        return candidate != null && candidate.isAlive() && !candidate.isRemoved()
                 && !this.playerNpc.isAlliedTo(candidate);
     }
 
     private boolean isHighTargetPillarCandidate(LivingEntity target) {
-        BlockPos feet = this.playerNpc.blockPosition();
-        BlockPos targetPos = target.blockPosition();
-        return targetPos.getY() > feet.getY() + 2
-                && this.horizontalDistanceSqr(feet, targetPos) <= HIGH_TARGET_PILLAR_HORIZONTAL_DISTANCE_SQR;
+        return target.getY() - this.playerNpc.getY() > 2.0D;
     }
 
-    private double horizontalDistanceSqr(BlockPos from, BlockPos to) {
-        double dx = from.getX() - to.getX();
-        double dz = from.getZ() - to.getZ();
-        return dx * dx + dz * dz;
+    private boolean hasLoadedTargetCorridor(ServerLevel level, LivingEntity target) {
+        return PathNavigationAi.hasLoadedChunkCorridor(level, this.playerNpc.blockPosition(), target.blockPosition(), 1);
     }
 
-    private BlockPos findTargetObstruction(ServerLevel serverLevel, LivingEntity target) {
-        BlockPos rayHit = this.findRaycastObstruction(serverLevel, target);
-        if (rayHit != null) {
-            return rayHit;
+    private boolean tryAcquirePathBatch() {
+        long tick = this.playerNpc.level().getServer().getTickCount();
+        if (this.pathAdmissionTick == tick) {
+            return true;
         }
-
-        return this.findLocalForwardObstruction(serverLevel, target);
+        if (!PlayerNpcAiWorkBudget.tryAcquireNavigationPathStart(this.playerNpc)) {
+            return false;
+        }
+        this.pathAdmissionTick = tick;
+        this.pathAttemptsThisTick = 0;
+        return true;
     }
 
-    private BlockPos findRaycastObstruction(ServerLevel serverLevel, LivingEntity target) {
-        Vec3 eye = new Vec3(this.playerNpc.getX(), this.playerNpc.getEyeY(), this.playerNpc.getZ());
-        Vec3 targetEye = new Vec3(target.getX(), target.getEyeY(), target.getZ());
-        BlockHitResult hit = serverLevel.clip(new ClipContext(
-                eye,
-                targetEye,
-                ClipContext.Block.OUTLINE,
-                ClipContext.Fluid.NONE,
-                this.playerNpc
-        ));
-        if (hit.getType() != HitResult.Type.BLOCK) {
-            return null;
+    private void selectObstruction(Obstruction candidate) {
+        if (!candidate.pos().equals(this.obstructionPos)) {
+            this.breakingBlockAi.stop();
+            this.combatToolCraftAi.stop();
+            this.playerNpc.getNavigation().stop();
+            this.standSearchCursor = 0;
         }
-
-        BlockPos hitPos = hit.getBlockPos().immutable();
-        BlockState state = serverLevel.getBlockState(hitPos);
-        return this.isCombatObstruction(serverLevel, hitPos, state) ? hitPos : null;
+        this.obstructionPos = candidate.pos();
+        this.obstructionRay = candidate.ray();
     }
 
-    private BlockPos findLocalForwardObstruction(ServerLevel serverLevel, LivingEntity target) {
-        BlockPos feet = this.playerNpc.blockPosition();
-        Direction towardTarget = this.directionToward(target);
-        List<BlockPos> candidates = new ArrayList<>();
-        candidates.add(feet.above());
-        candidates.add(feet.above(2));
-        BlockPos forward = feet.relative(towardTarget);
-        candidates.add(forward);
-        candidates.add(forward.above());
-        candidates.add(forward.above(2));
-        for (Direction side : new Direction[]{towardTarget.getClockWise(), towardTarget.getCounterClockWise()}) {
-            BlockPos sidePos = feet.relative(side);
-            candidates.add(sidePos);
-            candidates.add(sidePos.above());
-        }
-
-        candidates.sort(Comparator
-                .comparingDouble((BlockPos pos) -> pos.distSqr(target.blockPosition()))
-                .thenComparingDouble(this::distanceToBlockCenterSqr));
-        for (BlockPos pos : candidates) {
-            BlockPos immutable = pos.immutable();
-            BlockState state = serverLevel.getBlockState(immutable);
-            if (this.isCombatObstruction(serverLevel, immutable, state)) {
-                return immutable;
+    private Obstruction findTargetObstruction(ServerLevel level, LivingEntity target) {
+        Obstruction nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+        boolean nearestInReach = false;
+        // One eye ray plus nine lower/mid/upper rays inside the NPC's body width. Only first
+        // physical hits qualify; there is no nearby block-volume or side-wall fallback.
+        for (int ray = 0; ray < 10; ray++) {
+            BlockHitResult hit = this.clipPassageRay(level, target, ray);
+            if (hit == null || hit.getType() != HitResult.Type.BLOCK) {
+                continue;
+            }
+            BlockPos pos = hit.getBlockPos();
+            if (level.hasChunkAt(pos) && this.isCombatObstruction(level, pos, level.getBlockState(pos))) {
+                double distance = hit.getLocation().distanceToSqr(this.playerNpc.position());
+                boolean inReach = this.distanceToBlockCenterSqr(pos) <= BREAK_DISTANCE_SQR
+                        && ClearBlockAi.canBreakFromCurrentStand(level, this.playerNpc, pos);
+                if (inReach && pos.equals(this.obstructionPos)) {
+                    // Preserve a valid ongoing break even if target movement changes which
+                    // body ray hits it, or another block becomes marginally nearer.
+                    return new Obstruction(pos.immutable(), ray);
+                }
+                if (nearest == null || inReach && !nearestInReach
+                        || inReach == nearestInReach && distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestInReach = inReach;
+                    nearest = new Obstruction(pos.immutable(), ray);
+                }
             }
         }
-        return null;
+        return nearest;
     }
 
-    private Direction directionToward(LivingEntity target) {
-        double dx = target.getX() - this.playerNpc.getX();
-        double dz = target.getZ() - this.playerNpc.getZ();
-        if (Math.abs(dx) > Math.abs(dz)) {
-            return dx >= 0.0D ? Direction.EAST : Direction.WEST;
+    private boolean isCurrentRayHit(ServerLevel level, LivingEntity target, BlockPos pos, int ray) {
+        BlockHitResult hit = this.clipPassageRay(level, target, ray);
+        return hit != null && hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(pos);
+    }
+
+    private BlockHitResult clipPassageRay(ServerLevel level, LivingEntity target, int ray) {
+        Vec3 start;
+        Vec3 end;
+        if (ray == 0) {
+            start = this.playerNpc.getEyePosition();
+            end = target.getEyePosition();
+        } else {
+            // Same-level entry only: an angled ankle ray down a slope could select its floor.
+            if (Math.abs(target.getY() - this.playerNpc.getY()) > 0.25D) {
+                return null;
+            }
+            Vec3 delta = target.position().subtract(this.playerNpc.position());
+            double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
+            if (horizontal < 0.1D) {
+                return null;
+            }
+            double radius = Math.max(0.0D, this.playerNpc.getBbWidth() * 0.5D - 0.05D);
+            double lateral = ((ray - 1) % 3 - 1) * radius;
+            double height = switch ((ray - 1) / 3) {
+                case 0 -> 0.1D;
+                case 1 -> this.playerNpc.getBbHeight() * 0.5D;
+                default -> this.playerNpc.getBbHeight() - 0.1D;
+            };
+            double y = Math.max(this.playerNpc.getY(), target.getY()) + height;
+            double dx = -delta.z / horizontal * lateral;
+            double dz = delta.x / horizontal * lateral;
+            start = new Vec3(this.playerNpc.getX() + dx, y, this.playerNpc.getZ() + dz);
+            end = new Vec3(target.getX() + dx, y, target.getZ() + dz);
         }
-        return dz >= 0.0D ? Direction.SOUTH : Direction.NORTH;
+        return level.clip(new ClipContext(start, end, ClipContext.Block.COLLIDER,
+                ClipContext.Fluid.NONE, this.playerNpc));
     }
 
-    private boolean isCombatObstruction(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        return !state.isAir()
-                && state.getDestroySpeed(serverLevel, pos) >= 0.0F
-                && state.getFluidState().isEmpty()
-                && serverLevel.getBlockEntity(pos) == null
-                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, serverLevel, pos)
+    private boolean isCombatObstruction(ServerLevel level, BlockPos pos, BlockState state) {
+        return level.hasChunkAt(pos) && level.isInWorldBounds(pos)
+                && level.getWorldBorder().isWithinBounds(pos)
+                && !pos.equals(this.playerNpc.blockPosition().below())
+                && !state.isAir() && !state.getCollisionShape(level, pos).isEmpty()
+                && state.getDestroySpeed(level, pos) >= 0.0F && state.getFluidState().isEmpty()
+                && level.getBlockEntity(pos) == null
+                && !CraftBasicGearGoal.isTemporaryCraftingTable(this.playerNpc, level, pos)
                 && !this.isProtectedHomeBlock(pos)
-                && this.hasRequiredToolFor(state);
-    }
-
-    private boolean hasRequiredToolFor(BlockState state) {
-        if (state.is(BlockTags.LOGS) || state.is(BlockTags.MINEABLE_WITH_AXE) || state.is(Blocks.CRAFTING_TABLE)) {
-            return this.hasTool(AxeItem.class);
-        }
-        if (this.isPickaxeBlock(state)) {
-            return this.hasTool(PickaxeItem.class);
-        }
-        return true;
-    }
-
-    private boolean equipToolFor(BlockState state) {
-        if (state.is(BlockTags.LOGS) || state.is(BlockTags.MINEABLE_WITH_AXE) || state.is(Blocks.CRAFTING_TABLE)) {
-            return this.equipTool(AxeItem.class);
-        }
-        if (this.isPickaxeBlock(state)) {
-            return this.equipTool(PickaxeItem.class);
-        }
-        if (state.is(Blocks.DIRT) || state.is(Blocks.GRASS_BLOCK) || state.is(BlockTags.MINEABLE_WITH_SHOVEL)) {
-            this.equipTool(ShovelItem.class);
-            return true;
-        }
-        this.equipEmptyHand();
-        return true;
-    }
-
-    private boolean isPickaxeBlock(BlockState state) {
-        return state.requiresCorrectToolForDrops()
-                || state.is(BlockTags.MINEABLE_WITH_PICKAXE)
-                || state.is(Blocks.STONE)
-                || state.is(Blocks.COBBLESTONE)
-                || state.is(Blocks.DEEPSLATE)
-                || state.is(Blocks.COBBLED_DEEPSLATE)
-                || state.is(Blocks.FURNACE);
-    }
-
-    private boolean hasTool(Class<?> toolClass) {
-        if (toolClass.isInstance(this.playerNpc.getMainHandItem().getItem())) {
-            return true;
-        }
-        if (this.usingTemporaryTool && toolClass.isInstance(this.previousMainHand.getItem())) {
-            return true;
-        }
-        return InventoryUtils.hasItem(this.playerNpc, stack -> toolClass.isInstance(stack.getItem()));
-    }
-
-    private boolean equipTool(Class<?> toolClass) {
-        if (toolClass.isInstance(this.playerNpc.getMainHandItem().getItem())) {
-            return true;
-        }
-        if (this.restorePreviousMainHandForTool(toolClass)) {
-            return true;
-        }
-
-        ItemStack tool = this.playerNpc.consumeInventoryItem(stack -> toolClass.isInstance(stack.getItem()), 1)
-                .orElse(ItemStack.EMPTY);
-        if (tool.isEmpty()) {
-            return false;
-        }
-
-        this.setTemporaryMainHand(tool);
-        return true;
-    }
-
-    private void equipEmptyHand() {
-        if (!this.playerNpc.getMainHandItem().isEmpty()) {
-            this.setTemporaryMainHand(ItemStack.EMPTY);
-        }
-    }
-
-    private void setTemporaryMainHand(ItemStack stack) {
-        ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
-        if (!this.usingTemporaryTool) {
-            this.previousMainHand = currentMainHand;
-            this.usingTemporaryTool = true;
-        } else if (!currentMainHand.isEmpty()
-                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)
-                && !InventoryUtils.addItem(this.playerNpc, currentMainHand)) {
-            this.playerNpc.spawnAtLocation(currentMainHand);
-        }
-
-        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, stack);
-    }
-
-    private boolean restorePreviousMainHandForTool(Class<?> toolClass) {
-        if (!this.usingTemporaryTool || !toolClass.isInstance(this.previousMainHand.getItem())) {
-            return false;
-        }
-
-        ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
-        if (!currentMainHand.isEmpty()
-                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)
-                && !InventoryUtils.addItem(this.playerNpc, currentMainHand)) {
-            this.playerNpc.spawnAtLocation(currentMainHand);
-        }
-
-        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
-        this.previousMainHand = ItemStack.EMPTY;
-        this.usingTemporaryTool = false;
-        return true;
-    }
-
-    private void restorePreviousMainHand() {
-        if (!this.usingTemporaryTool) {
-            return;
-        }
-
-        ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
-        if (!currentMainHand.isEmpty()
-                && !ItemStack.isSameItemSameTags(currentMainHand, this.previousMainHand)
-                && !InventoryUtils.addItem(this.playerNpc, currentMainHand)) {
-            this.playerNpc.spawnAtLocation(currentMainHand);
-        }
-
-        this.playerNpc.setItemSlot(EquipmentSlot.MAINHAND, this.previousMainHand.copy());
-        this.previousMainHand = ItemStack.EMPTY;
-        this.usingTemporaryTool = false;
+                && !PlayerNpcHomeUtil.isInsideBuildFootprint(this.playerNpc, pos)
+                && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, pos);
     }
 
     private void moveNearObstruction(ServerLevel serverLevel) {
+        Path activePath = this.playerNpc.getNavigation().getPath();
+        if (activePath != null && !this.playerNpc.getNavigation().isDone()
+                && !this.playerNpc.getNavigation().isStuck() && activePath.canReach()) {
+            return;
+        }
         StandMovePlan plan = this.findStandNear(serverLevel, this.obstructionPos);
         if (plan == null) {
             return;
@@ -495,6 +402,9 @@ public class BreakTargetObstructionGoal extends Goal {
     }
 
     private Path createBoundedPath(BlockPos targetPos) {
+        if (!this.tryAcquirePathBatch() || this.pathAttemptsThisTick++ >= 2) {
+            return null;
+        }
         return PathNavigationAi.createBoundedPath(
                 this.playerNpc,
                 targetPos,
@@ -507,7 +417,8 @@ public class BreakTargetObstructionGoal extends Goal {
     }
 
     private boolean canStandAt(ServerLevel serverLevel, BlockPos pos) {
-        return serverLevel.isInWorldBounds(pos)
+        return serverLevel.hasChunkAt(pos)
+                && serverLevel.isInWorldBounds(pos)
                 && serverLevel.getWorldBorder().isWithinBounds(pos)
                 && serverLevel.getBlockState(pos).getCollisionShape(serverLevel, pos).isEmpty()
                 && serverLevel.getBlockState(pos.above()).getCollisionShape(serverLevel, pos.above()).isEmpty()
@@ -519,27 +430,6 @@ public class BreakTargetObstructionGoal extends Goal {
     private boolean isProtectedHomeBlock(BlockPos pos) {
         Optional<PlayerNpcHomeUtil.HomeArea> homeArea = PlayerNpcHomeUtil.getHome(this.playerNpc);
         return homeArea.isPresent() && PlayerNpcHomeUtil.isInside(homeArea.get(), pos);
-    }
-
-    private int getRequiredMineTicks(ServerLevel serverLevel, BlockPos pos, BlockState state) {
-        float hardness = state.getDestroySpeed(serverLevel, pos);
-        if (hardness < 0.0F) {
-            return MAX_MINE_TICKS;
-        }
-
-        ItemStack heldStack = this.playerNpc.getMainHandItem();
-        float toolSpeed = heldStack.isEmpty() ? 1.0F : heldStack.getDestroySpeed(state);
-        if (toolSpeed <= 0.0F) {
-            toolSpeed = 1.0F;
-        }
-
-        boolean correctTool = !state.requiresCorrectToolForDrops() || heldStack.isCorrectToolForDrops(state);
-        float progressPerTick = toolSpeed / hardness / (correctTool ? 30.0F : 100.0F);
-        if (progressPerTick <= 0.0F) {
-            return MAX_MINE_TICKS;
-        }
-
-        return Math.min(MAX_MINE_TICKS, Math.max(1, (int) Math.ceil(1.0F / progressPerTick)));
     }
 
     private void updateTaskDetail() {
@@ -568,6 +458,9 @@ public class BreakTargetObstructionGoal extends Goal {
         double dy = stand.getY() - (target.getY() + 0.5D);
         double dz = stand.getZ() + 0.5D - (target.getZ() + 0.5D);
         return dx * dx + dy * dy + dz * dz;
+    }
+
+    private record Obstruction(BlockPos pos, int ray) {
     }
 
     private record StandMovePlan(BlockPos stand, Path path) {

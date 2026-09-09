@@ -38,6 +38,9 @@ public class RetargetCloserThreatGoal extends TargetGoal {
 
     @Override
     public boolean canUse() {
+        if (this.mob instanceof PlayerNpcEntity npc && npc.isClearingCombatObstruction()) {
+            return false;
+        }
         if (this.mob.level().isClientSide || this.mob.tickCount < this.nextScanTick) {
             return false;
         }

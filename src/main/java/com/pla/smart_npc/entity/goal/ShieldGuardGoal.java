@@ -45,6 +45,7 @@ public class ShieldGuardGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
+                || this.playerNpc.isClearingCombatObstruction()
                 || this.playerNpc.getShieldGuardCooldown() > 0
                 || !this.hasShield()) {
             return false;
@@ -67,6 +68,8 @@ public class ShieldGuardGoal extends Goal {
     @Override
     public boolean canContinueToUse() {
         return this.guardTicks > 0
+                && !this.playerNpc.isClearingCombatObstruction()
+                && this.playerNpc.getShieldGuardCooldown() <= 0
                 && this.target != null
                 && this.target.isAlive()
                 && this.playerNpc.isAlive()
@@ -94,6 +97,9 @@ public class ShieldGuardGoal extends Goal {
 
     @Override
     public void tick() {
+        if (this.playerNpc.getShieldGuardCooldown() > 0) {
+            return;
+        }
         this.guardTicks--;
         this.playerNpc.setSprinting(false);
         if (!this.playerNpc.isUsingItem() || this.playerNpc.getUsedItemHand() != InteractionHand.OFF_HAND) {
@@ -120,7 +126,8 @@ public class ShieldGuardGoal extends Goal {
         this.guardTicks = 0;
         this.movementRepathTicks = 0;
         this.usingTemporaryShield = false;
-        this.playerNpc.setShieldGuardCooldown(COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 8));
+        this.playerNpc.setShieldGuardCooldown(Math.max(this.playerNpc.getShieldGuardCooldown(),
+                COOLDOWN_TICKS + this.playerNpc.getRandom().nextInt(20 * 8)));
         this.playerNpc.setCurrentAiState(PlayerNpcEntity.AI_IDLE);
     }
 

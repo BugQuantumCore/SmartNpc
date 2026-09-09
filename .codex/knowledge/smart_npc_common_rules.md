@@ -8,7 +8,10 @@ The user requested removal of `src/test` and the GameTest Gradle run configurati
 
 - Smart NPC targets Minecraft Forge `1.20.1` with Forge `47.4.4`, Parchment `2023.06.26-1.20.1`, and Java `17`.
 - Production Java packages use `com.pla.smart_npc`. Some older knowledge notes still mention the pre-rename `annoyingvillagers` package; verify paths against the current source tree before editing.
-- Epic Fight is an optional compatibility boundary. Generic Smart NPC code must call `EpicFightCompat`; only classes under `compat.epicfight` may directly link Epic Fight types.
+- Epic Fight is an optional compatibility boundary. Generic Smart NPC code may call the small
+  static API in `compat.epicfight.EpicFight` directly, but every such call and all Epic Fight event
+  registration must first pass `ModList.get().isLoaded("epicfight")`. Do not restore reflection,
+  cached `Method` fields, or an `EpicFightCompat` invocation layer.
 
 ## AI Design Pattern
 

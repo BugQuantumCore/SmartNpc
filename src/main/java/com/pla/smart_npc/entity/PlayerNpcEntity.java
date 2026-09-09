@@ -1,5 +1,7 @@
 package com.pla.smart_npc.entity;
 
+import com.pla.smart_npc.compat.epicfight.EpicFight;
+
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.clazz.FakePlayer;
@@ -33,6 +35,7 @@ import com.pla.smart_npc.entity.goal.DescendHighColumnGoal;
 import com.pla.smart_npc.entity.goal.DigDownForStoneGoal;
 import com.pla.smart_npc.entity.goal.EatHealingFoodGoal;
 import com.pla.smart_npc.entity.goal.EscapeHoleWithBlockGoal;
+import com.pla.smart_npc.entity.goal.EscapeWallGoal;
 import com.pla.smart_npc.entity.goal.ExploreAroundGoal;
 import com.pla.smart_npc.entity.goal.ExploreCaveOreGoal;
 import com.pla.smart_npc.entity.goal.FillWaterBucketGoal;
@@ -47,6 +50,7 @@ import com.pla.smart_npc.entity.goal.InterestGatedGoal;
 import com.pla.smart_npc.entity.goal.JukeboxDanceGoal;
 import com.pla.smart_npc.entity.goal.LootNearbyChestGoal;
 import com.pla.smart_npc.entity.goal.LowHealthFleeGoal;
+import com.pla.smart_npc.entity.goal.PlayerNpcMeleeAttackGoal;
 import com.pla.smart_npc.entity.goal.ManageHomeBaseGoal;
 import com.pla.smart_npc.entity.goal.MiningCaveStrollGoal;
 import com.pla.smart_npc.entity.goal.MiningNightCampGoal;
@@ -131,6 +135,7 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkHooks;
 import net.minecraftforge.network.PlayMessages;
 import net.minecraftforge.registries.ForgeRegistries;
+import net.minecraftforge.fml.ModList;
 import org.jetbrains.annotations.NotNull;
 
 import javax.annotation.Nullable;
@@ -151,6 +156,7 @@ import java.util.function.Predicate;
 
 public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final EntityDataAccessor<Integer> MAIN_HAND_ATTACK_ANIMATION_TICKS = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.INT);
+    private static final EntityDataAccessor<Boolean> HEALING = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.BOOLEAN);
     private static final EntityDataAccessor<Integer> BETTER_COMBAT_ATTACK_ANIMATION_TICKS = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<Integer> BETTER_COMBAT_ATTACK_SEQUENCE = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<String> AI_STATE = SynchedEntityData.defineId(PlayerNpcEntity.class, EntityDataSerializers.STRING);
@@ -327,7 +333,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private ItemStack mainWeaponItem = ItemStack.EMPTY;
     private ItemStack offWeaponItem = ItemStack.EMPTY;
     private boolean suppressHeldItemCacheUpdate = false;
-    private boolean healing = false;
     private boolean useBow = true;
     @Nullable
     private BlockPos ownedChestPos;
@@ -440,11 +445,20 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public boolean isHealing() {
-        return healing;
+        return this.entityData.get(HEALING);
     }
 
     public void setHealing(boolean healing) {
-        this.healing = healing;
+        this.entityData.set(HEALING, healing);
+    }
+
+    @Override
+    protected void completeUsingItem() {
+        // EatHealingFoodGoal owns consumption and healing. Vanilla completion can
+        // otherwise consume the held food first and apply apple effects twice.
+        if (!this.isHealing()) {
+            super.completeUsingItem();
+        }
     }
 
     public int getGapCooldown() {
@@ -987,7 +1001,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     public void resetBucketCooldown() {this.bucketCooldown = 0; }
 
     public void setFlintAndSteelCooldown() {
-        this.flintAndSteelCooldown = random.nextInt(140, 260);
+        this.flintAndSteelCooldown = 20 * 60 + this.random.nextInt(20 * 120 + 1);
     }
 
     public void setEnderPearlCooldown() {
@@ -1641,6 +1655,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     protected void defineSynchedData() {
         super.defineSynchedData();
         this.entityData.define(MAIN_HAND_ATTACK_ANIMATION_TICKS, 0);
+        this.entityData.define(HEALING, false);
         this.entityData.define(BETTER_COMBAT_ATTACK_ANIMATION_TICKS, 0);
         this.entityData.define(BETTER_COMBAT_ATTACK_SEQUENCE, 0);
         this.entityData.define(AI_STATE, AI_IDLE);
@@ -1990,6 +2005,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public float getSmartNpcFleeHealthRatio(LivingEntity threat, float baseHealthRatio) {
+        if (!this.hasInterest(PlayerNpcInterest.COWARD)) {
+            return 0.0F;
+        }
         float ratio = Math.max(0.0F, Math.min(1.0F, baseHealthRatio));
         if (threat != null && this.isSmartNpcCompatHighDangerThreat(threat)) {
             ratio = Math.max(ratio, 0.85F);
@@ -2008,7 +2026,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public boolean shouldSmartNpcFleeFromTarget(LivingEntity threat) {
-        return threat != null
+        return this.hasInterest(PlayerNpcInterest.COWARD) && threat != null
                 && threat.isAlive()
                 && this.getHealth() / this.getMaxHealth() <= this.getSmartNpcFleeHealthRatio(threat, 0.0F);
     }
@@ -2023,6 +2041,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         // redirecting the NPC to an unrelated nearby bank.
         this.goalSelector.addGoal(0, new FloatGoal(this));
         this.goalSelector.addGoal(0, new WaterFallGoal(this));
+        this.goalSelector.addGoal(0, new EscapeWallGoal(this));
         this.registerVanillaCombatReplacementGoals();
         this.goalSelector.addGoal(1, new EscapeHoleWithBlockGoal(this));
         this.goalSelector.addGoal(1, new DescendHighColumnGoal(this, terraformBuildSiteGoal));
@@ -2039,7 +2058,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(3, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS));
         this.addWorkGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.addWorkGoal(5, this.gated(terraformBuildSiteGoal, PlayerNpcInterest.BUILDING));
-        this.goalSelector.addGoal(5, new MeleeAttackGoal(this, 1.0D, true));
+        if (!ModList.get().isLoaded("epicfight")) {
+            this.goalSelector.addGoal(6, new PlayerNpcMeleeAttackGoal(this));
+        }
         this.addWorkGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
         this.addWorkGoal(4, new ManageHomeBaseGoal(this, true));
         this.addWorkGoal(4, new MiningNightCampGoal(this, 1.0D));
@@ -2283,7 +2304,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(2, new UseWaterBucketGoal(this));
         this.goalSelector.addGoal(2, new PlayerNpcProjectileBlockGoal(this));
         this.goalSelector.addGoal(2, new WaterEnderPearlEscapeGoal(this));
-        this.goalSelector.addGoal(2, new RandomCombatJumpGoal(this));
+        if (ModList.get().isLoaded("epicfight")) {
+            this.goalSelector.addGoal(2, new RandomCombatJumpGoal(this));
+        }
         this.goalSelector.addGoal(2, new PlayerNpcRangedBowAttackGoal(this, 1.0D, 20, 18.0F));
         this.goalSelector.addGoal(3, this.gated(new CombatFishingRodGoal(this), PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(3, new ThrowEnderPearlGoal(this));
@@ -2327,12 +2350,20 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public void shortPillarJump() {
-        if (!PlayerNpcAiWorkBudget.hasActiveWorkerSlot(this)) return;
-        if (!this.onGround()) return;
+        // Owning goals/helpers enforce their own work or emergency admission. A physical
+        // jump must also work for an admitted escape that has no routine worker lease.
+        if (this.level().isClientSide() || !this.isAlive() || this.isNoAi()
+                || this.isPassenger() || !this.onGround()) return;
         Vec3 v = this.getDeltaMovement();
         double keepH = 0.02D;
         this.setDeltaMovement(v.x * keepH, PLAYER_LIKE_JUMP_Y, v.z * keepH);
         this.hasImpulse = true;
+    }
+
+    @Override
+    public void setTarget(@Nullable LivingEntity target) {
+        // Cautious avoidance owns threats; target goals must not turn them into retaliation.
+        super.setTarget(this.hasInterest(PlayerNpcInterest.CAUTIOUS) ? null : target);
     }
 
     public boolean hurt(@NotNull DamageSource damageSource, float f) {
@@ -2344,7 +2375,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
 
         boolean hurt = super.hurt(damageSource, f);
-        if (hurt && !this.level().isClientSide() && damageSource.getEntity() instanceof LivingEntity attacker
+        if (hurt && !this.hasInterest(PlayerNpcInterest.CAUTIOUS)
+                && !this.level().isClientSide() && damageSource.getEntity() instanceof LivingEntity attacker
                 && attacker.isAlive()
                 && attacker != this
                 && !this.isAlliedTo(attacker)
@@ -2389,13 +2421,19 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public boolean doHurtTarget(@NotNull Entity target) {
+        if (this.hasInterest(PlayerNpcInterest.CAUTIOUS)) {
+            return false;
+        }
         if (this.isTeamAlliedWith(target)) {
             this.setTarget(null);
             return false;
         }
         this.setCurrentAiState("ai.player_npc.melee_attacking");
-        this.triggerMainHandAttackAnimation();
-        this.triggerBetterCombatAttackAnimation();
+        // Epic Fight calls this damage callback from inside its running attack animation.
+        if (!ModList.get().isLoaded("epicfight")) {
+            this.triggerMainHandAttackAnimation();
+            this.triggerBetterCombatAttackAnimation();
+        }
         boolean hurtTarget = super.doHurtTarget(target);
         if (hurtTarget) {
             this.lastCombatProgressTick = this.tickCount;
@@ -2491,7 +2529,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     public void equipBetterGearFromInventory() {
         boolean changed = false;
         changed |= this.equipBestArmorFromInventory();
-        if (!this.shouldPauseMainHandAutoEquip()) {
+        if (!this.isMainHandReservedForAi()) {
             changed |= this.equipBestMainHandFromInventory();
         }
         if (changed) {
@@ -2499,9 +2537,24 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
     }
 
-    private boolean shouldPauseMainHandAutoEquip() {
+    public boolean isClearingCombatObstruction() {
+        return this.goalSelector.getRunningGoals()
+                .anyMatch(wrapped -> wrapped.getGoal() instanceof BreakTargetObstructionGoal);
+    }
+
+    public boolean isMainHandReservedForAi() {
         String state = this.getCurrentAiState();
         return this.isHealing()
+                || this.goalSelector.getRunningGoals().anyMatch(wrapped -> {
+                    Goal goal = wrapped.getGoal();
+                    if (goal instanceof InterestGatedGoal gatedGoal) {
+                        goal = gatedGoal.getDelegateGoal();
+                    }
+                    return goal instanceof EscapeHoleWithBlockGoal
+                            || goal instanceof BreakTargetObstructionGoal
+                            || goal instanceof UseFlintAndSteelGoal
+                            || goal instanceof LowHealthFleeGoal;
+                })
                 || "ai.player_npc.gathering_materials".equals(state)
                 || "ai.player_npc.gathering_logs".equals(state)
                 || "ai.player_npc.gathering_stone".equals(state)
@@ -2659,7 +2712,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (this.entityData.get(MAIN_HAND_ATTACK_ANIMATION_TICKS) <= 0) {
             this.entityData.set(MAIN_HAND_ATTACK_ANIMATION_TICKS, MAIN_HAND_USE_ANIMATION_DURATION);
         }
-        this.swing(InteractionHand.MAIN_HAND, true);
+        if (!ModList.get().isLoaded("epicfight") || !EpicFight.playMainHandUseAnimation(this)) {
+            this.swing(InteractionHand.MAIN_HAND, true);
+        }
     }
 
     public int getMainHandAttackAnimationTicks() {
@@ -4311,7 +4366,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     private void clearStaleHealingState() {
-        if (!this.healing) {
+        if (!this.isHealing()) {
             return;
         }
 
@@ -4325,7 +4380,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return;
         }
 
-        this.healing = false;
+        this.setHealing(false);
         if (AI_IDLE.equals(this.getCurrentAiState())) {
             this.wakeUpIdleWork();
         }
@@ -4495,7 +4550,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     private boolean isRecentRetaliationTarget(LivingEntity target) {
-        return target != null && target == this.getLastHurtByMob();
+        if (target == null) {
+            return false;
+        }
+        // Vanilla's recent-damage reference can expire before its retaliation goal finishes.
+        // That running goal still owns a legitimate defensive fight, even for non-hunters.
+        return target == this.getLastHurtByMob()
+                || target == this.getTarget() && this.targetSelector.getRunningGoals()
+                .anyMatch(wrapped -> wrapped.getGoal() instanceof HurtByTargetGoal);
     }
 
     public void setChestProtectionTarget(LivingEntity offender) {
