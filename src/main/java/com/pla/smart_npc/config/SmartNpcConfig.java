@@ -9,6 +9,9 @@ public class SmartNpcConfig {
 
     public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
     public static final ForgeConfigSpec SPEC;
+    public static ForgeConfigSpec.BooleanValue REMOTE_NPC_DEPARTURE_ENABLED;
+    public static ForgeConfigSpec.IntValue REMOTE_NPC_DEPARTURE_MIN_MINUTES;
+    public static ForgeConfigSpec.IntValue REMOTE_NPC_DEPARTURE_MAX_MINUTES;
     private static final SpawnConfig DEFAULT_PLAYER_NPC_SPAWN = new SpawnConfig(1, 1, 1);
     private static final int DEFAULT_MAX_NATURAL_PLAYER_NPCS = -1;
 
@@ -24,6 +27,15 @@ public class SmartNpcConfig {
     public static ForgeConfigSpec.ConfigValue<Boolean> PERFORMANCE_MONITOR_ENABLED;
 
     static {
+        BUILDER.push("remoteNpcDeparture");
+        REMOTE_NPC_DEPARTURE_ENABLED = BUILDER.comment("Allow force-ticked NPCs to leave when no external chunk loader covers them.")
+                .define("enabled", true);
+        REMOTE_NPC_DEPARTURE_MIN_MINUTES = BUILDER.comment("Minimum unattended online simulation time in minutes. Counts only while this NPC owns a force ticket.")
+                .defineInRange("minMinutes", 10, 1, 10080);
+        REMOTE_NPC_DEPARTURE_MAX_MINUTES = BUILDER.comment("Maximum unattended time in minutes. External loading resets the timer; reversed bounds are normalized.")
+                .defineInRange("maxMinutes", 30, 1, 10080);
+        BUILDER.pop();
+
         TURN_ON_NPC_CHAT = BUILDER.comment(
                         "Enable Player NPC chat.")
                 .define("turnOnNpcChat", true);
@@ -67,7 +79,7 @@ public class SmartNpcConfig {
         BUILDER.push("performanceMonitor");
         PERFORMANCE_MONITOR_ENABLED = BUILDER.comment(
                         "Enable Smart NPC performance warnings and inspector TPS information.")
-                .define("enabled", true);
+                .define("enabled", false);
         BUILDER.pop();
 
         SPEC = BUILDER.build();

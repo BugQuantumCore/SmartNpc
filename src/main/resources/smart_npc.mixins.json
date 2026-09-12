@@ -3,6 +3,8 @@
   "package": "com.pla.smart_npc.mixin",
   "compatibilityLevel": "JAVA_17",
   "mixins": [
+    "DistanceManagerAccessor",
+    "ServerChunkCacheAccessor",
     "MonsterMixin",
     "BoatMixin",
     "WeaponCapabilityAccessor",
