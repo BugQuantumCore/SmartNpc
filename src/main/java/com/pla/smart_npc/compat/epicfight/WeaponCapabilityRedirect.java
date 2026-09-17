@@ -46,7 +46,7 @@ public final class WeaponCapabilityRedirect {
         }
 
         try {
-            CapabilityItem redirected = preset.apply(sourceItem).build();
+            CapabilityItem redirected = WeaponCapabilityPresetTracking.recordBuilder(preset.apply(sourceItem), preset).build();
             if (redirected == null) {
                 warnMissingPreset(sourceItemId, targetPresetId);
                 return originalCapability;

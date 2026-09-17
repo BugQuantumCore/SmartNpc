@@ -26,7 +26,10 @@ public final class SmartNpcMixinPlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
-        if ("com.pla.smart_npc.mixin.WeaponCapabilityAccessor".equals(mixinClassName)) {
+        if ("com.pla.smart_npc.mixin.WeaponCapabilityAccessor".equals(mixinClassName)
+                || "com.pla.smart_npc.mixin.CapabilityItemBuilderPresetMixin".equals(mixinClassName)
+                || "com.pla.smart_npc.mixin.ItemCapabilityProviderPresetMixin".equals(mixinClassName)
+                || "com.pla.smart_npc.mixin.ItemCapabilityReloadListenerPresetMixin".equals(mixinClassName)) {
             return isModLoadedEarly("epicfight");
         }
         if ("com.pla.smart_npc.mixin.ExecutionHandlerMixin".equals(mixinClassName)) {

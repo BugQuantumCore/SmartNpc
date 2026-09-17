@@ -18,6 +18,7 @@ import yesman.epicfight.world.capabilities.entitypatch.Factions;
 import yesman.epicfight.world.capabilities.entitypatch.MobPatch;
 import yesman.epicfight.world.capabilities.item.CapabilityItem;
 import yesman.epicfight.world.capabilities.item.Style;
+import yesman.epicfight.world.capabilities.item.WeaponCapabilityPresets;
 
 import java.util.List;
 import java.util.EnumSet;
@@ -136,42 +137,48 @@ public class AdvancedPlayerNpcPatch<T extends PathfinderMob> extends AdvancedMob
         return 12;
     }
 
+    //    mixin this method at head for more compat moveset, do not ci.cancel
+    public List<AdditionalAttackGroup> addMoreAttackGroups(CapabilityItem mainHandCap, CapabilityItem offHandCap, Style style) {
+        return super.getAdditionalAttackGroups(mainHandCap, offHandCap, style);
+    }
+
     @Override
     protected List<AdditionalAttackGroup> getAdditionalAttackGroups(CapabilityItem mainHandCap, CapabilityItem offHandCap, Style style) {
-        if (mainHandCap.getWeaponCategory() == CapabilityItem.WeaponCategories.SWORD) {
+        var preset = WeaponCapabilityPresetTracking.getPreset(mainHandCap);
+        if (preset == WeaponCapabilityPresets.SWORD) {
             return style == CapabilityItem.Styles.TWO_HAND
                     ? List.of(AdditionalAttackGroup.random(0.25F, Animations.SWEEPING_EDGE))
                     : List.of(AdditionalAttackGroup.random(0.25F, Animations.DANCING_EDGE)
             );
         }
-        if (mainHandCap.getWeaponCategory() == CapabilityItem.WeaponCategories.AXE) {
+        if (preset == WeaponCapabilityPresets.AXE) {
             return List.of(AdditionalAttackGroup.random(0.25F, Animations.THE_GUILLOTINE));
         }
-        if (mainHandCap.getWeaponCategory() == CapabilityItem.WeaponCategories.SPEAR) {
+        if (preset == WeaponCapabilityPresets.SPEAR) {
             return style == CapabilityItem.Styles.TWO_HAND
                     ? List.of(AdditionalAttackGroup.random(0.25F, Animations.GRASPING_SPIRAL_FIRST, Animations.GRASPING_SPIRAL_SECOND))
                     : List.of(AdditionalAttackGroup.random(0.25F, Animations.HEARTPIERCER)
             );
         }
-        if (mainHandCap.getWeaponCategory() == CapabilityItem.WeaponCategories.GREATSWORD) {
+        if (preset == WeaponCapabilityPresets.GREATSWORD) {
             return List.of(AdditionalAttackGroup.random(0.25F, Animations.STEEL_WHIRLWIND));
         }
-        if (mainHandCap.getWeaponCategory() == CapabilityItem.WeaponCategories.UCHIGATANA) {
+        if (preset == WeaponCapabilityPresets.UCHIGATANA) {
             return List.of(AdditionalAttackGroup.random(0.25F, Animations.BATTOJUTSU, Animations.BATTOJUTSU_DASH));
         }
-        if (mainHandCap.getWeaponCategory() == CapabilityItem.WeaponCategories.LONGSWORD) {
+        if (preset == WeaponCapabilityPresets.LONGSWORD) {
             return List.of(AdditionalAttackGroup.random(0.25F, Animations.SHARP_STAB));
         }
-        if (mainHandCap.getWeaponCategory() == CapabilityItem.WeaponCategories.DAGGER) {
+        if (preset == WeaponCapabilityPresets.DAGGER) {
             return style == CapabilityItem.Styles.TWO_HAND
                     ? List.of(AdditionalAttackGroup.random(0.25F, Animations.BLADE_RUSH_COMBO1, Animations.BLADE_RUSH_COMBO2, Animations.BLADE_RUSH_COMBO3))
                     : List.of(AdditionalAttackGroup.random(0.25F, Animations.EVISCERATE_FIRST, Animations.EVISCERATE_SECOND)
             );
         }
-        if (mainHandCap.getWeaponCategory() == CapabilityItem.WeaponCategories.FIST) {
+        if (preset == WeaponCapabilityPresets.FIST) {
             return List.of(AdditionalAttackGroup.random(0.25F, Animations.RELENTLESS_COMBO));
         }
-        return super.getAdditionalAttackGroups(mainHandCap, offHandCap, style);
+        return addMoreAttackGroups(mainHandCap, offHandCap, style);
     }
 
     @Override
