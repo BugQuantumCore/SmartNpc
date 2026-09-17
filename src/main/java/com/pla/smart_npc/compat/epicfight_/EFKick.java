@@ -1,4 +1,4 @@
-package com.pla.smart_npc.compat.epicfight;
+package com.pla.smart_npc.compat.epicfight_;
 
 import com.pla.efkick.gameasset.EFKickAnimations;
 import net.minecraftforge.fml.ModList;

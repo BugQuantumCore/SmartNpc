@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-only
  * Behavior scheduling concepts adapted from Combat Evolution by ShelMarow.
  */
-package com.pla.smart_npc.compat.epicfight.advancedmobpatch;
+package com.pla.smart_npc.compat.epicfight_.advancedmobpatch;
 
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.damagesource.DamageSource;

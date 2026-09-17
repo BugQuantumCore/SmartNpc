@@ -7,11 +7,7 @@
     "ServerChunkCacheAccessor",
     "MonsterMixin",
     "BoatMixin",
-    "WeaponCapabilityAccessor",
-    "CapabilityItemBuilderPresetMixin",
-    "ItemCapabilityProviderPresetMixin",
-    "ItemCapabilityReloadListenerPresetMixin",
-    "ExecutionHandlerMixin"
+    "MinecartMixin"
   ],
   "client": [
     "CameraMixin",
@@ -21,6 +17,5 @@
     "PlayerRendererMixin"
   ],
   "refmap": "smart_npc.mixins.refmap.json",
-  "minVersion": "0.8",
-  "plugin": "com.pla.smart_npc.mixin.plugin.SmartNpcMixinPlugin"
+  "minVersion": "0.8"
 }

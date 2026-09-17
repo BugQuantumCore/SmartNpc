@@ -52,6 +52,8 @@ minecraft {
 
 sourceSets.main.resources { srcDirs = ['src/main/resources', 'src/generated/resources'] }
 sourceSets.main.java {
+    exclude 'com/pla/smart_npc/compat/epicfight_/**'
+    exclude 'com/pla/smart_npc/mixin/epicfight_/**'
 }
 repositories {
     mavenCentral()
@@ -68,10 +70,6 @@ mixin {
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
-    implementation fg.deobf("curse.maven:epic-fight-mod-405076:8049910")
-    compileOnly fg.deobf("curse.maven:epicfight-kick-skills-1521559:7966307")
-    compileOnly fg.deobf("curse.maven:combat-evolution-1377795:8699861")
-
     compileOnly fg.deobf("curse.maven:cloth-config-348521:5729105")
     compileOnly fg.deobf("curse.maven:playeranimator-658587:4587214")
     compileOnly fg.deobf("curse.maven:better-combat-by-daedelus-639842:7287334")

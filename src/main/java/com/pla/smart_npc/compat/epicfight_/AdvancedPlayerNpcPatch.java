@@ -1,15 +1,14 @@
-package com.pla.smart_npc.compat.epicfight;
+package com.pla.smart_npc.compat.epicfight_;
 
-import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedCombatBehaviors;
-import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedMobPatch;
-import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedAnimationAttackGoal;
-import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedChasingGoal;
+import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedCombatBehaviors;
+import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedMobPatch;
+import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedAnimationAttackGoal;
+import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedChasingGoal;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import net.minecraft.world.entity.PathfinderMob;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.ai.goal.WrappedGoal;
-import net.minecraft.world.InteractionHand;
 import net.minecraftforge.fml.ModList;
 import yesman.epicfight.api.animation.Animator;
 import yesman.epicfight.api.animation.LivingMotions;

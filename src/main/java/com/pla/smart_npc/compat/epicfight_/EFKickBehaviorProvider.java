@@ -1,6 +1,6 @@
-package com.pla.smart_npc.compat.epicfight;
+package com.pla.smart_npc.compat.epicfight_;
 
-import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedCombatBehaviors;
+import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedCombatBehaviors;
 import yesman.epicfight.world.capabilities.entitypatch.MobPatch;
 
 /** Builds EFKick behaviors only when EFKick is loaded. */

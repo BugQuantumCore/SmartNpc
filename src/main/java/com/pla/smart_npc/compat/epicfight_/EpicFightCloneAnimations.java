@@ -1,4 +1,4 @@
-package com.pla.smart_npc.compat.epicfight;
+package com.pla.smart_npc.compat.epicfight_;
 
 import com.pla.smart_npc.SmartNpc;
 import net.minecraftforge.eventbus.api.SubscribeEvent;

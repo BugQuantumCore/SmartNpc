@@ -1,4 +1,4 @@
-package com.pla.smart_npc.compat.epicfight.advancedmobpatch;
+package com.pla.smart_npc.compat.epicfight_.advancedmobpatch;
 
 public enum AdvancedStaminaStatus {
     COMMON,

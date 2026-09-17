@@ -1,6 +1,6 @@
-package com.pla.smart_npc.mixin;
+package com.pla.smart_npc.mixin.epicfight_;
 
-import com.pla.smart_npc.compat.epicfight.WeaponCapabilityPresetTracking;
+import com.pla.smart_npc.compat.epicfight_.WeaponCapabilityPresetTracking;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;

@@ -1,4 +1,4 @@
-package com.pla.smart_npc.compat.epicfight;
+package com.pla.smart_npc.compat.epicfight_;
 
 import com.google.common.collect.MapMaker;
 import net.minecraft.world.item.Item;

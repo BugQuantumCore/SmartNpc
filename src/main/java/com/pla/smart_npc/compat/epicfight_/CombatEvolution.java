@@ -1,6 +1,6 @@
-package com.pla.smart_npc.compat.epicfight;
+package com.pla.smart_npc.compat.epicfight_;
 
-import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedMobPatch;
+import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedMobPatch;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
