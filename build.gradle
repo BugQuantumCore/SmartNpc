@@ -66,9 +66,9 @@ mixin {
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
-    compileOnly fg.deobf("curse.maven:cloth-config-348521:5729105")
-    compileOnly fg.deobf("curse.maven:playeranimator-658587:4587214")
-    compileOnly fg.deobf("curse.maven:better-combat-by-daedelus-639842:7287334")
+    implementation fg.deobf("curse.maven:cloth-config-348521:5729105")
+    implementation fg.deobf("curse.maven:playeranimator-658587:4587214")
+    implementation fg.deobf("curse.maven:better-combat-by-daedelus-639842:7287334")
 
     compileOnly(annotationProcessor("io.github.llamalad7:mixinextras-common:0.5.0"))
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'

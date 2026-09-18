@@ -329,6 +329,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private long selectedDailyJobDay = -1L;
     private ItemStack mainWeaponItem = ItemStack.EMPTY;
     private ItemStack offWeaponItem = ItemStack.EMPTY;
+    private ItemStack temporaryBowPreviousMainHand = ItemStack.EMPTY;
+    private boolean temporaryBowEquipped = false;
     private boolean suppressHeldItemCacheUpdate = false;
     private boolean useBow = true;
     @Nullable
@@ -1505,7 +1507,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public boolean promoteMainWeaponItem(ItemStack stack) {
         if (!this.isCombatMainHandGear(stack)
-                || this.gearScore(stack) <= this.gearScore(this.mainWeaponItem) + 0.05D) {
+                || this.gearScore(stack) <= this.cachedCombatWeaponScore() + 0.05D) {
             return false;
         }
         this.setMainWeaponItem(stack);
@@ -1514,11 +1516,17 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     private boolean promoteMainWeaponItemFromEquip(ItemStack newItem, ItemStack oldItem) {
         if (!this.isCombatMainHandGear(newItem)
-                || this.gearScore(newItem) <= this.gearScore(this.mainWeaponItem) + 0.05D) {
+                || this.gearScore(newItem) <= this.cachedCombatWeaponScore() + 0.05D) {
             return false;
         }
         this.replaceMainWeaponItem(newItem, true, oldItem);
         return true;
+    }
+
+    private double cachedCombatWeaponScore() {
+        return this.isCombatMainHandGear(this.mainWeaponItem)
+                ? this.gearScore(this.mainWeaponItem)
+                : 0.0D;
     }
 
     public void setMainHandItemForAi(ItemStack stack) {
@@ -1528,6 +1536,41 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         } finally {
             this.suppressHeldItemCacheUpdate = false;
         }
+    }
+
+    public boolean equipTemporaryBowFromInventory() {
+        if (this.temporaryBowEquipped || this.getMainHandItem().getItem() instanceof BowItem) {
+            return true;
+        }
+
+        ItemStack bow = this.consumeInventoryItem(stack -> stack.getItem() instanceof BowItem, 1)
+                .orElse(ItemStack.EMPTY);
+        if (bow.isEmpty()) {
+            return false;
+        }
+
+        this.temporaryBowPreviousMainHand = this.getMainHandItem().copy();
+        this.temporaryBowEquipped = true;
+        this.setMainHandItemForAi(bow);
+        return true;
+    }
+
+    public void restoreMainHandAfterTemporaryBow() {
+        if (!this.temporaryBowEquipped) {
+            return;
+        }
+
+        ItemStack temporaryItem = this.getMainHandItem().copy();
+        ItemStack previousMainHand = this.temporaryBowPreviousMainHand.copy();
+        this.temporaryBowPreviousMainHand = ItemStack.EMPTY;
+        this.temporaryBowEquipped = false;
+
+        this.setMainHandItemForAi(previousMainHand);
+        if (!temporaryItem.isEmpty()
+                && !ItemStack.isSameItemSameTags(temporaryItem, previousMainHand)) {
+            this.addOrDropInventoryItem(temporaryItem);
+        }
+        this.setSwapToBowCooldown();
     }
 
     private void replaceMainWeaponItem(ItemStack stack, boolean moveOldToInventory, ItemStack oldEquippedItem) {
@@ -1575,6 +1618,36 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         ItemStack copy = stack.copy();
         if (!InventoryUtils.addItem(this.inventory, copy)) {
             this.spawnAtLocation(copy);
+        }
+    }
+
+    private void repairLegacyRangedMainHandAfterLoad() {
+        ItemStack rangedWeapon = this.getMainHandItem().copy();
+        if (!this.isRangedMainHandGear(rangedWeapon)) {
+            if (this.isCombatMainHandGear(this.getMainHandItem())
+                    && this.isRangedMainHandGear(this.mainWeaponItem)) {
+                this.mainWeaponItem = this.getMainHandItem().copy();
+                this.mainWeaponItem.setCount(1);
+                this.mainWeaponDisarmed = false;
+            }
+            return;
+        }
+
+        if (!this.mainWeaponItem.isEmpty()
+                && !this.isRangedMainHandGear(this.mainWeaponItem)
+                && this.isMainHandGear(this.mainWeaponItem)) {
+            this.setMainHandItemForAi(this.mainWeaponItem);
+            this.addOrDropInventoryItem(rangedWeapon);
+            this.setSwapToBowCooldown();
+            return;
+        }
+
+        if (this.isRangedMainHandGear(this.mainWeaponItem)) {
+            this.mainWeaponItem = ItemStack.EMPTY;
+        }
+        if (this.equipBestMainHandFromInventory()) {
+            this.inventory.setChanged();
+            this.setSwapToBowCooldown();
         }
     }
 
@@ -1725,6 +1798,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             CompoundTag itemTag = new CompoundTag();
             this.offWeaponItem.save(itemTag);
             tag.put("OffHandItem", itemTag);
+        }
+        if (this.temporaryBowEquipped) {
+            tag.putBoolean("TemporaryBowEquipped", true);
+            if (!this.temporaryBowPreviousMainHand.isEmpty()) {
+                CompoundTag itemTag = new CompoundTag();
+                this.temporaryBowPreviousMainHand.save(itemTag);
+                tag.put("TemporaryBowPreviousMainHand", itemTag);
+            }
         }
         if (this.ownedChestPos != null) {
             tag.putInt("OwnedChestX", this.ownedChestPos.getX());
@@ -1896,6 +1977,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         } else {
             this.offWeaponItem = ItemStack.EMPTY;
         }
+        this.temporaryBowEquipped = tag.getBoolean("TemporaryBowEquipped");
+        if (this.temporaryBowEquipped && tag.contains("TemporaryBowPreviousMainHand", Tag.TAG_COMPOUND)) {
+            this.temporaryBowPreviousMainHand = ItemStack.of(tag.getCompound("TemporaryBowPreviousMainHand"));
+        } else {
+            this.temporaryBowPreviousMainHand = ItemStack.EMPTY;
+        }
         if (tag.contains("OwnedChestX", Tag.TAG_INT)
                 && tag.contains("OwnedChestY", Tag.TAG_INT)
                 && tag.contains("OwnedChestZ", Tag.TAG_INT)) {
@@ -1909,6 +1996,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
         PlayerNpcHomeUtil.readHomeFromTag(this, tag);
         this.mainWeaponDisarmed = tag.getBoolean("MainWeaponDisarmed");
+        this.restoreMainHandAfterTemporaryBow();
+        this.repairLegacyRangedMainHandAfterLoad();
         this.materializeCachedMainWeaponAfterLoad();
     }
 
@@ -2534,7 +2623,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public boolean isMainHandReservedForAi() {
         String state = this.getCurrentAiState();
-        return this.isHealing()
+        return this.temporaryBowEquipped
+                || this.isHealing()
                 || this.goalSelector.getRunningGoals().anyMatch(wrapped -> {
                     Goal goal = wrapped.getGoal();
                     if (goal instanceof InterestGatedGoal gatedGoal) {
@@ -2591,7 +2681,9 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     private boolean equipBestMainHandFromInventory() {
         int bestSlot = -1;
-        double bestScore = this.gearScore(this.getMainHandItem());
+        double bestScore = this.isMainHandGear(this.getMainHandItem())
+                ? this.gearScore(this.getMainHandItem())
+                : 0.0D;
         for (int i = 0; i < this.inventory.getContainerSize(); i++) {
             ItemStack stack = this.inventory.getItem(i);
             if (!this.isMainHandGear(stack)) {
@@ -2638,18 +2730,19 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
                 && (stack.getItem() instanceof SwordItem
                 || stack.getItem() instanceof AxeItem
                 || stack.getItem() instanceof TridentItem
-                || stack.getItem() instanceof DiggerItem
-                || stack.getItem() instanceof BowItem
-                || stack.getItem() instanceof CrossbowItem
-                || stack.getItem() instanceof ProjectileWeaponItem);
+                || stack.getItem() instanceof DiggerItem);
     }
 
     private boolean isCombatMainHandGear(ItemStack stack) {
         return !stack.isEmpty()
                 && (stack.getItem() instanceof SwordItem
                 || stack.getItem() instanceof AxeItem
-                || stack.getItem() instanceof TridentItem
-                || stack.getItem() instanceof BowItem
+                || stack.getItem() instanceof TridentItem);
+    }
+
+    private boolean isRangedMainHandGear(ItemStack stack) {
+        return !stack.isEmpty()
+                && (stack.getItem() instanceof BowItem
                 || stack.getItem() instanceof CrossbowItem
                 || stack.getItem() instanceof ProjectileWeaponItem);
     }

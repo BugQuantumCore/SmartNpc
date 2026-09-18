@@ -135,6 +135,7 @@ public class FakePlayer extends PathfinderMob {
             }
             this.setUsername(nextName);
         }
+        this.setLeftHanded(false);
         return result;
     }
 

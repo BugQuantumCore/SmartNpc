@@ -710,7 +710,8 @@ public class EscapeHoleWithBlockGoal extends Goal {
                 || !this.combatTrapProbeThrottle.canCheck(this.playerNpc)
                 || this.countEscapeBlocks() <= 0
                 || !serverLevel.hasChunkAt(target.blockPosition())
-                || !this.canStandAt(serverLevel, feet)) {
+                || !this.canStandAt(serverLevel, feet)
+                || !this.isActuallyTrapped(serverLevel, feet)) {
             return false;
         }
         Path currentPath = this.playerNpc.getNavigation().getPath();

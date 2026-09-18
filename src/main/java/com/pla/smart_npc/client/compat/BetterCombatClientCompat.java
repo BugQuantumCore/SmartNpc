@@ -569,8 +569,12 @@ public final class BetterCombatClientCompat {
         float attackLength = playerStyleAttackCooldownTicks(attackStack);
 
         // Better Combat mutates a copy before handing it to PlayerAnimator:
-        // activity-specific leg channels can be disabled, torso is explicitly
-        // enabled, and Minecraft keeps ownership of head pitch.
+        // activity-specific leg channels can be disabled and torso is explicitly
+        // enabled. A real player also turns its body toward its camera while the
+        // attack is active. PlayerNpcEntity instead uses LookControl to aim its
+        // head independently at its target, so attack-authored head yaw/roll
+        // would overwrite that aim and make the head snap sideways. Keep every
+        // head channel under vanilla/NPC control while animating the rest.
         Object preparedAnimation = prepareAttackAnimation(animation, playerNpc);
 
         boolean mirror = offHandAttack;
@@ -601,9 +605,7 @@ public final class BetterCombatClientCompat {
         Object torso = torsoField.get(builder);
         torso.getClass().getMethod("fullyEnablePart", boolean.class).invoke(torso, true);
 
-        Field headField = builder.getClass().getField("head");
-        Object head = headField.get(builder);
-        setStateEnabled(head, "pitch", false);
+        configureStateCollection(builder, "head", false, false);
 
         return builder.getClass().getMethod("build").invoke(builder);
     }
