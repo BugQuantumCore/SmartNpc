@@ -6,10 +6,12 @@ import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ShieldItem;
 
 import java.util.UUID;
@@ -20,6 +22,34 @@ public final class VanillaMeleeAttackAi {
     private static final int SHIELD_DISABLE_TICKS = 100;
 
     private VanillaMeleeAttackAi() {
+    }
+
+    /** Calculates the player's attack-speed attribute for the held item. */
+    public static double weaponAttackSpeed(ItemStack stack) {
+        final double baseAttackSpeed = 4.0D;
+        double additions = 0.0D;
+        double multiplyBase = 0.0D;
+        double multiplyTotal = 1.0D;
+
+        for (var entry : stack.getAttributeModifiers(EquipmentSlot.MAINHAND).entries()) {
+            if (entry.getKey() != Attributes.ATTACK_SPEED) {
+                continue;
+            }
+            AttributeModifier modifier = entry.getValue();
+            switch (modifier.getOperation()) {
+                case ADDITION -> additions += modifier.getAmount();
+                case MULTIPLY_BASE -> multiplyBase += modifier.getAmount();
+                case MULTIPLY_TOTAL -> multiplyTotal *= 1.0D + modifier.getAmount();
+            }
+        }
+
+        double withAdditions = baseAttackSpeed + additions;
+        return Math.max(0.1D, (withAdditions + withAdditions * multiplyBase) * multiplyTotal);
+    }
+
+    /** Returns the first whole tick on which a player's held-item attack is fully charged. */
+    public static int weaponAttackIntervalTicks(ItemStack stack) {
+        return Math.max(1, (int) Math.ceil(20.0D / weaponAttackSpeed(stack)));
     }
 
     public static boolean attack(PlayerNpcEntity npc, LivingEntity target, boolean critical) {

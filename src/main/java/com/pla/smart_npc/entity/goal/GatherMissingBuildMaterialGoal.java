@@ -6,6 +6,7 @@ import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.entity.ai.ToolAi;
+import com.pla.smart_npc.entity.ai.VanillaMeleeAttackAi;
 import com.pla.smart_npc.entity.ai.WeaponAi;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
 import com.pla.smart_npc.util.PlayerNpcAdaptiveSearchScope;
@@ -44,7 +45,7 @@ public class GatherMissingBuildMaterialGoal extends Goal {
     private static final int TARGET_SCAN_CACHE_TICKS = 20;
     private static final int MAX_GATHER_TICKS = 20 * 45;
     private static final int REPATH_INTERVAL_TICKS = 20;
-    private static final int SHEEP_ATTACK_INTERVAL_TICKS = 14;
+    private static final int UNARMED_SHEEP_ATTACK_INTERVAL_TICKS = 14;
     private static final int SHEEP_ROUTE_CLEAR_TICKS = 28;
     private static final int SHEEP_ROUTE_FAILURES_BEFORE_CLEAR = 2;
     private static final int SHEEP_ROUTE_FAILURES_BEFORE_ESCAPE = 4;
@@ -321,11 +322,18 @@ public class GatherMissingBuildMaterialGoal extends Goal {
         }
 
         this.playerNpc.getNavigation().stop();
-        if (this.attackTicks++ % SHEEP_ATTACK_INTERVAL_TICKS == 0) {
-            this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
-            this.playerNpc.triggerMainHandAttackAnimation();
-            this.playerNpc.doHurtTarget(this.sheepTarget);
+        if (this.attackTicks > 0) {
+            this.attackTicks--;
+            return;
         }
+
+        this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
+        this.playerNpc.triggerMainHandAttackAnimation();
+        this.playerNpc.doHurtTarget(this.sheepTarget);
+        int interval = this.playerNpc.getMainHandItem().isEmpty()
+                ? UNARMED_SHEEP_ATTACK_INTERVAL_TICKS
+                : VanillaMeleeAttackAi.weaponAttackIntervalTicks(this.playerNpc.getMainHandItem());
+        this.attackTicks = Math.max(0, interval - 1);
     }
 
     private boolean tickSheepRouteClear(ServerLevel serverLevel) {

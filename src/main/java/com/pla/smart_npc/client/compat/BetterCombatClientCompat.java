@@ -5,13 +5,11 @@ import com.mojang.math.Axis;
 import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.compat.BetterCombatCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
+import com.pla.smart_npc.entity.ai.VanillaMeleeAttackAi;
 import net.minecraft.client.model.PlayerModel;
 import net.minecraft.client.model.geom.ModelPart;
-import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.entity.Pose;
-import net.minecraft.world.entity.ai.attributes.AttributeModifier;
-import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ShieldItem;
@@ -718,31 +716,7 @@ public final class BetterCombatClientCompat {
      * attack-speed calculation (base 4.0 + held-item MAINHAND modifiers).
      */
     private static float playerStyleAttackCooldownTicks(ItemStack stack) {
-        double base = 4.0D;
-        double additions = 0.0D;
-        double multiplyBase = 0.0D;
-        List<Double> multiplyTotal = new ArrayList<>();
-
-        for (var entry : stack.getAttributeModifiers(EquipmentSlot.MAINHAND).entries()) {
-            if (entry.getKey() != Attributes.ATTACK_SPEED) {
-                continue;
-            }
-            AttributeModifier modifier = entry.getValue();
-            switch (modifier.getOperation()) {
-                case ADDITION -> additions += modifier.getAmount();
-                case MULTIPLY_BASE -> multiplyBase += modifier.getAmount();
-                case MULTIPLY_TOTAL -> multiplyTotal.add(modifier.getAmount());
-            }
-        }
-
-        double withAdditions = base + additions;
-        double attackSpeed = withAdditions + withAdditions * multiplyBase;
-        for (double multiplier : multiplyTotal) {
-            attackSpeed *= 1.0D + multiplier;
-        }
-        attackSpeed = Math.max(0.1D, attackSpeed);
-
-        float cooldown = (float) (20.0D / attackSpeed);
+        float cooldown = (float) (20.0D / VanillaMeleeAttackAi.weaponAttackSpeed(stack));
         return Math.max(betterCombatAttackIntervalCap(), cooldown);
     }
 

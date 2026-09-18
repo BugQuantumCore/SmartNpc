@@ -128,16 +128,26 @@ public final class PlayerNpcMeleeAttackGoal extends Goal {
     private void swing(LivingEntity target, boolean critical) {
         this.npc.swing(InteractionHand.MAIN_HAND, true);
         VanillaMeleeAttackAi.attack(this.npc, target, critical);
-        if (this.burstSwings == 0 && this.npc.getRandom().nextFloat() < 0.30F) {
-            this.burstSwings = 2 + this.npc.getRandom().nextInt(3);
-        }
-        boolean fast = this.burstSwings > 0;
-        int interval = fast ? 3 + this.npc.getRandom().nextInt(4) : 8 + this.npc.getRandom().nextInt(9);
-        if (fast) {
-            this.burstSwings--;
+        boolean fastFistAttack = false;
+        int interval;
+        if (this.npc.getMainHandItem().isEmpty()) {
+            if (this.burstSwings == 0 && this.npc.getRandom().nextFloat() < 0.30F) {
+                this.burstSwings = 2 + this.npc.getRandom().nextInt(3);
+            }
+            fastFistAttack = this.burstSwings > 0;
+            interval = fastFistAttack
+                    ? 3 + this.npc.getRandom().nextInt(4)
+                    : 8 + this.npc.getRandom().nextInt(9);
+            if (fastFistAttack) {
+                this.burstSwings--;
+            }
+        } else {
+            this.burstSwings = 0;
+            interval = VanillaMeleeAttackAi.weaponAttackIntervalTicks(this.npc.getMainHandItem());
         }
         this.nextAttackTick = this.npc.tickCount + interval;
-        this.npc.setCurrentAiDetail(critical ? "critical hit" : fast ? "fast melee swings" : "melee attacking");
+        this.npc.setCurrentAiDetail(
+                critical ? "critical hit" : fastFistAttack ? "fast unarmed swings" : "melee attacking");
     }
 
     private void updatePursuit(LivingEntity target, boolean inReach) {
