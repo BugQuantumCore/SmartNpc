@@ -26,10 +26,10 @@ public final class SmartNpcMixinPlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
-        if ("com.pla.smart_npc.mixin.epicfight.*".equals(mixinClassName)) {
+        if (mixinClassName.startsWith("com.pla.smart_npc.mixin.epicfight.")) {
             return isModLoadedEarly("epicfight");
         }
-        if ("com.pla.smart_npc.mixin.combat_evolution.*".equals(mixinClassName)) {
+        if (mixinClassName.startsWith("com.pla.smart_npc.mixin.combat_evolution.")) {
             return isModLoadedEarly("combat_evolution");
         }
         return true;
