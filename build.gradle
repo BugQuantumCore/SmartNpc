@@ -51,6 +51,10 @@ minecraft {
 }
 
 sourceSets.main.resources { srcDirs = ['src/main/resources', 'src/generated/resources'] }
+sourceSets.main.java {
+    exclude 'com/pla/smart_npc/compat/epicfight_/**'
+    exclude 'com/pla/smart_npc/mixin/epicfight_/**'
+}
 repositories {
     mavenCentral()
     maven {

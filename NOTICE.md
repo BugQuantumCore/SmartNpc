@@ -17,3 +17,9 @@ Credit to the Player Mob mod for the player skin fetching approach used as a ref
 
 - Player Mob repository: https://github.com/GoryMoon/PlayerMobs
 - Owner: GoryMoon
+
+### Combat Evolution
+
+Custom EpicFight mobpatch that having builder root design. The mod distributed under GPLv3
+- Source code: https://www.curseforge.com/minecraft/mc-mods/combat-evolution
+- Owner: ShelMarow
