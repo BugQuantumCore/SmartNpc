@@ -403,8 +403,7 @@ public final class PlayerNpcNaturalSpawnCap {
             this.lastPolicyEvaluationTick = serverTick;
 
             if (!PlayerNpcPerformanceMonitor.hasStableRollingSample()) {
-                boolean monitorEnabled = SmartNpcConfig.PERFORMANCE_MONITOR_ENABLED.get();
-                if (!monitorEnabled || !this.hasSeenStableSample) {
+                if (!this.hasSeenStableSample) {
                     this.effectiveLimit = Math.min(
                             this.effectiveLimit,
                             Math.min(STARTUP_AUTO_CAP, this.explorationLimit)
@@ -419,9 +418,7 @@ public final class PlayerNpcNaturalSpawnCap {
                 this.lastAdvisoryForecastLimit = 0;
                 this.healthyEvaluationsRequired = NORMAL_EVALUATIONS_BEFORE_GROWTH;
                 this.probeMode = "warming";
-                this.reason = !monitorEnabled
-                        ? "monitor_off_safe_floor"
-                        : this.hasSeenStableSample ? "sample_warmup_hold" : "warming_up";
+                this.reason = this.hasSeenStableSample ? "sample_warmup_hold" : "warming_up";
                 return;
             }
 

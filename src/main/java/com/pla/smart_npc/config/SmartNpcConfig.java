@@ -78,7 +78,7 @@ public class SmartNpcConfig {
 
         BUILDER.push("performanceMonitor");
         PERFORMANCE_MONITOR_ENABLED = BUILDER.comment(
-                        "Enable Smart NPC performance warnings and inspector TPS information.")
+                        "Enable Smart NPC TPS warnings. TPS sampling, inspector data, and automatic resource controls remain active.")
                 .define("enabled", false);
         BUILDER.pop();
 

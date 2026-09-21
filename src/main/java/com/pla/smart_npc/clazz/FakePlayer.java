@@ -127,13 +127,9 @@ public class FakePlayer extends PathfinderMob {
     @Override
     public @Nullable SpawnGroupData finalizeSpawn(@NotNull ServerLevelAccessor level, @NotNull DifficultyInstance difficulty, @NotNull MobSpawnType spawnType, @Nullable SpawnGroupData groupData, @Nullable CompoundTag tag) {
         SpawnGroupData result = super.finalizeSpawn(level, difficulty, spawnType, groupData, tag);
-        if (!this.hasUsername()) {
-            FakePlayerName nextName = nextConfiguredName(level.getRandom(), level.getLevel().getServer());
-            if (nextName == null) {
-                this.discard();
-                return result;
-            }
-            this.setUsername(nextName);
+        MinecraftServer server = level.getLevel().getServer();
+        if ((server == null || server.isSameThread()) && !this.ensureConfiguredUsername()) {
+            return result;
         }
         this.setLeftHanded(false);
         return result;
@@ -156,13 +152,6 @@ public class FakePlayer extends PathfinderMob {
         String username = tag.getString("Username");
         if (!StringUtil.isNullOrEmpty(username)) {
             this.setUsername(username);
-        } else if (!this.level().isClientSide()) {
-            FakePlayerName nextName = nextConfiguredName(this.getRandom(), this.level().getServer());
-            if (nextName == null) {
-                this.discard();
-            } else {
-                this.setUsername(nextName);
-            }
         }
         if (tag.contains("Profile", CompoundTag.TAG_COMPOUND)) {
             this.profile = NbtUtils.readGameProfile(tag.getCompound("Profile"));
@@ -195,9 +184,9 @@ public class FakePlayer extends PathfinderMob {
 
     public FakePlayerName getUsername() {
         if (!this.hasUsername() && !this.level().isClientSide()) {
-            FakePlayerName nextName = nextConfiguredName(this.getRandom(), this.level().getServer());
-            if (nextName != null) {
-                this.setUsername(nextName);
+            MinecraftServer server = this.level().getServer();
+            if (server == null || server.isSameThread()) {
+                this.ensureConfiguredUsername();
             }
         }
         String usernameValue = this.entityData.get(NAME);
@@ -212,6 +201,24 @@ public class FakePlayer extends PathfinderMob {
         return this.cachedUsername;
     }
 
+    /** Assigns a configured identity without allowing persistent server state onto chunk workers. */
+    protected boolean ensureConfiguredUsername() {
+        if (this.hasUsername()) {
+            return true;
+        }
+        FakePlayerName nextName = nextConfiguredName(this.getRandom(), this.level().getServer());
+        if (nextName == null) {
+            this.discard();
+            return false;
+        }
+        this.setUsername(nextName);
+        return true;
+    }
+
+    public static boolean hasConfiguredNames() {
+        return !configuredNames().isEmpty();
+    }
+
     public void setUsername(String username) {
         this.setUsername(new FakePlayerName(username));
     }
@@ -219,6 +226,10 @@ public class FakePlayer extends PathfinderMob {
     public void setUsername(FakePlayerName username) {
         FakePlayerName newName = username;
         if (newName == null || newName.isInvalid()) {
+            MinecraftServer server = this.level().getServer();
+            if (server != null && !server.isSameThread()) {
+                return;
+            }
             newName = nextConfiguredName(this.getRandom(), this.level().getServer());
             if (newName == null) {
                 return;
