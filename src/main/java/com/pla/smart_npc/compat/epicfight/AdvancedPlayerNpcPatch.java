@@ -1,9 +1,9 @@
-package com.pla.smart_npc.compat.epicfight_;
+package com.pla.smart_npc.compat.epicfight;
 
-import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedCombatBehaviors;
-import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedMobPatch;
-import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedAnimationAttackGoal;
-import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedChasingGoal;
+import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedCombatBehaviors;
+import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedMobPatch;
+import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedAnimationAttackGoal;
+import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedChasingGoal;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import net.minecraft.world.entity.PathfinderMob;
@@ -120,10 +120,6 @@ public class AdvancedPlayerNpcPatch<T extends PathfinderMob> extends AdvancedMob
                                                 .animationBehavior(Animations.BIPED_ROLL_BACKWARD, 0.0F)
                                 )
                 );
-
-        if (ModList.get().isLoaded("efkick")) {
-            EFKickBehaviorProvider.addTo(builder);
-        }
     }
 
     @Override

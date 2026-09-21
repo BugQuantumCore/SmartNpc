@@ -1,4 +1,4 @@
-package com.pla.smart_npc.mixin.epicfight_;
+package com.pla.smart_npc.mixin.epicfight;
 
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;

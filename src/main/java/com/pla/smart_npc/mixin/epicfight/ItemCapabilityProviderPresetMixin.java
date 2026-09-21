@@ -1,8 +1,8 @@
-package com.pla.smart_npc.mixin.epicfight_;
+package com.pla.smart_npc.mixin.epicfight;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
-import com.pla.smart_npc.compat.epicfight_.WeaponCapabilityPresetTracking;
+import com.pla.smart_npc.compat.epicfight.WeaponCapabilityPresetTracking;
 import net.minecraft.world.item.Item;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;

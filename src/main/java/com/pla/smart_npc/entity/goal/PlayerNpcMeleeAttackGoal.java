@@ -11,6 +11,7 @@ import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.player.Player;
+import net.minecraftforge.fml.ModList;
 
 import java.util.EnumSet;
 
@@ -33,7 +34,7 @@ public final class PlayerNpcMeleeAttackGoal extends Goal {
     @Override
     public boolean canUse() {
         LivingEntity target = this.npc.getTarget();
-        return !this.npc.level().isClientSide()
+        return !ModList.get().isLoaded("epicfight") && !this.npc.level().isClientSide()
                 && this.npc.isAlive() && !this.npc.isNoAi() && !this.npc.isPassenger()
                 && !this.npc.isHealing() && !this.npc.isUsingItem() && !this.npc.isSleeping()
                 && !this.npc.hasInterest(PlayerNpcInterest.CAUTIOUS)

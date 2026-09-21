@@ -1,6 +1,6 @@
-package com.pla.smart_npc.compat.epicfight_;
+package com.pla.smart_npc.compat.epicfight;
 
-import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedCombatBehaviors;
+import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedCombatBehaviors;
 import yesman.epicfight.gameasset.Animations;
 import yesman.epicfight.world.capabilities.entitypatch.MobPatch;
 

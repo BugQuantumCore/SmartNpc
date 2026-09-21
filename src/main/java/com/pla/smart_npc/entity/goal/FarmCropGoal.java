@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.compat.epicfight.EpicFight;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.ClearBlockAi;
@@ -28,6 +29,7 @@ import net.minecraft.world.level.block.FenceBlock;
 import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Path;
+import net.minecraftforge.fml.ModList;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -367,7 +369,9 @@ public final class FarmCropGoal extends Goal {
         this.breakingBlockAi.stop();
         this.toolAi.restoreMainHand();
         this.restoreActionItem();
-        // Epic Fight compatibility is disabled.
+        if (this.playerNpc.isEpicFightDigging()) {
+            if (ModList.get().isLoaded("epicfight")) EpicFight.stopDiggingAnimation(this.playerNpc);
+        }
         this.playerNpc.getNavigation().stop();
         if (!this.playerNpc.level().isClientSide) {
             int cooldown = this.completedAction
@@ -822,7 +826,7 @@ public final class FarmCropGoal extends Goal {
         }
         this.clearBlockAi.stop();
         this.breakingBlockAi.stop();
-        // Epic Fight compatibility is disabled.
+        if (ModList.get().isLoaded("epicfight")) EpicFight.stopDiggingAnimation(this.playerNpc);
         this.restoreActionItem();
         this.action = Action.CLEAR_ENTRANCE;
         this.targetPos = obstruction;

@@ -52,8 +52,6 @@ minecraft {
 
 sourceSets.main.resources { srcDirs = ['src/main/resources', 'src/generated/resources'] }
 sourceSets.main.java {
-    exclude 'com/pla/smart_npc/compat/epicfight_/**'
-    exclude 'com/pla/smart_npc/mixin/epicfight_/**'
 }
 repositories {
     mavenCentral()
@@ -70,9 +68,13 @@ mixin {
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
-    implementation fg.deobf("curse.maven:cloth-config-348521:5729105")
-    implementation fg.deobf("curse.maven:playeranimator-658587:4587214")
-    implementation fg.deobf("curse.maven:better-combat-by-daedelus-639842:7287334")
+
+    implementation fg.deobf("curse.maven:epic-fight-mod-405076:8049910")
+    compileOnly fg.deobf("curse.maven:combat-evolution-1377795:8699861")
+
+    compileOnly fg.deobf("curse.maven:cloth-config-348521:5729105")
+    compileOnly fg.deobf("curse.maven:playeranimator-658587:4587214")
+    compileOnly fg.deobf("curse.maven:better-combat-by-daedelus-639842:7287334")
 
     compileOnly(annotationProcessor("io.github.llamalad7:mixinextras-common:0.5.0"))
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'

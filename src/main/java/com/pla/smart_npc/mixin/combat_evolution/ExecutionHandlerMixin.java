@@ -1,6 +1,6 @@
-package com.pla.smart_npc.mixin.epicfight_;
+package com.pla.smart_npc.mixin.combat_evolution;
 
-import com.pla.smart_npc.compat.epicfight_.advancedmobpatch.AdvancedMobPatch;
+import com.pla.smart_npc.compat.epicfight.advancedmobpatch.AdvancedMobPatch;
 import net.shelmarow.combat_evolution.execution.ExecutionHandler;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;

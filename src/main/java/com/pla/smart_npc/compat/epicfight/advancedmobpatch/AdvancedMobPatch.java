@@ -1,7 +1,7 @@
-package com.pla.smart_npc.compat.epicfight_.advancedmobpatch;
+package com.pla.smart_npc.compat.epicfight.advancedmobpatch;
 
-import com.pla.smart_npc.compat.epicfight_.WeaponCapabilityRedirect;
-import com.pla.smart_npc.mixin.epicfight_.WeaponCapabilityAccessor;
+import com.pla.smart_npc.compat.epicfight.WeaponCapabilityRedirect;
+import com.pla.smart_npc.mixin.epicfight.WeaponCapabilityAccessor;
 import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;

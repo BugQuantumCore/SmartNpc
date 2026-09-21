@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.ai.CautiousThreatAi;
+import com.pla.smart_npc.compat.epicfight.EpicFight;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.core.BlockPos;
@@ -29,6 +30,7 @@ import net.minecraft.world.item.SwordItem;
 import net.minecraft.world.item.TridentItem;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.fml.ModList;
 
 import java.util.EnumSet;
 
@@ -122,7 +124,9 @@ public class EatHealingFoodGoal extends Goal {
         this.playerNpc.setCurrentAiState("ai.player_npc.eating");
         this.playerNpc.setMainHandItemForAi(this.foodStack);
         this.playerNpc.startUsingItem(InteractionHand.MAIN_HAND);
-        // Epic Fight compatibility is disabled.
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.playEatingAnimation(this.playerNpc);
+        }
         this.updateEatingMovement();
     }
 
@@ -133,7 +137,9 @@ public class EatHealingFoodGoal extends Goal {
         }
         boolean shouldApplyCooldown = this.usingTemporaryFood || this.finishedEating;
         this.playerNpc.stopUsingItem();
-        // Epic Fight compatibility is disabled.
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.stopEatingAnimation(this.playerNpc);
+        }
         if (this.usingTemporaryFood) {
             ItemStack currentMainHand = this.playerNpc.getMainHandItem().copy();
             if (!this.finishedEating && this.isSameFood(currentMainHand)) {
@@ -172,7 +178,9 @@ public class EatHealingFoodGoal extends Goal {
             this.stop();
             return;
         }
-        // Epic Fight compatibility is disabled.
+        if (ModList.get().isLoaded("epicfight")) {
+            EpicFight.keepEatingAnimation(this.playerNpc);
+        }
 
         if (this.eatTicks % 8 == 0) {
             this.playerNpc.level().playSound(null, this.playerNpc.blockPosition(), SoundEvents.GENERIC_EAT, SoundSource.HOSTILE, 0.8F, 1.0F);

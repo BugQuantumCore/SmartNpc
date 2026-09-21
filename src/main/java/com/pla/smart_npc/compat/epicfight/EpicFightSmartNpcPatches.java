@@ -1,4 +1,4 @@
-package com.pla.smart_npc.compat.epicfight_;
+package com.pla.smart_npc.compat.epicfight;
 
 import com.pla.smart_npc.init.SmartNpcModEntities;
 import net.minecraftforge.event.entity.EntityAttributeModificationEvent;
