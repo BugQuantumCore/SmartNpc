@@ -4,6 +4,7 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PathNavigationAi;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
+import com.pla.smart_npc.util.PlayerNpcTeamUpManager;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.ai.goal.WaterAvoidingRandomStrollGoal;
@@ -111,7 +112,7 @@ public final class AiBudgetWaitingStrollGoal extends WaterAvoidingRandomStrollGo
 
     private boolean canWaitStroll() {
         return this.playerNpc.level() instanceof ServerLevel
-                && !this.playerNpc.isTeamFollower()
+                && !PlayerNpcTeamUpManager.shouldSuspendRoutineWork(this.playerNpc)
                 && !this.playerNpc.isTeamUpRequestPending()
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()
@@ -126,7 +127,7 @@ public final class AiBudgetWaitingStrollGoal extends WaterAvoidingRandomStrollGo
 
     private boolean canContinueStroll() {
         return this.playerNpc.level() instanceof ServerLevel
-                && !this.playerNpc.isTeamFollower()
+                && !PlayerNpcTeamUpManager.shouldSuspendRoutineWork(this.playerNpc)
                 && !this.playerNpc.isTeamUpRequestPending()
                 && this.playerNpc.isAlive()
                 && !this.playerNpc.isNoAi()

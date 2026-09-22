@@ -19,6 +19,7 @@ import java.util.UUID;
 /** Server-side invitation, merge, defense, and persisted team relationship support. */
 public final class PlayerNpcTeamUpManager {
     public static final double INVITE_RADIUS = 12.0D;
+    public static final double FOLLOW_RANGE = 30.0D;
     private static final double ALLY_DEFENSE_RADIUS = 36.0D;
     private static final int MAX_ALLY_DEFENDERS = 12;
     private static final int DEFENSE_ALERT_COOLDOWN_TICKS = 10;
@@ -203,16 +204,46 @@ public final class PlayerNpcTeamUpManager {
         return findNpc(server, leaderUuid);
     }
 
-    public static void alertAlliesOfPlayerAttack(PlayerNpcEntity victim, ServerPlayer attacker) {
+    /** Returns the live leader only while TEAMUP should own the follower's activity. */
+    @Nullable
+    public static LivingEntity resolveNearbyLeader(PlayerNpcEntity follower) {
+        LivingEntity leader = resolveLeader(follower);
+        return isLeaderWithinFollowRange(follower, leader) ? leader : null;
+    }
+
+    public static boolean isLeaderWithinFollowRange(PlayerNpcEntity follower, @Nullable LivingEntity leader) {
+        return follower != null
+                && follower.isTeamFollower()
+                && leader != null
+                && leader.isAlive()
+                && !leader.isRemoved()
+                && leader.level() == follower.level()
+                && follower.distanceToSqr(leader) <= FOLLOW_RANGE * FOLLOW_RANGE;
+    }
+
+    /**
+     * Membership persists when the leader is away, but work is suspended only while that leader
+     * is live, in the same dimension, and within the explicit follow range.
+     */
+    public static boolean shouldSuspendRoutineWork(PlayerNpcEntity follower) {
+        return follower != null && resolveNearbyLeader(follower) != null;
+    }
+
+    public static void alertAlliesOfAttack(LivingEntity victim, LivingEntity attacker) {
         if (!(victim.level() instanceof ServerLevel serverLevel)
-                || !victim.isTeamMember()
-                || victim.isTeamAlliedWith(attacker)
+                || attacker == victim
+                || attacker.level() != victim.level()
+                || areTeamAllies(victim, attacker)
                 || !attacker.isAlive()
-                || attacker.isCreative()
-                || attacker.isSpectator()) {
+                || attacker instanceof ServerPlayer player && (player.isCreative() || player.isSpectator())) {
             return;
         }
-        UUID teamId = victim.getTeamId();
+
+        UUID teamId = victim instanceof PlayerNpcEntity victimNpc && victimNpc.isTeamMember()
+                ? victimNpc.getTeamId()
+                : victim instanceof ServerPlayer playerVictim
+                ? getPlayerLeaderTeamId(serverLevel, playerVictim)
+                : null;
         long now = serverLevel.getGameTime();
         if (teamId == null || NEXT_DEFENSE_ALERT_TICK.getOrDefault(teamId, 0L) > now) {
             return;
@@ -220,22 +251,25 @@ public final class PlayerNpcTeamUpManager {
         NEXT_DEFENSE_ALERT_TICK.put(teamId, now + DEFENSE_ALERT_COOLDOWN_TICKS);
 
         AABB area = victim.getBoundingBox().inflate(ALLY_DEFENSE_RADIUS, 12.0D, ALLY_DEFENSE_RADIUS);
+        var nearbyNpcs = serverLevel.getEntitiesOfClass(PlayerNpcEntity.class, area, PlayerNpcEntity::isTeamMember);
         int defenders = 0;
-        for (PlayerNpcEntity ally : serverLevel.getEntitiesOfClass(
-                PlayerNpcEntity.class,
-                area,
-                npc -> npc != victim && teamId.equals(npc.getTeamId())
-        )) {
+        for (PlayerNpcEntity ally : nearbyNpcs) {
             if (defenders >= MAX_ALLY_DEFENDERS) {
                 break;
             }
-            if (!ally.isAlive()
+            if (ally == victim
+                    || !teamId.equals(ally.getTeamId())
+                    || !ally.isAlive()
                     || ally.isNoAi()
                     || ally.isHealing()
-                    || ally.getTarget() != null
                     || ally.isTeamAlliedWith(attacker)
                     || !ally.canAttack(attacker)
-                    || !ally.shouldSmartNpcAttackTarget(attacker)) {
+                    || attacker.isAlliedTo(ally)) {
+                continue;
+            }
+            LivingEntity currentTarget = ally.getTarget();
+            if (currentTarget != null && currentTarget.isAlive()
+                    && !ally.isTeamAlliedWith(currentTarget)) {
                 continue;
             }
             ally.interruptRoutineWork();
@@ -245,6 +279,13 @@ public final class PlayerNpcTeamUpManager {
             ally.setCurrentAiDetail("defending " + victim.getDisplayName().getString());
             defenders++;
         }
+    }
+
+    @Nullable
+    private static UUID getPlayerLeaderTeamId(ServerLevel serverLevel, ServerPlayer player) {
+        PlayerNpcTeamData.PlayerTeam team = PlayerNpcTeamData.get(serverLevel.getServer())
+                .getPlayerTeam(player.getUUID());
+        return team == null ? null : team.teamId();
     }
 
     public static void onNpcDeath(PlayerNpcEntity npc) {

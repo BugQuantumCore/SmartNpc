@@ -4,7 +4,7 @@ import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.util.PlayerNpcTeamUpManager;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.event.ServerChatEvent;
 import net.minecraftforge.event.entity.living.LivingAttackEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
@@ -30,14 +30,12 @@ public final class PlayerNpcTeamUpEvent {
             return;
         }
         Entity attacker = event.getSource().getEntity();
-        if ((event.getEntity() instanceof Player || attacker instanceof Player)
-                && PlayerNpcTeamUpManager.areTeamAllies(event.getEntity(), attacker)) {
+        if (PlayerNpcTeamUpManager.areTeamAllies(event.getEntity(), attacker)) {
             event.setCanceled(true);
             return;
         }
-        if (event.getEntity() instanceof com.pla.smart_npc.entity.PlayerNpcEntity victim
-                && attacker instanceof ServerPlayer attackingPlayer) {
-            PlayerNpcTeamUpManager.alertAlliesOfPlayerAttack(victim, attackingPlayer);
+        if (attacker instanceof LivingEntity livingAttacker) {
+            PlayerNpcTeamUpManager.alertAlliesOfAttack(event.getEntity(), livingAttacker);
         }
     }
 

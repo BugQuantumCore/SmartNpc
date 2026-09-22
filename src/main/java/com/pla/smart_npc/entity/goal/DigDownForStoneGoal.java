@@ -32,7 +32,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-public class DigDownForStoneGoal extends Goal {
+public class DigDownForStoneGoal extends Goal implements GatheringGoal {
     private static final int MIN_HOME_DISTANCE = 18;
     private static final int DIG_SITE_MIN_RADIUS = 10;
     private static final int DIG_SITE_MAX_RADIUS = 24;

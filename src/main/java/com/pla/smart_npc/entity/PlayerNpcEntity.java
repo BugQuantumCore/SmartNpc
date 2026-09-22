@@ -44,6 +44,7 @@ import com.pla.smart_npc.entity.goal.FarmSetupGoal;
 import com.pla.smart_npc.entity.goal.FarmStrollGoal;
 import com.pla.smart_npc.entity.goal.GatherMissingBuildMaterialGoal;
 import com.pla.smart_npc.entity.goal.GatherLogsGoal;
+import com.pla.smart_npc.entity.goal.GatheringGoal;
 import com.pla.smart_npc.entity.goal.GatherStoneGoal;
 import com.pla.smart_npc.entity.goal.IronGolemTrollGoal;
 import com.pla.smart_npc.entity.goal.InterestGatedGoal;
@@ -829,7 +830,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public boolean isDailyJobActive(PlayerNpcInterest interest) {
-        if (this.isTeamFollower()
+        if (PlayerNpcTeamUpManager.shouldSuspendRoutineWork(this)
                 || interest == null || !interest.isJob() || !this.hasInterest(interest)) {
             return false;
         }
@@ -2683,6 +2684,28 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     public boolean isClearingCombatObstruction() {
         return this.goalSelector.getRunningGoals()
                 .anyMatch(wrapped -> wrapped.getGoal() instanceof BreakTargetObstructionGoal);
+    }
+
+    /**
+     * True while a scheduled resource-gathering job owns this NPC. These jobs deliberately enter
+     * holes, mines, tree canopies, and build-material sites, so generic trap recovery must yield
+     * until their normal stop/cleanup path releases movement.
+     */
+    public boolean isGatheringJobRunning() {
+        return this.goalSelector.getRunningGoals()
+                .map(WrappedGoal::getGoal)
+                .map(PlayerNpcEntity::unwrapGoal)
+                .anyMatch(GatheringGoal.class::isInstance);
+    }
+
+    private static Goal unwrapGoal(Goal goal) {
+        if (goal instanceof StartupWorkGatedGoal startupWorkGatedGoal) {
+            return unwrapGoal(startupWorkGatedGoal.getDelegateGoal());
+        }
+        if (goal instanceof InterestGatedGoal interestGatedGoal) {
+            return unwrapGoal(interestGatedGoal.getDelegateGoal());
+        }
+        return goal;
     }
 
     public boolean isMainHandReservedForAi() {

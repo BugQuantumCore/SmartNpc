@@ -51,7 +51,7 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.function.Predicate;
 
-public class GatherLogsGoal extends Goal {
+public class GatherLogsGoal extends Goal implements GatheringGoal {
     private static final Set<PlayerNpcEntity> ACTIVE_LOG_GATHERERS = Collections.newSetFromMap(new WeakHashMap<>());
     private static final int TREE_SEARCH_RADIUS = 6;
     private static final int NEARBY_LOG_TARGET_SEARCH_RADIUS = 16;

@@ -3,6 +3,7 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import com.pla.smart_npc.util.PlayerNpcPerformanceMonitor;
+import com.pla.smart_npc.util.PlayerNpcTeamUpManager;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.ai.goal.Goal;
 
@@ -44,7 +45,8 @@ public final class StartupWorkGatedGoal extends Goal {
 
     @Override
     public boolean canUse() {
-        if ((this.playerNpc.isTeamFollower() || this.playerNpc.isTeamUpRequestPending())
+        if ((PlayerNpcTeamUpManager.shouldSuspendRoutineWork(this.playerNpc)
+                || this.playerNpc.isTeamUpRequestPending())
                 || !this.isStartupGraceComplete()
                 || !PlayerNpcAiWorkBudget.canStartWork(
                 this.playerNpc,
@@ -70,7 +72,8 @@ public final class StartupWorkGatedGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
-        if ((this.playerNpc.isTeamFollower() || this.playerNpc.isTeamUpRequestPending())
+        if ((PlayerNpcTeamUpManager.shouldSuspendRoutineWork(this.playerNpc)
+                || this.playerNpc.isTeamUpRequestPending())
                 || !this.isStartupGraceComplete()
                 || !PlayerNpcAiWorkBudget.canContinueWork(this.playerNpc)) {
             return false;
@@ -95,7 +98,8 @@ public final class StartupWorkGatedGoal extends Goal {
 
     @Override
     public void start() {
-        if (this.playerNpc.isTeamFollower() || this.playerNpc.isTeamUpRequestPending()) {
+        if (PlayerNpcTeamUpManager.shouldSuspendRoutineWork(this.playerNpc)
+                || this.playerNpc.isTeamUpRequestPending()) {
             return;
         }
         PlayerNpcAiWorkBudget.onWorkStarted(this.playerNpc);
@@ -122,7 +126,8 @@ public final class StartupWorkGatedGoal extends Goal {
     public void tick() {
         // Membership can change after GoalSelector's continuation check. Do not let a stale
         // running wrapper perform another job action while its follower/pending gate is closed.
-        if (this.playerNpc.isTeamFollower() || this.playerNpc.isTeamUpRequestPending()) {
+        if (PlayerNpcTeamUpManager.shouldSuspendRoutineWork(this.playerNpc)
+                || this.playerNpc.isTeamUpRequestPending()) {
             return;
         }
         long timing = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();

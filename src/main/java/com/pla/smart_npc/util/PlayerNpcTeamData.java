@@ -180,6 +180,11 @@ public final class PlayerNpcTeamData extends SavedData {
     }
 
     @Nullable
+    public PlayerTeam getPlayerTeam(UUID playerId) {
+        return playerId == null ? null : this.playerTeams.get(playerId);
+    }
+
+    @Nullable
     public UUID removePlayerTeam(UUID playerId) {
         PlayerTeam removed = this.playerTeams.remove(playerId);
         if (removed != null) {

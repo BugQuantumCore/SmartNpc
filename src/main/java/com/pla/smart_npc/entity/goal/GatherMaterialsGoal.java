@@ -53,7 +53,7 @@ import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 
-public class GatherMaterialsGoal extends Goal {
+public class GatherMaterialsGoal extends Goal implements GatheringGoal {
     private static final int SEARCH_RADIUS = 8;
     private static final int LOG_SEARCH_RADIUS = 32;
     private static final int LOCAL_LOG_SEARCH_RADIUS = 16;

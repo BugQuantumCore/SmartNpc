@@ -39,7 +39,7 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.function.Predicate;
 
-public class GatherMissingBuildMaterialGoal extends Goal {
+public class GatherMissingBuildMaterialGoal extends Goal implements GatheringGoal {
     private static final int SEARCH_RADIUS = 32;
     private static final int MAX_TARGET_SCAN_COLUMNS_PER_SLICE = 8;
     private static final int TARGET_SCAN_CACHE_TICKS = 20;

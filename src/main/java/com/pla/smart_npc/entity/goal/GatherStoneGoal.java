@@ -42,7 +42,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
 
-public class GatherStoneGoal extends Goal {
+public class GatherStoneGoal extends Goal implements GatheringGoal {
     private static final Set<PlayerNpcEntity> ACTIVE_STONE_GATHERERS = Collections.newSetFromMap(new WeakHashMap<>());
     private static final Map<PlayerNpcEntity, NearbyStoneTargetCache> NEARBY_STONE_TARGET_CACHE = new WeakHashMap<>();
     private static final int SEARCH_RADIUS = 24;
