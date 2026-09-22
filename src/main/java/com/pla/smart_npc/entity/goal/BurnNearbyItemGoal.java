@@ -39,7 +39,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-public class BurnNearbyItemGoal extends Goal {
+public class BurnNearbyItemGoal extends Goal implements GatheringGoal {
     private final Mob mob;
     private final double speed;
     private final double searchRadius;

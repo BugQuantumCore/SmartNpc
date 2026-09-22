@@ -43,7 +43,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
-public class PickupNearbyItemGoal extends Goal {
+public class PickupNearbyItemGoal extends Goal implements GatheringGoal {
     private static final String AI_STATE = "ai.player_npc.collecting_item";
     private static final double SEARCH_RADIUS = 8.0D;
     private static final double SEARCH_VERTICAL_RADIUS = 5.0D;
