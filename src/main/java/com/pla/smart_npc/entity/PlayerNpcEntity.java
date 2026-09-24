@@ -170,13 +170,14 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private static final int MAIN_HAND_ATTACK_ANIMATION_DURATION = 10;
     private static final int BETTER_COMBAT_ATTACK_ANIMATION_DURATION = 120;
     private static final int MAIN_HAND_USE_ANIMATION_DURATION = 6;
-    private static final EquipmentSlot[] DEATH_LOOT_ARMOR_SLOTS = {
+    private static final EquipmentSlot[] DEATH_LOOT_EQUIPMENT_SLOTS = {
+            EquipmentSlot.MAINHAND,
+            EquipmentSlot.OFFHAND,
             EquipmentSlot.HEAD,
             EquipmentSlot.CHEST,
             EquipmentSlot.LEGS,
             EquipmentSlot.FEET
     };
-    private static final int DROPPED_ARMOR_MIN_DAMAGE_PERCENT = 25;
     private static final int PLACE_BLOCK_PARRY_COOLDOWN_TICKS = 60;
     private static final double PLAYER_LIKE_JUMP_Y = 0.42D;
     private static final int EXPLORATION_RETURN_ESCAPE_MIN_PILLAR_BLOCKS = 8;
@@ -2026,7 +2027,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         super.dropCustomDeathLoot(source, looting, recentlyHit);
 
         if (!this.getPersistentData().getBoolean("die_by_possess")) {
-            this.dropRandomlyDamagedArmor();
+            this.dropRandomlyDamagedEquipment();
         }
 
         for (int i = 0; i < this.inventory.getContainerSize(); i++) {
@@ -2037,8 +2038,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
     }
 
-    private void dropRandomlyDamagedArmor() {
-        for (EquipmentSlot slot : DEATH_LOOT_ARMOR_SLOTS) {
+    private void dropRandomlyDamagedEquipment() {
+        for (EquipmentSlot slot : DEATH_LOOT_EQUIPMENT_SLOTS) {
             ItemStack equipped = this.getItemBySlot(slot);
             if (equipped.isEmpty()) {
                 continue;
@@ -2048,8 +2049,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             dropped.setCount(1);
             this.applyRandomDeathLootDamage(dropped);
 
-            // Equipment is processed again by vanilla after custom death loot.
-            // Emptying the slot here prevents a second copy from dropping.
             this.setItemSlot(slot, ItemStack.EMPTY);
             this.spawnAtLocation(dropped);
         }
@@ -2063,7 +2062,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         int maximumDamage = stack.getMaxDamage();
         int minimumDamage = Math.max(
                 stack.getDamageValue(),
-                Math.max(1, maximumDamage * DROPPED_ARMOR_MIN_DAMAGE_PERCENT / 100)
+                Math.max(1, maximumDamage * 25 / 100)
         );
         int maximumSurvivingDamage = maximumDamage - 1;
         if (minimumDamage <= maximumSurvivingDamage) {
