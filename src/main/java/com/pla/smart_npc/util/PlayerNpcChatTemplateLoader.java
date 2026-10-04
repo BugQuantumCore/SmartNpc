@@ -25,7 +25,13 @@ import java.util.Optional;
 import java.util.Set;
 
 /** Loads selector-aware Player NPC chat from data/smart_npc/chat/&lt;locale&gt;/&lt;event&gt;.json. */
-public class PlayerNpcChatTemplateLoader extends SimpleJsonResourceReloadListener {
+public class PlayerNpcChatTemplateLoader extends SimpleJsonResourceReloadListener
+        implements net.fabricmc.fabric.api.resource.IdentifiableResourceReloadListener {
+    @Override
+    public net.minecraft.resources.ResourceLocation getFabricId() {
+        return new net.minecraft.resources.ResourceLocation("smart_npc", "chat_templates");
+    }
+
     public static final String CALL_HELP = "call_help";
     public static final String TEAMUP_REQUEST = "teamup_request";
     public static final String WARN_DEATH = "warn_death";

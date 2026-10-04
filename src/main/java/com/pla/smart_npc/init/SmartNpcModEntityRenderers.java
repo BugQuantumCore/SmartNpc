@@ -1,18 +1,18 @@
 package com.pla.smart_npc.init;
 
-import com.pla.smart_npc.client.renderer.*;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.client.event.EntityRenderersEvent.RegisterRenderers;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod.EventBusSubscriber;
-import net.minecraftforge.fml.common.Mod.EventBusSubscriber.Bus;
+import com.pla.smart_npc.client.renderer.FakePlayerRenderer;
+import com.pla.smart_npc.client.renderer.PlayerNpcFishingBobberRenderer;
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
 
-@EventBusSubscriber(bus = Bus.MOD, value = {Dist.CLIENT})
+@Environment(EnvType.CLIENT)
 public class SmartNpcModEntityRenderers {
 
-    @SubscribeEvent
-    public static void registerEntityRenderers(RegisterRenderers registerrenderers) {
-        registerrenderers.registerEntityRenderer(SmartNpcModEntities.PLAYER_NPC.get(), FakePlayerRenderer::new);
-        registerrenderers.registerEntityRenderer(SmartNpcModEntities.PLAYER_NPC_FISHING_BOBBER.get(), PlayerNpcFishingBobberRenderer::new);
+    @Environment(EnvType.CLIENT)
+    public static void registerEntityRenderers() {
+        // Forge EntityRenderersEvent.RegisterRenderers equivalent.
+        EntityRendererRegistry.register(SmartNpcModEntities.PLAYER_NPC, FakePlayerRenderer::new);
+        EntityRendererRegistry.register(SmartNpcModEntities.PLAYER_NPC_FISHING_BOBBER, PlayerNpcFishingBobberRenderer::new);
     }
 }

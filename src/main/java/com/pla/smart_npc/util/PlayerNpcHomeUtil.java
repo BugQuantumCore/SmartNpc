@@ -1,5 +1,6 @@
 package com.pla.smart_npc.util;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.core.BlockPos;
@@ -36,7 +37,7 @@ public final class PlayerNpcHomeUtil {
     }
 
     public static Optional<HomeArea> getHome(PlayerNpcEntity playerNpc) {
-        CompoundTag persistentData = playerNpc.getPersistentData();
+        CompoundTag persistentData = ForgeDataCompat.get(playerNpc);
         if (!hasHomeTag(persistentData)) {
             return Optional.empty();
         }
@@ -45,7 +46,7 @@ public final class PlayerNpcHomeUtil {
     }
 
     public static Optional<String> getHomeLayoutId(PlayerNpcEntity playerNpc) {
-        CompoundTag persistentData = playerNpc.getPersistentData();
+        CompoundTag persistentData = ForgeDataCompat.get(playerNpc);
         if (!persistentData.contains(HOME_LAYOUT_ID, Tag.TAG_STRING)) {
             return Optional.empty();
         }
@@ -66,7 +67,7 @@ public final class PlayerNpcHomeUtil {
     }
 
     public static void setHome(PlayerNpcEntity playerNpc, HomeArea homeArea) {
-        writeHome(playerNpc.getPersistentData(), homeArea);
+        writeHome(ForgeDataCompat.get(playerNpc), homeArea);
     }
 
     public static void setHome(PlayerNpcEntity playerNpc, HomeArea homeArea, String layoutId) {
@@ -76,11 +77,11 @@ public final class PlayerNpcHomeUtil {
 
     public static void setHomeLayoutId(PlayerNpcEntity playerNpc, String layoutId) {
         if (layoutId == null || layoutId.isBlank()) {
-            playerNpc.getPersistentData().remove(HOME_LAYOUT_ID);
+            ForgeDataCompat.get(playerNpc).remove(HOME_LAYOUT_ID);
             return;
         }
 
-        playerNpc.getPersistentData().putString(HOME_LAYOUT_ID, layoutId);
+        ForgeDataCompat.get(playerNpc).putString(HOME_LAYOUT_ID, layoutId);
     }
 
     public static void saveHomeToTag(PlayerNpcEntity playerNpc, CompoundTag tag) {

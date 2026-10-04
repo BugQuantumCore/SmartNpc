@@ -10,7 +10,7 @@ import net.minecraft.world.entity.player.Inventory;
 import org.jetbrains.annotations.NotNull;
 
 public class InventoryViewerScreen extends AbstractContainerScreen<InventoryViewerMenu> {
-    private static final ResourceLocation ARMOR_EDITOR_TEXTURE = ResourceLocation.fromNamespaceAndPath(SmartNpc.MODID , "textures/gui/armor.png");
+    private static final ResourceLocation ARMOR_EDITOR_TEXTURE = new ResourceLocation(SmartNpc.MODID , "textures/gui/armor.png");
 
     public InventoryViewerScreen(InventoryViewerMenu menu, Inventory inventory, Component title) {
         super(menu, inventory, title);

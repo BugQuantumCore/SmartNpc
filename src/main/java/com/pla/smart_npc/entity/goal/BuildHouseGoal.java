@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
@@ -20,6 +21,7 @@ import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
@@ -46,7 +48,6 @@ import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -442,7 +443,7 @@ public class BuildHouseGoal extends Goal {
         if (stack.isEmpty()) {
             return 0;
         }
-        ResourceLocation id = ForgeRegistries.ITEMS.getKey(stack.getItem());
+        ResourceLocation id = BuiltInRegistries.ITEM.getKey(stack.getItem());
         int hash = id == null ? 0 : id.hashCode();
         hash = 31 * hash + stack.getCount();
         if (stack.hasTag()) {
@@ -933,11 +934,11 @@ public class BuildHouseGoal extends Goal {
     }
 
     private static boolean isBuildBatchActive(PlayerNpcEntity playerNpc) {
-        return playerNpc.getPersistentData().getBoolean(ACTIVE_BUILD_BATCH_KEY);
+        return ForgeDataCompat.get(playerNpc).getBoolean(ACTIVE_BUILD_BATCH_KEY);
     }
 
     private static void setBuildBatchActive(PlayerNpcEntity playerNpc, boolean active) {
-        CompoundTag data = playerNpc.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(playerNpc);
         if (active) {
             data.putBoolean(ACTIVE_BUILD_BATCH_KEY, true);
         } else {
@@ -2201,7 +2202,7 @@ public class BuildHouseGoal extends Goal {
     }
 
     private static String describeTaskState(BlockState state) {
-        ResourceLocation blockId = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
         if (blockId == null) {
             return state.getBlock().getDescriptionId();
         }

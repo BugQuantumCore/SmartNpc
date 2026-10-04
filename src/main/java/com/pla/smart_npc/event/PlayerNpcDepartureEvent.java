@@ -1,25 +1,24 @@
 package com.pla.smart_npc.event;
 
-import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.ChatUtil;
 import com.pla.smart_npc.util.ExternalChunkActivity;
 import com.pla.smart_npc.util.PlayerNpcForceTickManager;
 import com.pla.smart_npc.util.RemoteNpcDeparture;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraftforge.event.entity.living.LivingEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.minecraft.world.entity.LivingEntity;
 
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID)
+/**
+ * Fabric port: the living-tick hook is dispatched from
+ * {@code LivingEntityTickMixin} via {@code SmartNpcEvents#onLivingTick}.
+ */
 public final class PlayerNpcDepartureEvent {
     private PlayerNpcDepartureEvent() {}
 
-    @SubscribeEvent
-    public static void tick(LivingEvent.LivingTickEvent event) {
-        if (!(event.getEntity() instanceof PlayerNpcEntity npc)
+    public static void onLivingTick(LivingEntity entity) {
+        if (!(entity instanceof PlayerNpcEntity npc)
                 || !(npc.level() instanceof ServerLevel) || !npc.isAlive() || npc.isRemoved()
                 || Math.floorMod(npc.tickCount, 20) != Math.floorMod(npc.getUUID().hashCode(), 20)) return;
         if (RemoteNpcDeparture.tick(npc,
@@ -33,6 +32,5 @@ public final class PlayerNpcDepartureEvent {
         }
     }
 
-    @SubscribeEvent
-    public static void stopping(ServerStoppingEvent event) { ExternalChunkActivity.clear(); }
+    public static void stopping(MinecraftServer server) { ExternalChunkActivity.clear(); }
 }

@@ -1,5 +1,6 @@
 package com.pla.smart_npc.util;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.FarmAi;
@@ -63,8 +64,8 @@ public final class PlayerNpcBaseUtil {
                     : Optional.empty();
         }
         BlockPos saved = campBase.immutable();
-        playerNpc.getPersistentData().putLong(CAMP_BASE_POS, saved.asLong());
-        playerNpc.getPersistentData().putString(
+        ForgeDataCompat.get(playerNpc).putLong(CAMP_BASE_POS, saved.asLong());
+        ForgeDataCompat.get(playerNpc).putString(
                 CAMP_BASE_DIMENSION,
                 serverLevel.dimension().location().toString()
         );
@@ -87,16 +88,16 @@ public final class PlayerNpcBaseUtil {
 
     private static Optional<CampBase> getStoredCampBase(PlayerNpcEntity playerNpc) {
         if (playerNpc == null
-                || !playerNpc.getPersistentData().contains(CAMP_BASE_POS, Tag.TAG_LONG)
-                || !playerNpc.getPersistentData().contains(CAMP_BASE_DIMENSION, Tag.TAG_STRING)) {
+                || !ForgeDataCompat.get(playerNpc).contains(CAMP_BASE_POS, Tag.TAG_LONG)
+                || !ForgeDataCompat.get(playerNpc).contains(CAMP_BASE_DIMENSION, Tag.TAG_STRING)) {
             return Optional.empty();
         }
-        String dimension = playerNpc.getPersistentData().getString(CAMP_BASE_DIMENSION);
+        String dimension = ForgeDataCompat.get(playerNpc).getString(CAMP_BASE_DIMENSION);
         if (dimension.isBlank()) {
             return Optional.empty();
         }
         return Optional.of(new CampBase(
-                BlockPos.of(playerNpc.getPersistentData().getLong(CAMP_BASE_POS)),
+                BlockPos.of(ForgeDataCompat.get(playerNpc).getLong(CAMP_BASE_POS)),
                 dimension
         ));
     }

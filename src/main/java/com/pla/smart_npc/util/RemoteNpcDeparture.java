@@ -1,5 +1,6 @@
 package com.pla.smart_npc.util;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Mob;
@@ -15,7 +16,7 @@ public final class RemoteNpcDeparture {
             // Ineligibility pauses the saved session; it must not erase elapsed time.
             return false;
         }
-        CompoundTag root = npc.getPersistentData();
+        CompoundTag root = ForgeDataCompat.get(npc);
         CompoundTag state = root.getCompound(KEY);
         int min = Math.min(configuredMin, configuredMax);
         int max = Math.max(configuredMin, configuredMax);
@@ -39,8 +40,8 @@ public final class RemoteNpcDeparture {
     }
 
     public static void copy(Mob from, Mob to) {
-        if (from.getPersistentData().contains(KEY)) {
-            to.getPersistentData().put(KEY, from.getPersistentData().getCompound(KEY).copy());
+        if (ForgeDataCompat.get(from).contains(KEY)) {
+            ForgeDataCompat.get(to).put(KEY, ForgeDataCompat.get(from).getCompound(KEY).copy());
         }
     }
 }

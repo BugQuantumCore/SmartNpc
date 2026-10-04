@@ -1,43 +1,43 @@
 package com.pla.smart_npc.event;
 
-import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.ChatUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.phys.AABB;
-import net.minecraftforge.event.level.BlockEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
 
 import java.util.Optional;
 
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
+/** Fabric port: wired from {@code SmartNpcEvents} via {@code PlayerBlockBreakEvents.BEFORE}. */
 public final class PlayerNpcHomeEvent {
     private static final double SLEEPING_BED_REACTION_RADIUS = 24.0D;
 
     private PlayerNpcHomeEvent() {
     }
 
-    @SubscribeEvent
-    public static void onBlockBreak(BlockEvent.BreakEvent event) {
-        if (!(event.getLevel() instanceof ServerLevel serverLevel)
-                || !(event.getState().getBlock() instanceof BedBlock)
-                || event.getPlayer() == null) {
-            return;
+    /**
+     * @return {@code true} to let the block break proceed (the Forge edition never
+     *         cancelled this event either).
+     */
+    public static boolean onBlockBreak(Level level, Player player, BlockPos pos, BlockState state) {
+        if (!(level instanceof ServerLevel serverLevel)
+                || !(state.getBlock() instanceof BedBlock)
+                || player == null) {
+            return true;
         }
 
-        BlockPos brokenFoot = normalizeBedFoot(serverLevel, event.getPos(), event.getState());
+        BlockPos brokenFoot = normalizeBedFoot(serverLevel, pos, state);
         if (brokenFoot == null) {
-            return;
+            return true;
         }
 
-        Player breaker = event.getPlayer();
+        Player breaker = player;
         AABB searchArea = new AABB(brokenFoot).inflate(SLEEPING_BED_REACTION_RADIUS, 8.0D, SLEEPING_BED_REACTION_RADIUS);
         for (PlayerNpcEntity playerNpc : serverLevel.getEntitiesOfClass(
                 PlayerNpcEntity.class,
@@ -57,6 +57,7 @@ public final class PlayerNpcHomeEvent {
             playerNpc.setCurrentAiDetail("bed broken by " + breaker.getDisplayName().getString());
             ChatUtil.brokenBedWhileSleeping(playerNpc, breaker);
         }
+        return true;
     }
 
     private static boolean isSleepingInBed(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockPos bedFoot) {

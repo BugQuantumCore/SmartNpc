@@ -1,15 +1,10 @@
 package com.pla.smart_npc.network;
 
-import com.pla.smart_npc.client.gui.SmartNpcInspectorOverlay;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.fml.DistExecutor;
-import net.minecraftforge.network.NetworkEvent;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Supplier;
 
 public class PlayerNpcInspectorPacket {
     public static final int OVERALL_ENTITY_ID = -2;
@@ -213,12 +208,6 @@ public class PlayerNpcInspectorPacket {
                 dailyJobText, requirementsText, aiResourceText, new TeamInfo(teamName, leaderName, role), traceEnabled);
     }
 
-    public static void handle(PlayerNpcInspectorPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
-        NetworkEvent.Context context = contextSupplier.get();
-        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
-                Dist.CLIENT,
-                () -> () -> SmartNpcInspectorOverlay.handlePacket(packet)
-        ));
-        context.setPacketHandled(true);
-    }
+    // Received via SmartNpcNetwork#registerClientReceivers on the client thread;
+    // SmartNpcInspectorOverlay.handlePacket is invoked there directly.
 }

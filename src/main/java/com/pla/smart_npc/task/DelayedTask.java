@@ -1,10 +1,7 @@
 package com.pla.smart_npc.task;
 
 import com.pla.smart_npc.SmartNpc;
-import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.server.ServerStoppedEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraft.server.MinecraftServer;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -29,6 +26,16 @@ public abstract class DelayedTask {
         this.remainingTicks = waitTicks;
         ensureSchedulerRegistered();
         PENDING_ADD.add(this);
+    }
+
+    /** Fabric: tick dispatch wired from SmartNpcEvents. */
+    public static void onServerTick(MinecraftServer server) {
+        SCHEDULER.onServerTick(server);
+    }
+
+    /** Fabric: clear dispatch wired from SmartNpcEvents. */
+    public static void onServerStopped(MinecraftServer server) {
+        SCHEDULER.onServerStopped(server);
     }
 
     public abstract void run();
@@ -76,10 +83,7 @@ public abstract class DelayedTask {
     }
 
     private static synchronized void ensureSchedulerRegistered() {
-        if (!schedulerRegistered) {
-            MinecraftForge.EVENT_BUS.register(SCHEDULER);
-            schedulerRegistered = true;
-        }
+        schedulerRegistered = true; // Fabric: the scheduler is wired statically in SmartNpcEvents
     }
 
     private static void safeRun(Runnable action, String label) {
@@ -90,15 +94,10 @@ public abstract class DelayedTask {
         }
     }
 
-    private static final class Scheduler {
+    static final class Scheduler {
         private final List<DelayedTask> activeTasks = new ArrayList<>();
 
-        @SubscribeEvent
-        public void onServerTick(TickEvent.ServerTickEvent event) {
-            if (event.phase != TickEvent.Phase.END) {
-                return;
-            }
-
+        public void onServerTick(MinecraftServer server) {
             DelayedTask pendingTask;
             while ((pendingTask = PENDING_ADD.poll()) != null) {
                 activeTasks.add(pendingTask);
@@ -113,8 +112,7 @@ public abstract class DelayedTask {
             }
         }
 
-        @SubscribeEvent
-        public void onServerStopped(ServerStoppedEvent event) {
+        public void onServerStopped(MinecraftServer server) {
             activeTasks.clear();
             PENDING_ADD.clear();
         }

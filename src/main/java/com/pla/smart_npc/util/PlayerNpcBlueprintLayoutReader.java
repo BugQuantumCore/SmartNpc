@@ -1,5 +1,6 @@
 package com.pla.smart_npc.util;
 
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
@@ -10,7 +11,6 @@ import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraftforge.fml.ModList;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -141,7 +141,7 @@ public final class PlayerNpcBlueprintLayoutReader {
     private static void warnForMissingRequiredMods(ResourceLocation id, ListTag requiredMods) {
         for (int i = 0; i < requiredMods.size(); i++) {
             String modId = requiredMods.getString(i);
-            if (!modId.isBlank() && !"minecraft".equals(modId) && !ModList.get().isLoaded(modId)) {
+            if (!modId.isBlank() && !"minecraft".equals(modId) && !FabricLoader.getInstance().isModLoaded(modId)) {
                 LOGGER.warn("PlayerNpc blueprint {} requires missing mod {}; those blocks may load as air", id, modId);
             }
         }

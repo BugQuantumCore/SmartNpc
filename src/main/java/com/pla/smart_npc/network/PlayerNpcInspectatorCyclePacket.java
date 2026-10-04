@@ -4,11 +4,8 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcForceTickManager;
 import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraftforge.network.NetworkEvent;
-import net.minecraftforge.network.PacketDistributor;
-
-import java.util.function.Supplier;
 
 public class PlayerNpcInspectatorCyclePacket {
     private final int currentEntityId;
@@ -31,62 +28,58 @@ public class PlayerNpcInspectatorCyclePacket {
         return new PlayerNpcInspectatorCyclePacket(buffer.readVarInt(), buffer.readVarInt(), buffer.readBoolean());
     }
 
-    public static void handle(PlayerNpcInspectatorCyclePacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
-        NetworkEvent.Context context = contextSupplier.get();
-        context.enqueueWork(() -> {
-            ServerPlayer sender = context.getSender();
-            if (sender == null) {
-                return;
-            }
+    /** Fabric receiver body; runs on the server thread. */
+    public static void handle(PlayerNpcInspectatorCyclePacket packet, MinecraftServer server, ServerPlayer sender) {
+        if (sender == null) {
+            return;
+        }
 
-            if (!PlayerNpcInspectatorModePacket.isInspectatorActive(sender)) {
-                sendResult(sender, PlayerNpcInspectatorCycleResultPacket.handled(packet.currentEntityId));
-                return;
-            }
+        if (!PlayerNpcInspectatorModePacket.isInspectatorActive(sender)) {
+            sendResult(sender, PlayerNpcInspectatorCycleResultPacket.handled(packet.currentEntityId));
+            return;
+        }
 
-            if (!PlayerNpcForceTickManager.isEnabled()) {
-                sendResult(sender, PlayerNpcInspectatorCycleResultPacket.unhandled(packet.currentEntityId, packet.direction));
-                return;
-            }
+        if (!PlayerNpcForceTickManager.isEnabled()) {
+            sendResult(sender, PlayerNpcInspectatorCycleResultPacket.unhandled(packet.currentEntityId, packet.direction));
+            return;
+        }
 
-            if (!(sender.getCamera() instanceof PlayerNpcEntity currentNpc)
-                    || currentNpc.getId() != packet.currentEntityId
-                    || !PlayerNpcInspectatorModePacket.isInspecting(sender, currentNpc)) {
-                PlayerNpcInspectatorModePacket.restorePlayerAndClearInspector(sender);
-                sendResult(sender, PlayerNpcInspectatorCycleResultPacket.handled(-1));
-                return;
-            }
-            var nextNpc = PlayerNpcForceTickManager.findNextForInspectator(
-                    sender.server,
-                    currentNpc,
-                    packet.direction
-            );
-            if (nextNpc.isEmpty()) {
-                sendResult(sender, PlayerNpcInspectatorCycleResultPacket.handled(packet.currentEntityId));
-                return;
-            }
+        if (!(sender.getCamera() instanceof PlayerNpcEntity currentNpc)
+                || currentNpc.getId() != packet.currentEntityId
+                || !PlayerNpcInspectatorModePacket.isInspecting(sender, currentNpc)) {
+            PlayerNpcInspectatorModePacket.restorePlayerAndClearInspector(sender);
+            sendResult(sender, PlayerNpcInspectatorCycleResultPacket.handled(-1));
+            return;
+        }
+        var nextNpc = PlayerNpcForceTickManager.findNextForInspectator(
+                sender.server,
+                currentNpc,
+                packet.direction
+        );
+        if (nextNpc.isEmpty()) {
+            sendResult(sender, PlayerNpcInspectatorCycleResultPacket.handled(packet.currentEntityId));
+            return;
+        }
 
-            PlayerNpcEntity target = nextNpc.get();
-            PlayerNpcInspectatorModePacket.beginInspectator(sender, target, true);
-            sendResult(sender, PlayerNpcInspectatorCycleResultPacket.handled(target.getId()));
-            SmartNpcNetwork.CHANNEL.send(
-                    PacketDistributor.PLAYER.with(() -> sender),
-                    new PlayerNpcInspectorPacket(
-                            target.getId(),
-                            PlayerNpcInspectorData.createSnapshot(target),
-                            PlayerNpcInspectorData.createBuildStatusText(target),
-                            PlayerNpcInspectorData.createPerformanceText(),
-                            PlayerNpcInspectorData.createDailyJobText(target),
-                            packet.includeRequirements ? PlayerNpcInspectorData.createBuildRequirementsText(target) : "",
-                            PlayerNpcInspectorData.createTeamInfo(target),
-                            PlayerNpcGoalTraceLogger.isEffectivelyTracing(sender, target)
-                    )
-            );
-        });
-        context.setPacketHandled(true);
+        PlayerNpcEntity target = nextNpc.get();
+        PlayerNpcInspectatorModePacket.beginInspectator(sender, target, true);
+        sendResult(sender, PlayerNpcInspectatorCycleResultPacket.handled(target.getId()));
+        SmartNpcNetwork.sendToPlayer(
+                sender,
+                new PlayerNpcInspectorPacket(
+                        target.getId(),
+                        PlayerNpcInspectorData.createSnapshot(target),
+                        PlayerNpcInspectorData.createBuildStatusText(target),
+                        PlayerNpcInspectorData.createPerformanceText(),
+                        PlayerNpcInspectorData.createDailyJobText(target),
+                        packet.includeRequirements ? PlayerNpcInspectorData.createBuildRequirementsText(target) : "",
+                        PlayerNpcInspectorData.createTeamInfo(target),
+                        PlayerNpcGoalTraceLogger.isEffectivelyTracing(sender, target)
+                )
+        );
     }
 
     private static void sendResult(ServerPlayer player, PlayerNpcInspectatorCycleResultPacket packet) {
-        SmartNpcNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), packet);
+        SmartNpcNetwork.sendToPlayer(player, packet);
     }
 }

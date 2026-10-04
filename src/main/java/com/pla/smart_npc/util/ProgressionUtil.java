@@ -14,7 +14,7 @@ public final class ProgressionUtil {
     }
 
     public static boolean isDifficulty(Difficulty difficulty) {
-        MinecraftServer server = net.minecraftforge.server.ServerLifecycleHooks.getCurrentServer();
+        MinecraftServer server = com.pla.smart_npc.util.compat.FabricServerHolder.getCurrentServer();
         return server != null && isDifficulty(server, difficulty);
     }
 
@@ -23,7 +23,7 @@ public final class ProgressionUtil {
     }
 
     public static boolean isAtLeastDifficulty(Difficulty difficulty) {
-        MinecraftServer server = net.minecraftforge.server.ServerLifecycleHooks.getCurrentServer();
+        MinecraftServer server = com.pla.smart_npc.util.compat.FabricServerHolder.getCurrentServer();
         return server != null && isAtLeastDifficulty(server, difficulty);
     }
 

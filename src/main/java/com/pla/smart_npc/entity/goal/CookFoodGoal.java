@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
@@ -875,33 +876,33 @@ public class CookFoodGoal extends Goal {
 
     private BlockPos getTemporaryFurnacePos() {
         if (FurnaceAi.TEMP_FURNACE_KIND_NIGHT_CAMP.equals(
-                this.playerNpc.getPersistentData().getString(FurnaceAi.TEMP_FURNACE_KIND))
-                || !this.playerNpc.getPersistentData().contains(FurnaceAi.TEMP_FURNACE_X)) {
+                ForgeDataCompat.get(playerNpc).getString(FurnaceAi.TEMP_FURNACE_KIND))
+                || !ForgeDataCompat.get(playerNpc).contains(FurnaceAi.TEMP_FURNACE_X)) {
             return null;
         }
 
         return new BlockPos(
-                this.playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_X),
-                this.playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Y),
-                this.playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Z)
+                ForgeDataCompat.get(playerNpc).getInt(FurnaceAi.TEMP_FURNACE_X),
+                ForgeDataCompat.get(playerNpc).getInt(FurnaceAi.TEMP_FURNACE_Y),
+                ForgeDataCompat.get(playerNpc).getInt(FurnaceAi.TEMP_FURNACE_Z)
         );
     }
 
     private void saveTemporaryFurnace(BlockPos pos) {
-        this.playerNpc.getPersistentData().putInt(FurnaceAi.TEMP_FURNACE_X, pos.getX());
-        this.playerNpc.getPersistentData().putInt(FurnaceAi.TEMP_FURNACE_Y, pos.getY());
-        this.playerNpc.getPersistentData().putInt(FurnaceAi.TEMP_FURNACE_Z, pos.getZ());
-        this.playerNpc.getPersistentData().putString(
+        ForgeDataCompat.get(playerNpc).putInt(FurnaceAi.TEMP_FURNACE_X, pos.getX());
+        ForgeDataCompat.get(playerNpc).putInt(FurnaceAi.TEMP_FURNACE_Y, pos.getY());
+        ForgeDataCompat.get(playerNpc).putInt(FurnaceAi.TEMP_FURNACE_Z, pos.getZ());
+        ForgeDataCompat.get(playerNpc).putString(
                 FurnaceAi.TEMP_FURNACE_KIND,
                 FurnaceAi.TEMP_FURNACE_KIND_COOKING
         );
     }
 
     private void clearTemporaryFurnace() {
-        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_X);
-        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Y);
-        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Z);
-        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_KIND);
+        ForgeDataCompat.get(playerNpc).remove(FurnaceAi.TEMP_FURNACE_X);
+        ForgeDataCompat.get(playerNpc).remove(FurnaceAi.TEMP_FURNACE_Y);
+        ForgeDataCompat.get(playerNpc).remove(FurnaceAi.TEMP_FURNACE_Z);
+        ForgeDataCompat.get(playerNpc).remove(FurnaceAi.TEMP_FURNACE_KIND);
     }
 
     private String placementDetail(String action) {

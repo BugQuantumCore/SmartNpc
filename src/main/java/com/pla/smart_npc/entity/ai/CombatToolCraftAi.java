@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.ai;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.goal.CraftBasicGearGoal;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
@@ -111,9 +112,9 @@ public final class CombatToolCraftAi {
                 this.stop();
                 return false;
             }
-            this.npc.getPersistentData().putInt(CraftBasicGearGoal.TEMP_TABLE_X, this.table.getX());
-            this.npc.getPersistentData().putInt(CraftBasicGearGoal.TEMP_TABLE_Y, this.table.getY());
-            this.npc.getPersistentData().putInt(CraftBasicGearGoal.TEMP_TABLE_Z, this.table.getZ());
+            ForgeDataCompat.get(npc).putInt(CraftBasicGearGoal.TEMP_TABLE_X, this.table.getX());
+            ForgeDataCompat.get(npc).putInt(CraftBasicGearGoal.TEMP_TABLE_Y, this.table.getY());
+            ForgeDataCompat.get(npc).putInt(CraftBasicGearGoal.TEMP_TABLE_Z, this.table.getZ());
             this.tools.restoreMainHand();
             this.placeTable = false;
             this.actionTick = this.npc.tickCount + 12;

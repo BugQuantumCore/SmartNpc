@@ -27,7 +27,6 @@ import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.common.ToolActions;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -241,7 +240,7 @@ public class PlayerNpcFishingGoal extends Goal {
 
         if (this.usingTemporaryRod) {
             ItemStack rod = this.playerNpc.getMainHandItem().copy();
-            if (!rod.isEmpty() && rod.canPerformAction(ToolActions.FISHING_ROD_CAST) && !InventoryUtils.addItem(this.playerNpc, rod)) {
+            if (!rod.isEmpty() && rod.getItem() instanceof net.minecraft.world.item.FishingRodItem && !InventoryUtils.addItem(this.playerNpc, rod)) {
                 this.playerNpc.spawnAtLocation(rod);
             }
             this.playerNpc.setMainHandItemForAi(this.previousMainHand.copy());
@@ -273,7 +272,7 @@ public class PlayerNpcFishingGoal extends Goal {
             return false;
         }
 
-        PlayerNpcFishingBobberEntity nextBobber = SmartNpcModEntities.PLAYER_NPC_FISHING_BOBBER.get().create(serverLevel);
+        PlayerNpcFishingBobberEntity nextBobber = SmartNpcModEntities.PLAYER_NPC_FISHING_BOBBER.create(serverLevel);
         if (nextBobber == null) {
             return false;
         }
@@ -317,7 +316,7 @@ public class PlayerNpcFishingGoal extends Goal {
         }
 
         ItemStack rod = this.playerNpc.getMainHandItem();
-        if (!rod.isEmpty() && rod.canPerformAction(ToolActions.FISHING_ROD_CAST)) {
+        if (!rod.isEmpty() && rod.getItem() instanceof net.minecraft.world.item.FishingRodItem) {
             int rodDamage = this.bobber.retrieve(rod);
             if (rodDamage > 0) {
                 this.playerNpc.hurtMainHandItem(rodDamage);
@@ -737,7 +736,7 @@ public class PlayerNpcFishingGoal extends Goal {
     }
 
     private static boolean isFishingRod(ItemStack stack) {
-        return !stack.isEmpty() && stack.canPerformAction(ToolActions.FISHING_ROD_CAST);
+        return !stack.isEmpty() && stack.getItem() instanceof net.minecraft.world.item.FishingRodItem;
     }
 
     private static String posText(BlockPos pos) {

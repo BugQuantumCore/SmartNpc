@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity;
 
-import com.pla.smart_npc.compat.epicfight.EpicFight;
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
+import net.fabricmc.loader.api.FabricLoader;
 
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.pla.smart_npc.clazz.Difficulty;
@@ -98,6 +99,7 @@ import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -135,10 +137,6 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.network.NetworkHooks;
-import net.minecraftforge.network.PlayMessages;
-import net.minecraftforge.registries.ForgeRegistries;
-import net.minecraftforge.fml.ModList;
 import org.jetbrains.annotations.NotNull;
 
 import javax.annotation.Nullable;
@@ -1483,10 +1481,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return InventoryUtils.consumeItem(this.inventory, itemLike, count);
     }
 
-    public PlayerNpcEntity(PlayMessages.SpawnEntity spawnentity, Level level) {
-        this(SmartNpcModEntities.PLAYER_NPC.get(), level);
-    }
-
     public ItemStack getMainWeaponItem() {
         return mainWeaponItem;
     }
@@ -1852,7 +1846,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
         ListTag temporarySupports = new ListTag();
         for (Map.Entry<BlockPos, Block> entry : this.temporaryPillarSupports.entrySet()) {
-            ResourceLocation blockId = ForgeRegistries.BLOCKS.getKey(entry.getValue());
+            ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(entry.getValue());
             if (blockId == null || entry.getValue() == Blocks.AIR) {
                 continue;
             }
@@ -1973,7 +1967,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             for (int index = 0; index < supportCount; index++) {
                 CompoundTag supportTag = temporarySupports.getCompound(index);
                 ResourceLocation blockId = ResourceLocation.tryParse(supportTag.getString("Block"));
-                Block block = blockId == null ? null : ForgeRegistries.BLOCKS.getValue(blockId);
+                Block block = blockId == null ? null : BuiltInRegistries.BLOCK.get(blockId);
                 if (block != null && block != Blocks.AIR) {
                     BlockPos supportPos = BlockPos.of(supportTag.getLong("Pos")).immutable();
                     this.temporaryPillarSupports.put(supportPos, block);
@@ -2026,7 +2020,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     protected void dropCustomDeathLoot(@NotNull DamageSource source, int looting, boolean recentlyHit) {
         super.dropCustomDeathLoot(source, looting, recentlyHit);
 
-        if (!this.getPersistentData().getBoolean("die_by_possess")) {
+        if (!ForgeDataCompat.get(this).getBoolean("die_by_possess")) {
             this.dropRandomlyDamagedEquipment();
         }
 
@@ -2109,10 +2103,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return false;
         }
         return super.wantsToPickUp(stack);
-    }
-
-    public @NotNull Packet<ClientGamePacketListener> getAddEntityPacket() {
-        return NetworkHooks.getEntitySpawningPacket(this);
     }
 
     public boolean isSmartNpcCompatPlayerLikeTarget(LivingEntity target) {
@@ -2201,9 +2191,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(3, this.gated(new RareSneakGoal(this), PlayerNpcInterest.CAUTIOUS));
         this.addWorkGoal(4, this.gated(new ReturnHomeGoal(this, 1.0D), PlayerNpcInterest.BUILDING));
         this.addWorkGoal(5, this.gated(terraformBuildSiteGoal, PlayerNpcInterest.BUILDING));
-        if (!ModList.get().isLoaded("epicfight")) {
-            this.goalSelector.addGoal(6, new PlayerNpcMeleeAttackGoal(this));
-        }
+        this.goalSelector.addGoal(6, new PlayerNpcMeleeAttackGoal(this));
         this.addWorkGoal(5, this.gated(new BuildHouseGoal(this), PlayerNpcInterest.BUILDING));
         this.addWorkGoal(4, new ManageHomeBaseGoal(this, true));
         this.addWorkGoal(4, new MiningNightCampGoal(this, 1.0D));
@@ -2447,9 +2435,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.goalSelector.addGoal(2, new UseWaterBucketGoal(this));
         this.goalSelector.addGoal(2, new PlayerNpcProjectileBlockGoal(this));
         this.goalSelector.addGoal(2, new WaterEnderPearlEscapeGoal(this));
-        if (ModList.get().isLoaded("epicfight")) {
-            this.goalSelector.addGoal(2, new RandomCombatJumpGoal(this));
-        }
         this.goalSelector.addGoal(2, new PlayerNpcRangedBowAttackGoal(this, 1.0D, 20, 18.0F));
         this.goalSelector.addGoal(3, this.gated(new CombatFishingRodGoal(this), PlayerNpcInterest.FISHING));
         this.goalSelector.addGoal(3, new ThrowEnderPearlGoal(this));
@@ -2472,11 +2457,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     }
 
     public @NotNull SoundEvent getHurtSound(@NotNull DamageSource damageSource) {
-        return Objects.requireNonNull(ForgeRegistries.SOUND_EVENTS.getValue(ResourceLocation.fromNamespaceAndPath("minecraft", "entity.generic.hurt")));
+        return Objects.requireNonNull(BuiltInRegistries.SOUND_EVENT.get(new ResourceLocation("minecraft", "entity.generic.hurt")));
     }
 
     public @NotNull SoundEvent getDeathSound() {
-        return Objects.requireNonNull(ForgeRegistries.SOUND_EVENTS.getValue(ResourceLocation.fromNamespaceAndPath("minecraft", "entity.generic.death")));
+        return Objects.requireNonNull(BuiltInRegistries.SOUND_EVENT.get(new ResourceLocation("minecraft", "entity.generic.death")));
     }
 
     public void jump() {
@@ -2572,11 +2557,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return false;
         }
         this.setCurrentAiState("ai.player_npc.melee_attacking");
-        // Epic Fight calls this damage callback from inside its running attack animation.
-        if (!ModList.get().isLoaded("epicfight")) {
-            this.triggerMainHandAttackAnimation();
-            this.triggerBetterCombatAttackAnimation();
-        }
+        this.triggerMainHandAttackAnimation();
+        this.triggerBetterCombatAttackAnimation();
         boolean hurtTarget = super.doHurtTarget(target);
         if (hurtTarget) {
             this.lastCombatProgressTick = this.tickCount;
@@ -2881,9 +2863,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (this.entityData.get(MAIN_HAND_ATTACK_ANIMATION_TICKS) <= 0) {
             this.entityData.set(MAIN_HAND_ATTACK_ANIMATION_TICKS, MAIN_HAND_USE_ANIMATION_DURATION);
         }
-        if (!ModList.get().isLoaded("epicfight") || !EpicFight.playMainHandUseAnimation(this)) {
-            this.swing(InteractionHand.MAIN_HAND, true);
-        }
+        this.swing(InteractionHand.MAIN_HAND, true);
     }
 
     public int getMainHandAttackAnimationTicks() {
@@ -2991,7 +2971,15 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
             return;
         }
 
-        InteractionHand weaponHand = ProjectileUtil.getWeaponHoldingHand(this, this::canFireProjectileWeapon);
+        // Forge patches ProjectileUtil.getWeaponHoldingHand to accept a Predicate<Item>;
+        // vanilla takes the weapon Item directly.
+        InteractionHand weaponHand = this.getMainHandItem().getItem() instanceof ProjectileWeaponItem weaponItem
+                && this.canFireProjectileWeapon(weaponItem)
+                ? InteractionHand.MAIN_HAND
+                : this.getOffhandItem().getItem() instanceof ProjectileWeaponItem offhandWeapon
+                && this.canFireProjectileWeapon(offhandWeapon)
+                ? InteractionHand.OFF_HAND
+                : InteractionHand.MAIN_HAND;
         ItemStack weaponStack = this.getItemInHand(weaponHand);
         ItemStack itemstack = InventoryUtils.consumeArrowAmmo(this).orElse(ItemStack.EMPTY);
         if (itemstack.isEmpty()) {
@@ -2999,9 +2987,6 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         }
 
         AbstractArrow mobArrow = ProjectileUtil.getMobArrow(this, itemstack, pVelocity);
-        if (weaponStack.getItem() instanceof BowItem bowItem) {
-            mobArrow = bowItem.customArrow(mobArrow);
-        }
 
         double x = pTarget.getX() - this.getX();
         double y = pTarget.getY(0.3333333333333333) - mobArrow.getY();
@@ -3022,7 +3007,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         this.handlePlayerNpcDeathChat(damageSource, deathMessage);
 
         if (this.level() instanceof ServerLevel serverLevel) {
-            if (this.getPersistentData().getBoolean("die_by_possess")) {
+            if (ForgeDataCompat.get(this).getBoolean("die_by_possess")) {
                 this.remove(Entity.RemovalReason.KILLED);
             }
         }

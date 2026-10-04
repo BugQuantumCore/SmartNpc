@@ -6,14 +6,10 @@ import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
-import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.event.server.ServerStoppedEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.eventbus.api.EventPriority;
-import net.minecraftforge.fml.common.Mod;
+import net.minecraft.world.level.Level;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -23,7 +19,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.StringJoiner;
 
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PlayerNpcPerformanceMonitor {
     private static final int ROLLING_WINDOW_TICKS = 100;
     private static final int MIN_AVERAGE_WARNING_SAMPLES = 20;
@@ -80,11 +75,7 @@ public final class PlayerNpcPerformanceMonitor {
     private PlayerNpcPerformanceMonitor() {
     }
 
-    @SubscribeEvent(priority = EventPriority.HIGHEST)
-    public static void onServerTickStart(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.START) {
-            return;
-        }
+    public static void onServerTickStart(MinecraftServer server) {
         measuredNpcTickNanos = 0L;
         measuredNpcSuperTickNanos = 0L;
         measuredNpcCustomTickNanos = 0L;
@@ -109,11 +100,7 @@ public final class PlayerNpcPerformanceMonitor {
         tickStartNanos = System.nanoTime();
     }
 
-    @SubscribeEvent(priority = EventPriority.LOWEST)
-    public static void onServerTickEnd(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
+    public static void onServerTickEnd(MinecraftServer server) {
         if (tickStartNanos < 0L) {
             tickStartNanos = -1L;
             return;
@@ -123,7 +110,7 @@ public final class PlayerNpcPerformanceMonitor {
         tickStartNanos = -1L;
 
         latestMspt = elapsedNanos / NANOS_PER_MILLISECOND;
-        if (isWarmupSample(event.getServer())) {
+        if (isWarmupSample(server)) {
             resetSamples();
             latestMspt = 0.0D;
             return;
@@ -133,32 +120,29 @@ public final class PlayerNpcPerformanceMonitor {
         // Still evaluate it against the existing stable window so the severe-spike diagnostic is
         // reachable and an actual 1000+ ms NPC stall is not silently discarded.
         if (latestMspt >= PAUSE_OR_LOAD_TICK_MSPT) {
-            maybeLogWarning(event.getServer(), latestMspt);
+            maybeLogWarning(server, latestMspt);
             return;
         }
 
         addSample(latestMspt);
-        maybeLogWarning(event.getServer(), latestMspt);
+        maybeLogWarning(server, latestMspt);
     }
 
-    @SubscribeEvent
-    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
-        if (event.getEntity().level() instanceof ServerLevel serverLevel) {
+    public static void onPlayerLoggedIn(ServerPlayer serverPlayer) {
+        if (serverPlayer.level() instanceof ServerLevel serverLevel) {
             startWarmup(serverLevel.getServer(), PLAYER_JOIN_WARMUP_TICKS);
         }
     }
 
-    @SubscribeEvent
-    public static void onEntityJoinLevel(EntityJoinLevelEvent event) {
-        if (event.getEntity() instanceof PlayerNpcEntity
-                && event.getLevel() instanceof ServerLevel serverLevel) {
+    public static void onEntityJoinLevel(Entity entity, Level level) {
+        if (entity instanceof PlayerNpcEntity
+                && level instanceof ServerLevel serverLevel) {
             startWarmup(serverLevel.getServer(), PLAYER_NPC_JOIN_WARMUP_TICKS);
         }
     }
 
-    @SubscribeEvent
-    public static void onServerStopped(ServerStoppedEvent event) {
-        PlayerNpcAiWorkBudget.clear(event.getServer());
+    public static void onServerStopped(MinecraftServer server) {
+        PlayerNpcAiWorkBudget.clear(server);
         tickStartNanos = -1L;
         latestMspt = 0.0D;
         ignoreSamplesUntilServerTick = Long.MIN_VALUE;

@@ -1,5 +1,6 @@
 package com.pla.smart_npc.util;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -48,7 +49,7 @@ public final class PlayerNpcFarmPlan {
             return Optional.of(cached);
         }
 
-        CompoundTag persistentData = playerNpc.getPersistentData();
+        CompoundTag persistentData = ForgeDataCompat.get(playerNpc);
         if (persistentData.contains(PLAN_TAG, Tag.TAG_COMPOUND)) {
             Optional<Plan> read = read(persistentData.getCompound(PLAN_TAG));
             read.ifPresent(plan -> PLAN_CACHE.put(playerNpc, plan));
@@ -75,7 +76,7 @@ public final class PlayerNpcFarmPlan {
         tag.putLong(WATER, plan.waterPos().asLong());
         tag.putLong(GATE, plan.gatePos().asLong());
 
-        CompoundTag persistentData = playerNpc.getPersistentData();
+        CompoundTag persistentData = ForgeDataCompat.get(playerNpc);
         persistentData.put(PLAN_TAG, tag);
         persistentData.putInt(LEGACY_X, plan.origin().getX());
         persistentData.putInt(LEGACY_Y, plan.origin().getY());
@@ -89,7 +90,7 @@ public final class PlayerNpcFarmPlan {
         if (playerNpc == null) {
             return;
         }
-        CompoundTag tag = playerNpc.getPersistentData();
+        CompoundTag tag = ForgeDataCompat.get(playerNpc);
         tag.remove(PLAN_TAG);
         tag.remove(LEGACY_X);
         tag.remove(LEGACY_Y);

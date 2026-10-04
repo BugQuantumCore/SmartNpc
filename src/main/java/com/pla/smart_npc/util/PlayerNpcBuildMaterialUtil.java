@@ -1,9 +1,11 @@
 package com.pla.smart_npc.util;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.FurnaceAi;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.ItemTags;
@@ -36,7 +38,6 @@ import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.level.block.state.properties.ChestType;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.block.state.properties.Property;
-import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -329,7 +330,7 @@ public final class PlayerNpcBuildMaterialUtil {
             return false;
         }
 
-        ResourceLocation key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        ResourceLocation key = BuiltInRegistries.BLOCK.getKey(state.getBlock());
         return key != null
                 && "structurize".equals(key.getNamespace())
                 && "blocksolidsubstitution".equals(key.getPath());
@@ -573,7 +574,7 @@ public final class PlayerNpcBuildMaterialUtil {
         if (stack.isEmpty()) {
             return 0;
         }
-        ResourceLocation id = ForgeRegistries.ITEMS.getKey(stack.getItem());
+        ResourceLocation id = BuiltInRegistries.ITEM.getKey(stack.getItem());
         int hash = id == null ? 0 : id.hashCode();
         hash = 31 * hash + stack.getCount();
         if (stack.hasTag()) {
@@ -1057,7 +1058,7 @@ public final class PlayerNpcBuildMaterialUtil {
             }
 
             List<Item> result = new ArrayList<>();
-            for (Item item : ForgeRegistries.ITEMS.getValues()) {
+            for (Item item : net.minecraft.core.registries.BuiltInRegistries.ITEM.stream().toList()) {
                 if (familyForItem(item) == key) {
                     result.add(item);
                 }
@@ -1222,7 +1223,7 @@ public final class PlayerNpcBuildMaterialUtil {
     }
 
     private static boolean isWoodNamedItem(Item item, String suffix) {
-        ResourceLocation key = ForgeRegistries.ITEMS.getKey(item);
+        ResourceLocation key = BuiltInRegistries.ITEM.getKey(item);
         if (key == null || !key.getPath().endsWith(suffix)) {
             return false;
         }
@@ -1290,7 +1291,7 @@ public final class PlayerNpcBuildMaterialUtil {
             return false;
         }
 
-        ResourceLocation key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        ResourceLocation key = BuiltInRegistries.BLOCK.getKey(state.getBlock());
         return key != null && key.getPath().startsWith("potted_");
     }
 
@@ -1410,14 +1411,14 @@ public final class PlayerNpcBuildMaterialUtil {
     }
 
     private static BlockPos getTemporaryFurnacePos(PlayerNpcEntity playerNpc) {
-        if (!playerNpc.getPersistentData().contains(FurnaceAi.TEMP_FURNACE_X)) {
+        if (!ForgeDataCompat.get(playerNpc).contains(FurnaceAi.TEMP_FURNACE_X)) {
             return null;
         }
 
         return new BlockPos(
-                playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_X),
-                playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Y),
-                playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Z)
+                ForgeDataCompat.get(playerNpc).getInt(FurnaceAi.TEMP_FURNACE_X),
+                ForgeDataCompat.get(playerNpc).getInt(FurnaceAi.TEMP_FURNACE_Y),
+                ForgeDataCompat.get(playerNpc).getInt(FurnaceAi.TEMP_FURNACE_Z)
         );
     }
 

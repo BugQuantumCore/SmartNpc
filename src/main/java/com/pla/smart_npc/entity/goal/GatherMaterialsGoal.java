@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.PlacingBlockAi;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
@@ -14,6 +15,7 @@ import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import com.pla.smart_npc.util.PlayerNpcAiWorkBudget;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
@@ -41,7 +43,6 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -2058,14 +2059,14 @@ public class GatherMaterialsGoal extends Goal implements GatheringGoal {
     }
 
     private BlockPos getTemporaryCraftingTablePos() {
-        if (!this.playerNpc.getPersistentData().contains(CraftBasicGearGoal.TEMP_TABLE_X)) {
+        if (!ForgeDataCompat.get(playerNpc).contains(CraftBasicGearGoal.TEMP_TABLE_X)) {
             return null;
         }
 
         return new BlockPos(
-                this.playerNpc.getPersistentData().getInt(CraftBasicGearGoal.TEMP_TABLE_X),
-                this.playerNpc.getPersistentData().getInt(CraftBasicGearGoal.TEMP_TABLE_Y),
-                this.playerNpc.getPersistentData().getInt(CraftBasicGearGoal.TEMP_TABLE_Z)
+                ForgeDataCompat.get(playerNpc).getInt(CraftBasicGearGoal.TEMP_TABLE_X),
+                ForgeDataCompat.get(playerNpc).getInt(CraftBasicGearGoal.TEMP_TABLE_Y),
+                ForgeDataCompat.get(playerNpc).getInt(CraftBasicGearGoal.TEMP_TABLE_Z)
         );
     }
 
@@ -2490,7 +2491,7 @@ public class GatherMaterialsGoal extends Goal implements GatheringGoal {
         }
 
         BlockState state = serverLevel.getBlockState(this.targetPos);
-        ResourceLocation blockId = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
         String blockName = blockId == null ? state.getBlock().getDescriptionId() : blockId.toString();
         int requiredMineTicks = this.getRequiredMineTicks(serverLevel, state);
         boolean inBreakRange = this.playerNpc.distanceToSqr(
@@ -2515,7 +2516,7 @@ public class GatherMaterialsGoal extends Goal implements GatheringGoal {
             return;
         }
 
-        ResourceLocation blockId = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
         String blockName = blockId == null ? state.getBlock().getDescriptionId() : blockId.toString();
         this.playerNpc.setCurrentAiDetail(String.format(
                 java.util.Locale.ROOT,

@@ -2041,7 +2041,7 @@ public class GatherStoneGoal extends Goal implements GatheringGoal {
         }
 
         BlockState state = serverLevel.getBlockState(pos);
-        String blockId = Optional.ofNullable(net.minecraftforge.registries.ForgeRegistries.BLOCKS.getKey(state.getBlock()))
+        String blockId = Optional.ofNullable(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()))
                 .map(Object::toString)
                 .orElse("unknown");
         return blockId

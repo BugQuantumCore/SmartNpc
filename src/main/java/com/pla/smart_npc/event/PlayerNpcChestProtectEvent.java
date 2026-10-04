@@ -1,42 +1,44 @@
 package com.pla.smart_npc.event;
 
-import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraftforge.event.entity.player.PlayerInteractEvent;
-import net.minecraftforge.event.level.BlockEvent;
-import net.minecraftforge.eventbus.api.EventPriority;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.BlockHitResult;
 
-/** Server-side reactions to another living entity disturbing an NPC's tracked chest. */
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
+/**
+ * Server-side reactions to another living entity disturbing an NPC's tracked
+ * chest. Fabric port: wired from {@code SmartNpcEvents} via
+ * {@code UseBlockCallback} and {@code PlayerBlockBreakEvents.BEFORE}.
+ */
 public final class PlayerNpcChestProtectEvent {
     private PlayerNpcChestProtectEvent() {
     }
 
-    @SubscribeEvent(priority = EventPriority.LOWEST)
-    public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
-        if (event.isCanceled()
-                || !(event.getLevel() instanceof ServerLevel serverLevel)
-                || !serverLevel.getBlockState(event.getPos()).is(Blocks.CHEST)) {
-            return;
+    public static InteractionResult onRightClickBlock(Player player, Level level, InteractionHand hand, BlockHitResult hitResult) {
+        if (level.isClientSide()
+                || !(level instanceof ServerLevel serverLevel)
+                || !serverLevel.getBlockState(hitResult.getBlockPos()).is(Blocks.CHEST)) {
+            return InteractionResult.PASS;
         }
-        reportOffense(serverLevel, event.getPos(), event.getEntity(), "opened");
+        reportOffense(serverLevel, hitResult.getBlockPos(), player, "opened");
+        return InteractionResult.PASS;
     }
 
-    @SubscribeEvent(priority = EventPriority.LOWEST)
-    public static void onBlockBreak(BlockEvent.BreakEvent event) {
-        if (event.isCanceled()
-                || !(event.getLevel() instanceof ServerLevel serverLevel)
-                || !event.getState().is(Blocks.CHEST)) {
-            return;
+    public static boolean onBlockBreak(Level level, Player player, BlockPos pos, BlockState state) {
+        if (!(level instanceof ServerLevel serverLevel)
+                || !state.is(Blocks.CHEST)) {
+            return true;
         }
-        reportOffense(serverLevel, event.getPos(), event.getPlayer(), "broke");
+        reportOffense(serverLevel, pos, player, "broke");
+        return true;
     }
 
     public static void reportOffense(ServerLevel serverLevel, BlockPos chestPos, LivingEntity offender, String action) {

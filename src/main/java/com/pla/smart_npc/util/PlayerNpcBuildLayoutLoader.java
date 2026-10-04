@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
@@ -14,7 +15,6 @@ import net.minecraft.util.profiling.ProfilerFiller;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
-import net.minecraftforge.registries.ForgeRegistries;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -26,7 +26,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
-public class PlayerNpcBuildLayoutLoader extends SimpleJsonResourceReloadListener {
+public class PlayerNpcBuildLayoutLoader extends SimpleJsonResourceReloadListener
+        implements net.fabricmc.fabric.api.resource.IdentifiableResourceReloadListener {
+    @Override
+    public net.minecraft.resources.ResourceLocation getFabricId() {
+        return new net.minecraft.resources.ResourceLocation("smart_npc", "build_layouts");
+    }
+
     public static final String FORMAT = "smart_npc:structure_v1";
     private static final Gson GSON = new Gson();
     private static final Logger LOGGER = LogManager.getLogger();
@@ -163,7 +169,7 @@ public class PlayerNpcBuildLayoutLoader extends SimpleJsonResourceReloadListener
         if (path.endsWith(".blueprint")) {
             path = path.substring(0, path.length() - ".blueprint".length());
         }
-        return ResourceLocation.fromNamespaceAndPath(resourceLocation.getNamespace(), path);
+        return new ResourceLocation(resourceLocation.getNamespace(), path);
     }
 
     private static BlockState parseBlockState(JsonObject block) {
@@ -181,7 +187,7 @@ public class PlayerNpcBuildLayoutLoader extends SimpleJsonResourceReloadListener
             throw new IllegalArgumentException("invalid block id " + blockName);
         }
 
-        Block parsedBlock = ForgeRegistries.BLOCKS.getValue(blockId);
+        Block parsedBlock = BuiltInRegistries.BLOCK.get(blockId);
         if (parsedBlock == null) {
             throw new IllegalArgumentException("unknown block " + blockName);
         }
@@ -202,7 +208,7 @@ public class PlayerNpcBuildLayoutLoader extends SimpleJsonResourceReloadListener
                 return setPropertyValue(state, property, value);
             }
         }
-        throw new IllegalArgumentException("unknown property " + propertyName + " for " + ForgeRegistries.BLOCKS.getKey(state.getBlock()));
+        throw new IllegalArgumentException("unknown property " + propertyName + " for " + BuiltInRegistries.BLOCK.getKey(state.getBlock()));
     }
 
     private static <T extends Comparable<T>> BlockState setPropertyValue(BlockState state, Property<T> property, String value) {

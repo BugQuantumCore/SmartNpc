@@ -1,60 +1,48 @@
 package com.pla.smart_npc.event;
 
-import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.util.ProgressionUtil;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.living.LivingDeathEvent;
-import net.minecraftforge.event.entity.living.LivingEvent;
-import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.event.server.ServerStartedEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
 
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
+/**
+ * Fabric port: wired from {@code SmartNpcEvents} (server lifecycle, ticks,
+ * join events, damage/death) and the living-tick mixin dispatch.
+ */
 public final class ProgressionEvent {
     private ProgressionEvent() {
     }
 
-    @SubscribeEvent
-    public static void onServerStarted(ServerStartedEvent event) {
-        ProgressionUtil.reconcileHistoricalProgression(event.getServer());
+    public static void onServerStarted(MinecraftServer server) {
+        ProgressionUtil.reconcileHistoricalProgression(server);
     }
 
-    @SubscribeEvent
-    public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase == TickEvent.Phase.END && event.getServer().getTickCount() % 20 == 0) {
-            ProgressionUtil.reconcileDragonFightProgression(event.getServer());
+    public static void onServerTick(MinecraftServer server) {
+        if (server.getTickCount() % 20 == 0) {
+            ProgressionUtil.reconcileDragonFightProgression(server);
         }
     }
 
-    @SubscribeEvent
-    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player) {
-            ProgressionUtil.reconcileHistoricalProgression(player);
-        }
+    public static void onPlayerLoggedIn(ServerPlayer player) {
+        ProgressionUtil.reconcileHistoricalProgression(player);
     }
 
-    @SubscribeEvent
-    public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player) {
-            ProgressionUtil.increaseDifficulty(player.server, Difficulty.MEDIUM);
-        }
+    public static void onPlayerChangedDimension(ServerPlayer player) {
+        ProgressionUtil.increaseDifficulty(player.server, Difficulty.MEDIUM);
     }
 
-    @SubscribeEvent
-    public static void onLivingDeath(LivingDeathEvent event) {
-        if (event.getEntity() instanceof EnderDragon && event.getEntity().level() instanceof ServerLevel level) {
+    public static void onLivingDeath(LivingEntity entity, DamageSource source) {
+        if (entity instanceof EnderDragon && entity.level() instanceof ServerLevel level) {
             ProgressionUtil.increaseDifficulty(level.getServer(), Difficulty.HARD);
         }
     }
 
-    @SubscribeEvent
-    public static void onLivingTick(LivingEvent.LivingTickEvent event) {
-        if (event.getEntity() instanceof EnderDragon dragon
+    public static void onLivingTick(LivingEntity entity) {
+        if (entity instanceof EnderDragon dragon
                 && dragon.dragonDeathTime > 0
                 && dragon.level() instanceof ServerLevel level) {
             ProgressionUtil.increaseDifficulty(level.getServer(), Difficulty.HARD);

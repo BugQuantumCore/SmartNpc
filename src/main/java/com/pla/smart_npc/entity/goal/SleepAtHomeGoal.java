@@ -1,6 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
-import com.pla.smart_npc.compat.epicfight.EpicFight;
+import net.fabricmc.loader.api.FabricLoader;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcHomeUtil;
 import net.minecraft.core.BlockPos;
@@ -10,7 +10,6 @@ import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BedPart;
-import net.minecraftforge.fml.ModList;
 
 import java.util.EnumSet;
 import java.util.Optional;
@@ -100,7 +99,6 @@ public class SleepAtHomeGoal extends Goal {
             this.startSleepingInBed(serverLevel);
         }
         if (this.playerNpc.isSleeping()) {
-            if (ModList.get().isLoaded("epicfight")) EpicFight.keepSleepingState(this.playerNpc);
         }
         this.sleepTicks--;
     }
@@ -154,7 +152,6 @@ public class SleepAtHomeGoal extends Goal {
         this.playerNpc.yHeadRot = facing.toYRot();
         this.playerNpc.startSleeping(headPos);
         if (this.playerNpc.isSleeping()) {
-            if (ModList.get().isLoaded("epicfight")) EpicFight.playSleepingAnimation(this.playerNpc);
         }
     }
 
@@ -162,7 +159,6 @@ public class SleepAtHomeGoal extends Goal {
         if (this.playerNpc.isSleeping()) {
             this.playerNpc.stopSleeping();
         }
-        if (ModList.get().isLoaded("epicfight")) EpicFight.stopSleepingAnimation(this.playerNpc);
     }
 
     private BlockPos findHomeBed(ServerLevel serverLevel) {

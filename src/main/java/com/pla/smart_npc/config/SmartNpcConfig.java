@@ -1,88 +1,69 @@
 package com.pla.smart_npc.config;
 
-import net.minecraftforge.common.ForgeConfigSpec;
-
 import java.util.List;
 
+/**
+ * Server behaviour config. Semantics (names, defaults, ranges) are identical to the
+ * Forge edition's {@code smart_npc-server.toml}; on Fabric the values are stored in
+ * {@code config/smart_npc-server.json}.
+ */
 public class SmartNpcConfig {
     public record SpawnConfig(int weight, int minCount, int maxCount) {}
 
-    public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
-    public static final ForgeConfigSpec SPEC;
-    public static ForgeConfigSpec.BooleanValue REMOTE_NPC_DEPARTURE_ENABLED;
-    public static ForgeConfigSpec.IntValue REMOTE_NPC_DEPARTURE_MIN_MINUTES;
-    public static ForgeConfigSpec.IntValue REMOTE_NPC_DEPARTURE_MAX_MINUTES;
+    static final JsonConfig CONFIG = new JsonConfig("smart_npc-server.json");
+
+    public static JsonConfig.BooleanValue REMOTE_NPC_DEPARTURE_ENABLED;
+    public static JsonConfig.IntValue REMOTE_NPC_DEPARTURE_MIN_MINUTES;
+    public static JsonConfig.IntValue REMOTE_NPC_DEPARTURE_MAX_MINUTES;
     private static final SpawnConfig DEFAULT_PLAYER_NPC_SPAWN = new SpawnConfig(1, 1, 1);
     private static final int DEFAULT_MAX_NATURAL_PLAYER_NPCS = -1;
 
-    public static ForgeConfigSpec.ConfigValue<Boolean> TURN_ON_NPC_CHAT;
-    public static ForgeConfigSpec.ConfigValue<Boolean> SHOW_NPC_CHAT_PREFIX;
-    public static ForgeConfigSpec.ConfigValue<String> NPC_CHAT_LOCALE;
-    public static ForgeConfigSpec.IntValue FORCE_TICK_MANAGE;
-    public static ForgeConfigSpec.IntValue MAX_NATURAL_PLAYER_NPCS;
-    public static ForgeConfigSpec.IntValue AI_PROCESSING_NPC_LIMIT;
-    public static ForgeConfigSpec.DoubleValue AI_TARGET_SERVER_MSPT;
-    public static ForgeConfigSpec.ConfigValue<List<? extends Number>> PLAYER_NPC_SPAWN;
-    public static ForgeConfigSpec.ConfigValue<List<? extends String>> BLACKLIST_COMPAT_MOD_WEAPON;
-    public static ForgeConfigSpec.ConfigValue<Boolean> PERFORMANCE_MONITOR_ENABLED;
+    public static JsonConfig.BooleanValue TURN_ON_NPC_CHAT;
+    public static JsonConfig.BooleanValue SHOW_NPC_CHAT_PREFIX;
+    public static JsonConfig.StringValue NPC_CHAT_LOCALE;
+    public static JsonConfig.IntValue FORCE_TICK_MANAGE;
+    public static JsonConfig.IntValue MAX_NATURAL_PLAYER_NPCS;
+    public static JsonConfig.IntValue AI_PROCESSING_NPC_LIMIT;
+    public static JsonConfig.DoubleValue AI_TARGET_SERVER_MSPT;
+    public static JsonConfig.NumberListValue PLAYER_NPC_SPAWN;
+    public static JsonConfig.StringListValue BLACKLIST_COMPAT_MOD_WEAPON;
+    public static JsonConfig.BooleanValue PERFORMANCE_MONITOR_ENABLED;
 
     static {
-        BUILDER.push("remoteNpcDeparture");
-        REMOTE_NPC_DEPARTURE_ENABLED = BUILDER.comment("Allow force-ticked NPCs to leave when no external chunk loader covers them.")
-                .define("enabled", true);
-        REMOTE_NPC_DEPARTURE_MIN_MINUTES = BUILDER.comment("Minimum unattended online simulation time in minutes. Counts only while this NPC owns a force ticket.")
-                .defineInRange("minMinutes", 10, 1, 10080);
-        REMOTE_NPC_DEPARTURE_MAX_MINUTES = BUILDER.comment("Maximum unattended time in minutes. External loading resets the timer; reversed bounds are normalized.")
-                .defineInRange("maxMinutes", 30, 1, 10080);
-        BUILDER.pop();
+        REMOTE_NPC_DEPARTURE_ENABLED = CONFIG.defineBoolean("remoteNpcDeparture.enabled", true);
+        REMOTE_NPC_DEPARTURE_MIN_MINUTES = CONFIG.defineInt("remoteNpcDeparture.minMinutes", 10);
+        REMOTE_NPC_DEPARTURE_MAX_MINUTES = CONFIG.defineInt("remoteNpcDeparture.maxMinutes", 30);
 
-        TURN_ON_NPC_CHAT = BUILDER.comment(
-                        "Enable Player NPC chat.")
-                .define("turnOnNpcChat", true);
-        SHOW_NPC_CHAT_PREFIX = BUILDER.comment(
-                        "Add [NPC] before the existing <name> prefix in Player NPC chat.")
-                .define("showNpcChatPrefix", false);
-        NPC_CHAT_LOCALE = BUILDER.comment(
-                        "Datapack locale used for Player NPC event chat, for example en_us.")
-                .define("npcChatLocale", "en_us", value -> value instanceof String locale
-                        && locale.matches("[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*"));
+        TURN_ON_NPC_CHAT = CONFIG.defineBoolean("turnOnNpcChat", true);
+        SHOW_NPC_CHAT_PREFIX = CONFIG.defineBoolean("showNpcChatPrefix", false);
+        NPC_CHAT_LOCALE = CONFIG.defineString("npcChatLocale", "en_us");
 
-        FORCE_TICK_MANAGE = BUILDER.comment(
-                        "Keep Player NPC chunks loaded: -1 automatic, 0 disabled, 1 all NPCs.")
-                .defineInRange("forceTickManage", -1, -1, 1);
+        FORCE_TICK_MANAGE = CONFIG.defineInt("forceTickManage", -1);
+        MAX_NATURAL_PLAYER_NPCS = CONFIG.defineInt("maxNaturalPlayerNpcs", DEFAULT_MAX_NATURAL_PLAYER_NPCS);
+        AI_PROCESSING_NPC_LIMIT = CONFIG.defineInt("aiScheduler.processingNpcLimit", -1);
+        AI_TARGET_SERVER_MSPT = CONFIG.defineDouble("aiScheduler.targetServerMspt", -1.0D);
 
-        MAX_NATURAL_PLAYER_NPCS = BUILDER.comment(
-                        "Maximum naturally spawned Player NPCs: -1 automatic, 0 disabled, positive value fixed.")
-                .defineInRange("maxNaturalPlayerNpcs", DEFAULT_MAX_NATURAL_PLAYER_NPCS, -1, Integer.MAX_VALUE);
+        PLAYER_NPC_SPAWN = CONFIG.defineNumberList("spawnPlayerNpc", List.of(
+                DEFAULT_PLAYER_NPC_SPAWN.weight(),
+                DEFAULT_PLAYER_NPC_SPAWN.minCount(),
+                DEFAULT_PLAYER_NPC_SPAWN.maxCount()
+        ));
 
-        BUILDER.push("aiScheduler");
-        AI_PROCESSING_NPC_LIMIT = BUILDER.comment(
-                        "Maximum Player NPCs doing routine work at once: -1 automatic, 0 paused, positive value fixed.")
-                .defineInRange("processingNpcLimit", -1, -1, 64);
-        AI_TARGET_SERVER_MSPT = BUILDER.comment(
-                        "Server MSPT target for automatic AI scheduling. -1 uses the default target.")
-                .defineInRange("targetServerMspt", -1.0D, -1.0D, 49.0D);
-        BUILDER.pop();
+        BLACKLIST_COMPAT_MOD_WEAPON = CONFIG.defineStringList("blacklistCompatModWeapon", List.of());
 
-        PLAYER_NPC_SPAWN = BUILDER.comment(
-                        "Player NPC spawn settings: [weight, minCount, maxCount]. Weight 0 disables spawning.")
-                .defineList("spawnPlayerNpc", List.of(
-                        DEFAULT_PLAYER_NPC_SPAWN.weight(),
-                        DEFAULT_PLAYER_NPC_SPAWN.minCount(),
-                        DEFAULT_PLAYER_NPC_SPAWN.maxCount()
-                ), element -> element instanceof Number);
+        PERFORMANCE_MONITOR_ENABLED = CONFIG.defineBoolean("performanceMonitor.enabled", false);
+    }
 
-        BLACKLIST_COMPAT_MOD_WEAPON = BUILDER.comment(
-                        "Mod IDs whose weapons Player NPCs cannot receive.")
-                .defineList("blacklistCompatModWeapon", List.of(), element -> element instanceof String);
+    private SmartNpcConfig() {
+    }
 
-        BUILDER.push("performanceMonitor");
-        PERFORMANCE_MONITOR_ENABLED = BUILDER.comment(
-                        "Enable Smart NPC TPS warnings. TPS sampling, inspector data, and automatic resource controls remain active.")
-                .define("enabled", false);
-        BUILDER.pop();
+    public static void load() {
+        CONFIG.load();
+    }
 
-        SPEC = BUILDER.build();
+    /** Reloads from disk; called when the server (re)starts a datapack cycle. */
+    public static void reload() {
+        CONFIG.reload();
     }
 
     public static SpawnConfig getPlayerNpcSpawnConfig() {

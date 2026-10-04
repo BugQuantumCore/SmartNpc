@@ -9,17 +9,10 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.entity.MobSpawnType;
 import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.levelgen.Heightmap;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
-import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
-import net.minecraftforge.event.entity.living.LivingDeathEvent;
-import net.minecraftforge.event.server.ServerStartedEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -34,7 +27,6 @@ import java.util.WeakHashMap;
  * Population admission for natural Player NPC spawning. This is deliberately independent from
  * routine AI worker ownership and force-ticket management.
  */
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PlayerNpcNaturalSpawnCap {
     private static final int STARTUP_AUTO_CAP = 4;
     private static final int MAX_EXPLORATION_AUTO_CAP = 16;
@@ -110,20 +102,18 @@ public final class PlayerNpcNaturalSpawnCap {
         }
     }
 
-    @SubscribeEvent
-    public static void onEntityJoinLevel(EntityJoinLevelEvent event) {
-        if (event.getEntity() instanceof PlayerNpcEntity playerNpc
-                && event.getLevel() instanceof ServerLevel serverLevel
+    public static void onEntityJoinLevel(Entity entity, Level level) {
+        if (entity instanceof PlayerNpcEntity playerNpc
+                && level instanceof ServerLevel serverLevel
                 && playerNpc.isAlive()
                 && !playerNpc.isRemoved()) {
             state(serverLevel.getServer()).onLoaded(playerNpc.getUUID());
         }
     }
 
-    @SubscribeEvent
-    public static void onEntityLeaveLevel(EntityLeaveLevelEvent event) {
-        if (!(event.getEntity() instanceof PlayerNpcEntity playerNpc)
-                || !(event.getLevel() instanceof ServerLevel serverLevel)) {
+    public static void onEntityLeaveLevel(Entity entity, Level level) {
+        if (!(entity instanceof PlayerNpcEntity playerNpc)
+                || !(level instanceof ServerLevel serverLevel)) {
             return;
         }
         Entity.RemovalReason removalReason = playerNpc.getRemovalReason();
@@ -134,17 +124,14 @@ public final class PlayerNpcNaturalSpawnCap {
         state(serverLevel.getServer()).onUnloaded(playerNpc.getUUID(), permanentlyRemoved);
     }
 
-    @SubscribeEvent
-    public static void onLivingDeath(LivingDeathEvent event) {
-        if (event.getEntity() instanceof PlayerNpcEntity playerNpc
+    public static void onLivingDeath(net.minecraft.world.entity.LivingEntity entity, net.minecraft.world.damagesource.DamageSource source) {
+        if (entity instanceof PlayerNpcEntity playerNpc
                 && playerNpc.level() instanceof ServerLevel serverLevel) {
             state(serverLevel.getServer()).onUnloaded(playerNpc.getUUID(), true);
         }
     }
 
-    @SubscribeEvent
-    public static void onServerStarted(ServerStartedEvent event) {
-        MinecraftServer server = event.getServer();
+    public static void onServerStarted(MinecraftServer server) {
         PopulationState state = state(server);
         PlayerNpcPopulationData populationData = PlayerNpcPopulationData.get(server);
         Set<UUID> persistedNpcIds = new LinkedHashSet<>(populationData.npcIds());
@@ -158,7 +145,7 @@ public final class PlayerNpcNaturalSpawnCap {
         state.restoreLearnedAutoCap(populationData.learnedAutoCap());
         for (ServerLevel level : server.getAllLevels()) {
             for (Entity entity : level.getAllEntities()) {
-                if (entity.getType() == SmartNpcModEntities.PLAYER_NPC.get()
+                if (entity.getType() == SmartNpcModEntities.PLAYER_NPC
                         && entity instanceof PlayerNpcEntity playerNpc
                         && playerNpc.isAlive()
                         && !playerNpc.isRemoved()) {
@@ -170,25 +157,20 @@ public final class PlayerNpcNaturalSpawnCap {
         state.flushPersistent(server);
     }
 
-    @SubscribeEvent
-    public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
-        PopulationState state = state(event.getServer());
-        state.updatePolicy(event.getServer(), false);
-        state.tryLoadedWorldSpawn(event.getServer());
-        state.flushPersistent(event.getServer());
+    public static void onServerTick(MinecraftServer server) {
+        PopulationState state = state(server);
+        state.updatePolicy(server, false);
+        state.tryLoadedWorldSpawn(server);
+        state.flushPersistent(server);
     }
 
-    @SubscribeEvent
-    public static void onServerStopping(ServerStoppingEvent event) {
+    public static void onServerStopping(MinecraftServer server) {
         PopulationState state;
         synchronized (SERVER_STATES) {
-            state = SERVER_STATES.remove(event.getServer());
+            state = SERVER_STATES.remove(server);
         }
         if (state != null) {
-            state.flushPersistent(event.getServer());
+            state.flushPersistent(server);
         }
     }
 
@@ -279,11 +261,11 @@ public final class PlayerNpcNaturalSpawnCap {
                 }
                 int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
                 BlockPos pos = new BlockPos(x, y, z);
-                if (!PlayerNpcEntity.canSpawn(SmartNpcModEntities.PLAYER_NPC.get(), level,
+                if (!PlayerNpcEntity.canSpawn(SmartNpcModEntities.PLAYER_NPC, level,
                         MobSpawnType.NATURAL, pos, level.random)) {
                     continue;
                 }
-                PlayerNpcEntity npc = SmartNpcModEntities.PLAYER_NPC.get().create(level);
+                PlayerNpcEntity npc = SmartNpcModEntities.PLAYER_NPC.create(level);
                 if (npc == null) {
                     return;
                 }

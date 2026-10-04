@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
@@ -1928,15 +1929,15 @@ public class MiningNightCampGoal extends Goal {
 
     private BlockPos getTemporaryFurnacePos() {
         if (FurnaceAi.TEMP_FURNACE_KIND_COOKING.equals(
-                this.playerNpc.getPersistentData().getString(FurnaceAi.TEMP_FURNACE_KIND))
-                || !this.playerNpc.getPersistentData().contains(FurnaceAi.TEMP_FURNACE_X)) {
+                ForgeDataCompat.get(playerNpc).getString(FurnaceAi.TEMP_FURNACE_KIND))
+                || !ForgeDataCompat.get(playerNpc).contains(FurnaceAi.TEMP_FURNACE_X)) {
             return null;
         }
 
         return new BlockPos(
-                this.playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_X),
-                this.playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Y),
-                this.playerNpc.getPersistentData().getInt(FurnaceAi.TEMP_FURNACE_Z)
+                ForgeDataCompat.get(playerNpc).getInt(FurnaceAi.TEMP_FURNACE_X),
+                ForgeDataCompat.get(playerNpc).getInt(FurnaceAi.TEMP_FURNACE_Y),
+                ForgeDataCompat.get(playerNpc).getInt(FurnaceAi.TEMP_FURNACE_Z)
         );
     }
 
@@ -1945,10 +1946,10 @@ public class MiningNightCampGoal extends Goal {
             return false;
         }
 
-        furnace.getPersistentData().putUUID(CAMP_FURNACE_OWNER, this.playerNpc.getUUID());
+        ForgeDataCompat.get(furnace).putUUID(CAMP_FURNACE_OWNER, this.playerNpc.getUUID());
         furnace.setChanged();
 
-        CompoundTag data = this.playerNpc.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(playerNpc);
         data.putInt(FurnaceAi.TEMP_FURNACE_X, pos.getX());
         data.putInt(FurnaceAi.TEMP_FURNACE_Y, pos.getY());
         data.putInt(FurnaceAi.TEMP_FURNACE_Z, pos.getZ());
@@ -1961,14 +1962,14 @@ public class MiningNightCampGoal extends Goal {
     }
 
     private void clearTemporaryFurnace() {
-        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_X);
-        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Y);
-        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_Z);
-        this.playerNpc.getPersistentData().remove(FurnaceAi.TEMP_FURNACE_KIND);
+        ForgeDataCompat.get(playerNpc).remove(FurnaceAi.TEMP_FURNACE_X);
+        ForgeDataCompat.get(playerNpc).remove(FurnaceAi.TEMP_FURNACE_Y);
+        ForgeDataCompat.get(playerNpc).remove(FurnaceAi.TEMP_FURNACE_Z);
+        ForgeDataCompat.get(playerNpc).remove(FurnaceAi.TEMP_FURNACE_KIND);
     }
 
     private boolean hasOwnedCampFurnaceReference() {
-        CompoundTag data = this.playerNpc.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(playerNpc);
         return data.contains(CAMP_FURNACE_X)
                 && data.contains(CAMP_FURNACE_Y)
                 && data.contains(CAMP_FURNACE_Z)
@@ -1980,7 +1981,7 @@ public class MiningNightCampGoal extends Goal {
             return null;
         }
 
-        CompoundTag data = this.playerNpc.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(playerNpc);
         BlockPos pos = new BlockPos(
                 data.getInt(CAMP_FURNACE_X),
                 data.getInt(CAMP_FURNACE_Y),
@@ -2007,7 +2008,7 @@ public class MiningNightCampGoal extends Goal {
                 || !(ownedFurnace.level().getBlockEntity(ownedFurnace.pos()) instanceof FurnaceBlockEntity furnace)) {
             return false;
         }
-        CompoundTag furnaceData = furnace.getPersistentData();
+        CompoundTag furnaceData = ForgeDataCompat.get(furnace);
         return furnaceData.hasUUID(CAMP_FURNACE_OWNER)
                 && this.playerNpc.getUUID().equals(furnaceData.getUUID(CAMP_FURNACE_OWNER));
     }
@@ -2035,7 +2036,7 @@ public class MiningNightCampGoal extends Goal {
         if (this.hasOwnedCampFurnaceReference()) {
             return;
         }
-        String temporaryKind = this.playerNpc.getPersistentData().getString(FurnaceAi.TEMP_FURNACE_KIND);
+        String temporaryKind = ForgeDataCompat.get(playerNpc).getString(FurnaceAi.TEMP_FURNACE_KIND);
         boolean explicitCamp = FurnaceAi.TEMP_FURNACE_KIND_NIGHT_CAMP.equals(temporaryKind);
         // Kindless records may be genuine old camp furnaces, but adopting them in
         // daytime also steals old CookFoodGoal furnaces. Migrate only while camping.
@@ -2053,7 +2054,7 @@ public class MiningNightCampGoal extends Goal {
             return;
         }
 
-        CompoundTag furnaceData = furnace.getPersistentData();
+        CompoundTag furnaceData = ForgeDataCompat.get(furnace);
         if (furnaceData.hasUUID(CAMP_FURNACE_OWNER)
                 && !this.playerNpc.getUUID().equals(furnaceData.getUUID(CAMP_FURNACE_OWNER))) {
             return;
@@ -2116,7 +2117,7 @@ public class MiningNightCampGoal extends Goal {
         if (ownedPos != null && ownedPos.equals(this.getTemporaryFurnacePos())) {
             this.clearTemporaryFurnace();
         }
-        CompoundTag data = this.playerNpc.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(playerNpc);
         data.remove(CAMP_FURNACE_X);
         data.remove(CAMP_FURNACE_Y);
         data.remove(CAMP_FURNACE_Z);

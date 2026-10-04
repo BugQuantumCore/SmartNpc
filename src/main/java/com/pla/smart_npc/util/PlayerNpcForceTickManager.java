@@ -19,16 +19,8 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
-import net.minecraftforge.common.util.FakePlayerFactory;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
-import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
-import net.minecraftforge.event.entity.living.LivingDeathEvent;
-import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.event.server.ServerStartedEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.Level;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
@@ -44,7 +36,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PlayerNpcForceTickManager {
     // One distance-2 region ticket already propagates the center through the surrounding loaded
     // status levels. Anchoring every chunk in a 3x3 square made all nine chunks independent
@@ -91,18 +82,16 @@ public final class PlayerNpcForceTickManager {
         return SmartNpcConfig.isForceTickManageEnabled();
     }
 
-    @SubscribeEvent
-    public static void onEntityJoinLevel(EntityJoinLevelEvent event) {
-        if (event.getEntity() instanceof PlayerNpcEntity playerNpc
-                && event.getLevel() instanceof ServerLevel) {
+    public static void onEntityJoinLevel(Entity entity, Level level) {
+        if (entity instanceof PlayerNpcEntity playerNpc
+                && level instanceof ServerLevel) {
             track(playerNpc);
         }
     }
 
-    @SubscribeEvent
-    public static void onEntityLeaveLevel(EntityLeaveLevelEvent event) {
-        if (event.getEntity() instanceof PlayerNpcEntity playerNpc
-                && event.getLevel() instanceof ServerLevel) {
+    public static void onEntityLeaveLevel(Entity entity, Level level) {
+        if (entity instanceof PlayerNpcEntity playerNpc
+                && level instanceof ServerLevel) {
             Entity.RemovalReason removalReason = playerNpc.getRemovalReason();
             boolean permanentlyRemoved = !playerNpc.isAlive()
                     || playerNpc.isDeadOrDying()
@@ -112,16 +101,14 @@ public final class PlayerNpcForceTickManager {
         }
     }
 
-    @SubscribeEvent
-    public static void onLivingDeath(LivingDeathEvent event) {
-        if (event.getEntity() instanceof PlayerNpcEntity playerNpc) {
+    public static void onLivingDeath(net.minecraft.world.entity.LivingEntity entity, net.minecraft.world.damagesource.DamageSource source) {
+        if (entity instanceof PlayerNpcEntity playerNpc) {
             release(playerNpc, true);
         }
     }
 
-    @SubscribeEvent
-    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
-        if (!isEnabled() || !(event.getEntity() instanceof ServerPlayer serverPlayer)) {
+    public static void onPlayerLoggedIn(ServerPlayer serverPlayer) {
+        if (!isEnabled()) {
             return;
         }
 
@@ -146,14 +133,9 @@ public final class PlayerNpcForceTickManager {
         }
     }
 
-    @SubscribeEvent
-    public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
+    public static void onServerTick(MinecraftServer server) {
         long performanceStartNanos = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
 
-        MinecraftServer server = event.getServer();
         boolean enabled = isEnabled();
         if (!enabled) {
             if (!MANAGED_NPCS.isEmpty()) {
@@ -175,20 +157,18 @@ public final class PlayerNpcForceTickManager {
         PlayerNpcPerformanceMonitor.recordForceManagerTick(performanceStartNanos);
     }
 
-    @SubscribeEvent
-    public static void onServerStarted(ServerStartedEvent event) {
+    public static void onServerStarted(MinecraftServer server) {
         resetAutomaticState();
         if (isEnabled()) {
-            restorePersistentTickets(event.getServer());
-            reconcileLoadedNpcs(event.getServer());
+            restorePersistentTickets(server);
+            reconcileLoadedNpcs(server);
             lastEnabled = true;
-            rebalanceForceTickets(event.getServer());
+            rebalanceForceTickets(server);
         }
     }
 
-    @SubscribeEvent
-    public static void onServerStopping(ServerStoppingEvent event) {
-        releaseAll(event.getServer());
+    public static void onServerStopping(MinecraftServer server) {
+        releaseAll(server);
         lastEnabled = null;
         resetAutomaticState();
     }
@@ -463,12 +443,17 @@ public final class PlayerNpcForceTickManager {
         return managedNpc != null && managedNpc.forceTicketSelected;
     }
 
-    @SubscribeEvent
-    public static void onTabListNameFormat(PlayerEvent.TabListNameFormat event) {
-        ManagedNpc managedNpc = MANAGED_NPCS.get(event.getEntity().getUUID());
+    /**
+     * Fabric port of the Forge {@code PlayerEvent.TabListNameFormat} handler; called
+     * from {@code ServerPlayerTabNameMixin}.
+     */
+    @Nullable
+    public static net.minecraft.network.chat.Component getTabListDisplayNameOverride(ServerPlayer player) {
+        ManagedNpc managedNpc = MANAGED_NPCS.get(player.getUUID());
         if (managedNpc != null) {
-            event.setDisplayName(managedNpc.tabDisplayName());
+            return managedNpc.tabDisplayName();
         }
+        return null;
     }
 
     public static boolean isNpcTabProfileName(String profileName) {
@@ -699,7 +684,7 @@ public final class PlayerNpcForceTickManager {
     private static void reconcileLoadedNpcs(MinecraftServer server) {
         for (ServerLevel level : server.getAllLevels()) {
             for (Entity entity : level.getAllEntities()) {
-                if (entity.getType() == SmartNpcModEntities.PLAYER_NPC.get()
+                if (entity.getType() == SmartNpcModEntities.PLAYER_NPC
                         && entity instanceof PlayerNpcEntity playerNpc
                         && playerNpc.isAlive()
                         && !playerNpc.isRemoved()) {
@@ -857,7 +842,7 @@ public final class PlayerNpcForceTickManager {
         private final UUID npcId;
         private final Set<ChunkPos> forcedChunks = new LinkedHashSet<>();
         @Nullable
-        private net.minecraftforge.common.util.FakePlayer tabPlayer;
+        private net.fabricmc.fabric.api.entity.FakePlayer tabPlayer;
         @Nullable
         private net.minecraft.resources.ResourceKey<Level> levelKey;
         @Nullable
@@ -1032,13 +1017,10 @@ public final class PlayerNpcForceTickManager {
                     PLAYER_NPC_TICKET,
                     chunkPos,
                     FORCE_TICK_DISTANCE,
-                    new TicketKey(this.npcId, chunkPos.toLong()),
                     // Level 31 already keeps the center ENTITY_TICKING so the NPC, scheduled
-                    // ticks, and ticking block entities continue to run. Forge's forceTicks flag
-                    // additionally opts an otherwise-distant chunk into tickChunk/random ticks
-                    // and natural spawning. Match vanilla /forceload semantics and do not make
-                    // every roaming NPC a synthetic player for chunk-environment work.
-                    false
+                    // ticks, and ticking block entities continue to run. Vanilla has no
+                    // Forge-style forceTicks flag here; vanilla /forceload semantics apply.
+                    new TicketKey(this.npcId, chunkPos.toLong())
             );
         }
 
@@ -1047,8 +1029,7 @@ public final class PlayerNpcForceTickManager {
                     PLAYER_NPC_TICKET,
                     chunkPos,
                     FORCE_TICK_DISTANCE,
-                    new TicketKey(this.npcId, chunkPos.toLong()),
-                    false
+                    new TicketKey(this.npcId, chunkPos.toLong())
             );
         }
 
@@ -1082,7 +1063,7 @@ public final class PlayerNpcForceTickManager {
             if (this.tabListed && !displayNameChanged && !profileChanged) {
                 return;
             }
-            net.minecraftforge.common.util.FakePlayer fakePlayer = this.tabPlayer(level, npc);
+            net.fabricmc.fabric.api.entity.FakePlayer fakePlayer = this.tabPlayer(level, npc);
             if (!this.tabListed) {
                 server.getPlayerList().broadcastAll(ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(fakePlayer)));
                 this.tabListed = true;
@@ -1104,9 +1085,9 @@ public final class PlayerNpcForceTickManager {
             }
         }
 
-        private net.minecraftforge.common.util.FakePlayer tabPlayer(ServerLevel level, PlayerNpcEntity npc) {
+        private net.fabricmc.fabric.api.entity.FakePlayer tabPlayer(ServerLevel level, PlayerNpcEntity npc) {
             if (this.tabPlayer == null || !Objects.equals(this.tabPlayerLevelKey, level.dimension())) {
-                this.tabPlayer = FakePlayerFactory.get(level, createTabProfile(npc));
+                this.tabPlayer = net.fabricmc.fabric.api.entity.FakePlayer.get(level, createTabProfile(npc));
                 this.tabPlayerLevelKey = level.dimension();
             }
             copyProfileProperties(npc.getProfile(), this.tabPlayer.getGameProfile());

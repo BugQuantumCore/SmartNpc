@@ -36,18 +36,20 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.common.ToolActions;
-import net.minecraftforge.entity.IEntityAdditionalSpawnData;
-import net.minecraftforge.network.NetworkHooks;
-import net.minecraftforge.network.PlayMessages;
 import org.jetbrains.annotations.NotNull;
 
 import javax.annotation.Nullable;
 import java.util.List;
 
-public class PlayerNpcFishingBobberEntity extends Projectile implements IEntityAdditionalSpawnData {
+/**
+ * Fabric port: Forge's {@code IEntityAdditionalSpawnData} payload for the angler
+ * entity id is replaced by a synched entity data entry, so the client can resolve
+ * the angler the same way it resolved {@code readSpawnData}.
+ */
+public class PlayerNpcFishingBobberEntity extends Projectile {
     private static final EntityDataAccessor<Integer> DATA_HOOKED_ENTITY = SynchedEntityData.defineId(PlayerNpcFishingBobberEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<Boolean> DATA_BITING = SynchedEntityData.defineId(PlayerNpcFishingBobberEntity.class, EntityDataSerializers.BOOLEAN);
+    private static final EntityDataAccessor<Integer> DATA_ANGLER_ID = SynchedEntityData.defineId(PlayerNpcFishingBobberEntity.class, EntityDataSerializers.INT);
     private static final int MAX_OUT_OF_WATER_TICKS = 10;
     private static final int KEEP_ALIVE_TICKS = 100;
     private static final int XP_PER_CATCH = 2;
@@ -66,7 +68,6 @@ public class PlayerNpcFishingBobberEntity extends Projectile implements IEntityA
     private PlayerNpcEntity angler;
     @Nullable
     private Entity hookedIn;
-    private int anglerId = -1;
     private int groundTicks;
     private int outOfWaterTicks;
     private int nibbleTicks;
@@ -84,13 +85,9 @@ public class PlayerNpcFishingBobberEntity extends Projectile implements IEntityA
         this.noCulling = true;
     }
 
-    public PlayerNpcFishingBobberEntity(PlayMessages.SpawnEntity spawnEntity, Level level) {
-        this(SmartNpcModEntities.PLAYER_NPC_FISHING_BOBBER.get(), level);
-    }
-
     public void castFrom(PlayerNpcEntity angler, BlockPos waterPos, int luck, int lureSpeed) {
         this.angler = angler;
-        this.anglerId = angler.getId();
+        this.setAnglerId(angler.getId());
         this.setOwner(angler);
         this.luck = Math.max(0, luck);
         this.lureSpeed = Math.max(0, lureSpeed);
@@ -128,6 +125,7 @@ public class PlayerNpcFishingBobberEntity extends Projectile implements IEntityA
     protected void defineSynchedData() {
         this.getEntityData().define(DATA_HOOKED_ENTITY, 0);
         this.getEntityData().define(DATA_BITING, false);
+        this.getEntityData().define(DATA_ANGLER_ID, -1);
     }
 
     @Override
@@ -251,8 +249,8 @@ public class PlayerNpcFishingBobberEntity extends Projectile implements IEntityA
     }
 
     private boolean shouldStopFishing(PlayerNpcEntity currentAngler) {
-        boolean hasRod = currentAngler.getMainHandItem().canPerformAction(ToolActions.FISHING_ROD_CAST)
-                || currentAngler.getOffhandItem().canPerformAction(ToolActions.FISHING_ROD_CAST);
+        boolean hasRod = currentAngler.getMainHandItem().getItem() instanceof net.minecraft.world.item.FishingRodItem
+                || currentAngler.getOffhandItem().getItem() instanceof net.minecraft.world.item.FishingRodItem;
         if (!currentAngler.isRemoved()
                 && currentAngler.isAlive()
                 && hasRod
@@ -266,9 +264,7 @@ public class PlayerNpcFishingBobberEntity extends Projectile implements IEntityA
 
     private void checkCollision() {
         HitResult hitResult = ProjectileUtil.getHitResultOnMoveVector(this, this::canHitEntity);
-        if (hitResult.getType() == HitResult.Type.MISS || !net.minecraftforge.event.ForgeEventFactory.onProjectileImpact(this, hitResult)) {
-            this.onHit(hitResult);
-        }
+        this.onHit(hitResult);
     }
 
     @Override
@@ -532,20 +528,12 @@ public class PlayerNpcFishingBobberEntity extends Projectile implements IEntityA
         return false;
     }
 
-    @Override
-    public @NotNull Packet<ClientGamePacketListener> getAddEntityPacket() {
-        return NetworkHooks.getEntitySpawningPacket(this);
+    private void setAnglerId(int anglerId) {
+        this.entityData.set(DATA_ANGLER_ID, anglerId);
     }
 
-    @Override
-    public void writeSpawnData(FriendlyByteBuf buffer) {
-        PlayerNpcEntity currentAngler = this.getAngler();
-        buffer.writeInt(currentAngler == null ? -1 : currentAngler.getId());
-    }
-
-    @Override
-    public void readSpawnData(FriendlyByteBuf additionalData) {
-        this.anglerId = additionalData.readInt();
+    private int getAnglerId() {
+        return this.entityData.get(DATA_ANGLER_ID);
     }
 
     @Nullable
@@ -557,12 +545,12 @@ public class PlayerNpcFishingBobberEntity extends Projectile implements IEntityA
         Entity owner = this.getOwner();
         if (owner instanceof PlayerNpcEntity playerNpc) {
             this.angler = playerNpc;
-            this.anglerId = playerNpc.getId();
+            this.setAnglerId(playerNpc.getId());
             return this.angler;
         }
 
-        if (this.anglerId >= 0) {
-            Entity entity = this.level().getEntity(this.anglerId);
+        if (this.getAnglerId() >= 0) {
+            Entity entity = this.level().getEntity(this.getAnglerId());
             if (entity instanceof PlayerNpcEntity playerNpc) {
                 this.angler = playerNpc;
                 return this.angler;

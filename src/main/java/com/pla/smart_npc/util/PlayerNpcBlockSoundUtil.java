@@ -12,7 +12,7 @@ public final class PlayerNpcBlockSoundUtil {
     }
 
     public static void playMiningHitSound(ServerLevel serverLevel, BlockPos pos, BlockState state, PlayerNpcEntity playerNpc) {
-        SoundType soundType = state.getSoundType(serverLevel, pos, playerNpc);
+        SoundType soundType = state.getSoundType();
         serverLevel.playSound(
                 null,
                 pos,
@@ -24,7 +24,7 @@ public final class PlayerNpcBlockSoundUtil {
     }
 
     public static void playPlaceSound(ServerLevel serverLevel, BlockPos pos, BlockState state, PlayerNpcEntity playerNpc) {
-        SoundType soundType = state.getSoundType(serverLevel, pos, playerNpc);
+        SoundType soundType = state.getSoundType();
         serverLevel.playSound(
                 null,
                 pos,

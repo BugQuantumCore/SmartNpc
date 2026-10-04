@@ -77,7 +77,13 @@ public final class PlayerNpcBlockBreakUtil {
     ) {
         int fortune = EnchantmentHelper.getItemEnchantmentLevel(Enchantments.BLOCK_FORTUNE, heldStack);
         int silkTouch = EnchantmentHelper.hasSilkTouch(heldStack) ? 1 : 0;
-        int xp = state.getExpDrop(serverLevel, serverLevel.getRandom(), pos, fortune, silkTouch);
+        // Forge 的 BlockState#getExpDrop 在 Fabric 上用 DropExperienceBlock 的经验区间替代
+        int xp = 0;
+        if (state.getBlock() instanceof net.minecraft.world.level.block.DropExperienceBlock) {
+            net.minecraft.util.valueproviders.IntProvider range =
+                    ((com.pla.smart_npc.mixin.DropExperienceBlockAccessor) state.getBlock()).smartNpc$getExperienceRange();
+            xp = range.sample(serverLevel.getRandom());
+        }
         if (xp <= 0) {
             return;
         }

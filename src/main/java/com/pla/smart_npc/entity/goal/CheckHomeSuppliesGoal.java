@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.ChestAi;
@@ -848,17 +849,17 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private boolean canRetryToolChestCheck(ServerLevel serverLevel) {
-        return !this.playerNpc.getPersistentData().contains(LAST_TOOL_CHEST_CHECK_TIME, Tag.TAG_LONG)
-                || serverLevel.getGameTime() - this.playerNpc.getPersistentData().getLong(LAST_TOOL_CHEST_CHECK_TIME) >= TOOL_CHEST_RECHECK_TICKS;
+        return !ForgeDataCompat.get(playerNpc).contains(LAST_TOOL_CHEST_CHECK_TIME, Tag.TAG_LONG)
+                || serverLevel.getGameTime() - ForgeDataCompat.get(playerNpc).getLong(LAST_TOOL_CHEST_CHECK_TIME) >= TOOL_CHEST_RECHECK_TICKS;
     }
 
     private void markToolChestChecked(ServerLevel serverLevel) {
-        this.playerNpc.getPersistentData().putLong(LAST_TOOL_CHEST_CHECK_TIME, serverLevel.getGameTime());
+        ForgeDataCompat.get(playerNpc).putLong(LAST_TOOL_CHEST_CHECK_TIME, serverLevel.getGameTime());
     }
 
     private boolean checkedToday(String key, long day) {
-        return this.playerNpc.getPersistentData().contains(key, Tag.TAG_LONG)
-                && this.playerNpc.getPersistentData().getLong(key) == day;
+        return ForgeDataCompat.get(playerNpc).contains(key, Tag.TAG_LONG)
+                && ForgeDataCompat.get(playerNpc).getLong(key) == day;
     }
 
     private void markModeChecked(ServerLevel serverLevel) {
@@ -870,7 +871,7 @@ public class CheckHomeSuppliesGoal extends Goal {
     }
 
     private void markChecked(String key, long day) {
-        this.playerNpc.getPersistentData().putLong(key, day);
+        ForgeDataCompat.get(playerNpc).putLong(key, day);
     }
 
     private void lookAtTarget() {

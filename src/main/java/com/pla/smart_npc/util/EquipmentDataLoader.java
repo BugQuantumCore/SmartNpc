@@ -1,11 +1,13 @@
 package com.pla.smart_npc.util;
 
+import net.fabricmc.loader.api.FabricLoader;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.pla.smart_npc.clazz.Difficulty;
 import com.pla.smart_npc.config.SmartNpcConfig;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.packs.resources.ResourceManager;
@@ -19,9 +21,6 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ShieldItem;
 import net.minecraft.world.item.SwordItem;
 import net.minecraft.world.item.TridentItem;
-import net.minecraftforge.fml.ModList;
-import net.minecraftforge.registries.ForgeRegistries;
-import net.minecraftforge.server.ServerLifecycleHooks;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -32,7 +31,13 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 
-public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
+public class EquipmentDataLoader extends SimpleJsonResourceReloadListener
+        implements net.fabricmc.fabric.api.resource.IdentifiableResourceReloadListener {
+    @Override
+    public net.minecraft.resources.ResourceLocation getFabricId() {
+        return new net.minecraft.resources.ResourceLocation("smart_npc", "equipment_data");
+    }
+
     private static final Gson GSON = new Gson();
     private static final Random RANDOM = new Random();
     private static final Map<String, List<EquipmentEntry>> EQUIP_ITEMS = new HashMap<>();
@@ -73,7 +78,7 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
             if (SmartNpcConfig.isCompatWeaponBlacklisted(modId)) {
                 continue;
             }
-            if (!MINECRAFT.equals(modId) && !ModList.get().isLoaded(modId)) {
+            if (!MINECRAFT.equals(modId) && !FabricLoader.getInstance().isModLoaded(modId)) {
                 continue;
             }
 
@@ -133,11 +138,11 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
             return null;
         }
 
-        return ForgeRegistries.ITEMS.getValue(ResourceLocation.fromNamespaceAndPath(parts[0], parts[1]));
+        return BuiltInRegistries.ITEM.get(new ResourceLocation(parts[0], parts[1]));
     }
 
     public static String getItemId(ItemStack stack) {
-        ResourceLocation key = ForgeRegistries.ITEMS.getKey(stack.getItem());
+        ResourceLocation key = BuiltInRegistries.ITEM.getKey(stack.getItem());
         return key == null ? "" : key.toString();
     }
 
@@ -325,7 +330,7 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
     }
 
     private static Difficulty getCurrentDifficulty(Entity entity) {
-        MinecraftServer server = entity != null ? entity.getServer() : ServerLifecycleHooks.getCurrentServer();
+        MinecraftServer server = entity != null ? entity.getServer() : com.pla.smart_npc.util.compat.FabricServerHolder.getCurrentServer();
         return server != null ? ProgressionUtil.getDifficulty(server) : Difficulty.EASY;
     }
 
@@ -404,7 +409,7 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
             }
 
             String[] parts = itemId.split(":", 2);
-            Item item = ForgeRegistries.ITEMS.getValue(ResourceLocation.fromNamespaceAndPath(parts[0], parts[1]));
+            Item item = BuiltInRegistries.ITEM.get(new ResourceLocation(parts[0], parts[1]));
             if (item == null) continue;
 
             int damage = 0;
@@ -431,7 +436,7 @@ public class EquipmentDataLoader extends SimpleJsonResourceReloadListener {
 
         String itemId = pool.get(RANDOM.nextInt(pool.size()));
         String[] parts = itemId.split(":", 2);
-        Item item = ForgeRegistries.ITEMS.getValue(ResourceLocation.fromNamespaceAndPath(parts[0], parts[1]));
+        Item item = BuiltInRegistries.ITEM.get(new ResourceLocation(parts[0], parts[1]));
         if (item == null) return Optional.empty();
 
         int damage = 0;

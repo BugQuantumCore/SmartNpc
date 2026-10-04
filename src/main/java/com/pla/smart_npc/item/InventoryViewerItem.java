@@ -18,7 +18,6 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.level.Level;
-import net.minecraftforge.network.PacketDistributor;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.List;
@@ -44,8 +43,8 @@ public class InventoryViewerItem extends Item {
         }
 
         if (player instanceof ServerPlayer serverPlayer) {
-            SmartNpcNetwork.CHANNEL.send(
-                    PacketDistributor.PLAYER.with(() -> serverPlayer),
+            SmartNpcNetwork.sendToPlayer(
+                    serverPlayer,
                     new PlayerNpcInspectorPacket(
                             target.getId(),
                             PlayerNpcInspectorData.createSnapshot(playerNpcEntity),
@@ -70,8 +69,8 @@ public class InventoryViewerItem extends Item {
             if (overall && PlayerNpcInspectatorModePacket.isInspectatorActive(serverPlayer)) {
                 PlayerNpcInspectatorModePacket.restorePlayer(serverPlayer);
             }
-            SmartNpcNetwork.CHANNEL.send(
-                    PacketDistributor.PLAYER.with(() -> serverPlayer),
+            SmartNpcNetwork.sendToPlayer(
+                    serverPlayer,
                     overall
                             ? PlayerNpcInspectorPacket.overall(
                                     PlayerNpcInspectorData.createAiResourceText(serverPlayer.server, null))

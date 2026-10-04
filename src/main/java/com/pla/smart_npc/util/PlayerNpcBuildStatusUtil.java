@@ -3,13 +3,13 @@ package com.pla.smart_npc.util;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -104,7 +104,7 @@ public final class PlayerNpcBuildStatusUtil {
             if (rendered >= MAX_REQUIREMENT_LINES) {
                 break;
             }
-            ResourceLocation itemId = ForgeRegistries.ITEMS.getKey(line.item);
+            ResourceLocation itemId = BuiltInRegistries.ITEM.getKey(line.item);
             if (itemId == null) {
                 continue;
             }
@@ -299,7 +299,7 @@ public final class PlayerNpcBuildStatusUtil {
             return stack.getHoverName().getString();
         }
 
-        ResourceLocation key = ForgeRegistries.ITEMS.getKey(item);
+        ResourceLocation key = BuiltInRegistries.ITEM.getKey(item);
         return key == null ? "unknown" : key.toString();
     }
 

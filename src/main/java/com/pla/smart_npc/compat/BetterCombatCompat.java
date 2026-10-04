@@ -1,6 +1,6 @@
 package com.pla.smart_npc.compat;
 
-import net.minecraftforge.fml.ModList;
+import net.fabricmc.loader.api.FabricLoader;
 
 /**
  * Common-side gate for the optional Better Combat integration.
@@ -15,6 +15,6 @@ public final class BetterCombatCompat {
     }
 
     public static boolean isLoaded() {
-        return ModList.get().isLoaded(MOD_ID);
+        return FabricLoader.getInstance().isModLoaded(MOD_ID);
     }
 }

@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.FarmAi;
@@ -191,14 +192,14 @@ public class CraftBasicGearGoal extends Goal {
     }
 
     public static BlockPos getTemporaryCraftingTablePos(PlayerNpcEntity playerNpc) {
-        if (playerNpc == null || !playerNpc.getPersistentData().contains(TEMP_TABLE_X)) {
+        if (playerNpc == null || !ForgeDataCompat.get(playerNpc).contains(TEMP_TABLE_X)) {
             return null;
         }
 
         return new BlockPos(
-                playerNpc.getPersistentData().getInt(TEMP_TABLE_X),
-                playerNpc.getPersistentData().getInt(TEMP_TABLE_Y),
-                playerNpc.getPersistentData().getInt(TEMP_TABLE_Z)
+                ForgeDataCompat.get(playerNpc).getInt(TEMP_TABLE_X),
+                ForgeDataCompat.get(playerNpc).getInt(TEMP_TABLE_Y),
+                ForgeDataCompat.get(playerNpc).getInt(TEMP_TABLE_Z)
         );
     }
 
@@ -206,9 +207,9 @@ public class CraftBasicGearGoal extends Goal {
         if (playerNpc == null) {
             return;
         }
-        playerNpc.getPersistentData().remove(TEMP_TABLE_X);
-        playerNpc.getPersistentData().remove(TEMP_TABLE_Y);
-        playerNpc.getPersistentData().remove(TEMP_TABLE_Z);
+        ForgeDataCompat.get(playerNpc).remove(TEMP_TABLE_X);
+        ForgeDataCompat.get(playerNpc).remove(TEMP_TABLE_Y);
+        ForgeDataCompat.get(playerNpc).remove(TEMP_TABLE_Z);
     }
 
     private final PlayerNpcEntity playerNpc;
@@ -556,9 +557,9 @@ public class CraftBasicGearGoal extends Goal {
             this.finished = true;
             return;
         }
-        this.playerNpc.getPersistentData().putInt(TEMP_TABLE_X, this.craftingTablePos.getX());
-        this.playerNpc.getPersistentData().putInt(TEMP_TABLE_Y, this.craftingTablePos.getY());
-        this.playerNpc.getPersistentData().putInt(TEMP_TABLE_Z, this.craftingTablePos.getZ());
+        ForgeDataCompat.get(playerNpc).putInt(TEMP_TABLE_X, this.craftingTablePos.getX());
+        ForgeDataCompat.get(playerNpc).putInt(TEMP_TABLE_Y, this.craftingTablePos.getY());
+        ForgeDataCompat.get(playerNpc).putInt(TEMP_TABLE_Z, this.craftingTablePos.getZ());
         this.craftingStandPos = this.findCraftingStand(serverLevel, this.craftingTablePos);
         this.playerNpc.setCurrentAiDetail("placed crafting table");
     }

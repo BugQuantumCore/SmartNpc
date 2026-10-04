@@ -1,12 +1,6 @@
 package com.pla.smart_npc.network;
 
-import com.pla.smart_npc.client.gui.SmartNpcInspectorOverlay;
 import net.minecraft.network.FriendlyByteBuf;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.fml.DistExecutor;
-import net.minecraftforge.network.NetworkEvent;
-
-import java.util.function.Supplier;
 
 public class PlayerNpcInspectatorCycleResultPacket {
     private final boolean handledByServer;
@@ -49,12 +43,6 @@ public class PlayerNpcInspectatorCycleResultPacket {
         return direction;
     }
 
-    public static void handle(PlayerNpcInspectatorCycleResultPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
-        NetworkEvent.Context context = contextSupplier.get();
-        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
-                Dist.CLIENT,
-                () -> () -> SmartNpcInspectorOverlay.handleInspectatorCycleResult(packet)
-        ));
-        context.setPacketHandled(true);
-    }
+    // Received via SmartNpcNetwork#registerClientReceivers on the client thread;
+    // handleInspectatorCycleResult is invoked there directly.
 }

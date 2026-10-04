@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "smart_npc",
+  "version": "${version}",
+  "name": "Smart NPC",
+  "description": "Adds Smart NPCs to make your world more enjoyable.",
+  "authors": [
+    "pla_is_me"
+  ],
+  "contact": {
+    "homepage": "https://github.com/PlaIsMe/SmartNpc",
+    "sources": "https://github.com/PlaIsMe/SmartNpc"
+  },
+  "license": "GPL-3.0",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.pla.smart_npc.SmartNpc"
+    ],
+    "client": [
+      "com.pla.smart_npc.client.SmartNpcClient"
+    ]
+  },
+  "mixins": [
+    "smart_npc.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "fabric-api": "*",
+    "minecraft": "~1.20.1",
+    "java": ">=17"
+  },
+  "suggests": {
+    "bettercombat": "*"
+  },
+  "custom": {
+    "smart_npc:port": "Fabric port of the Forge 1.20.1 edition. Optional Epic Fight / Combat Evolution compat is not available on Fabric (those mods are Forge-only)."
+  },
+  "accessWidener": "smart_npc.accesswidener"
+}

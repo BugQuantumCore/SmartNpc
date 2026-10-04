@@ -1,6 +1,6 @@
 package com.pla.smart_npc.entity.ai;
 
-import com.pla.smart_npc.compat.epicfight.EpicFight;
+import net.fabricmc.loader.api.FabricLoader;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcBlockBreakUtil;
 import com.pla.smart_npc.util.PlayerNpcBlockSoundUtil;
@@ -13,7 +13,6 @@ import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraftforge.fml.ModList;
 
 import java.util.function.Predicate;
 
@@ -126,9 +125,6 @@ public final class BreakingBlockAi {
         this.sneakingAi.tickHeldSneak();
         this.breakTicks++;
 
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.keepDiggingState(this.playerNpc);
-        }
         this.tickMiningSwing();
         this.playerNpc.showBlockBreakProgress(targetPos, this.breakTicks, this.requiredTicks);
         if (this.breakTicks % HIT_SOUND_INTERVAL_TICKS == 0) {
@@ -254,9 +250,6 @@ public final class BreakingBlockAi {
         this.paused = true;
         this.playerNpc.clearBlockBreakProgress(this.targetPos);
         this.sneakingAi.stopSneaking();
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.stopDiggingAnimation(this.playerNpc);
-        }
     }
 
     public void stop() {
@@ -268,9 +261,6 @@ public final class BreakingBlockAi {
         this.detail = "breaking block";
         this.toolDetail = "";
         this.paused = false;
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.stopDiggingAnimation(this.playerNpc);
-        }
     }
 
     public String detail() {
@@ -334,8 +324,5 @@ public final class BreakingBlockAi {
         this.playerNpc.swing(InteractionHand.MAIN_HAND, true);
         this.playerNpc.triggerMainHandAttackAnimation();
 
-        if (ModList.get().isLoaded("epicfight")) {
-            EpicFight.playDiggingAnimation(this.playerNpc);
-        }
     }
 }

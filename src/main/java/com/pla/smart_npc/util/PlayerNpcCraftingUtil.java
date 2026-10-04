@@ -1,5 +1,6 @@
 package com.pla.smart_npc.util;
 
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.core.NonNullList;
 import net.minecraft.server.level.ServerLevel;
@@ -16,7 +17,6 @@ import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.RecipeType;
 import net.minecraft.world.item.crafting.ShapedRecipe;
 import net.minecraft.world.level.ItemLike;
-import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.Arrays;
 import java.util.Optional;
@@ -716,7 +716,7 @@ public final class PlayerNpcCraftingUtil {
     }
 
     private static Item getPlanksForLog(ItemStack stack) {
-        ResourceLocation key = ForgeRegistries.ITEMS.getKey(stack.getItem());
+        ResourceLocation key = BuiltInRegistries.ITEM.getKey(stack.getItem());
         if (key == null) {
             return null;
         }
@@ -743,17 +743,17 @@ public final class PlayerNpcCraftingUtil {
             return null;
         }
 
-        return ForgeRegistries.ITEMS.getValue(ResourceLocation.fromNamespaceAndPath(key.getNamespace(), plankPath));
+        return BuiltInRegistries.ITEM.get(new ResourceLocation(key.getNamespace(), plankPath));
     }
 
     private static Item getBedForWool(Item wool) {
-        ResourceLocation key = ForgeRegistries.ITEMS.getKey(wool);
+        ResourceLocation key = BuiltInRegistries.ITEM.getKey(wool);
         if (key == null || !key.getPath().endsWith("_wool")) {
             return null;
         }
 
         String bedPath = key.getPath().substring(0, key.getPath().length() - "_wool".length()) + "_bed";
-        return ForgeRegistries.ITEMS.getValue(ResourceLocation.fromNamespaceAndPath(key.getNamespace(), bedPath));
+        return BuiltInRegistries.ITEM.get(new ResourceLocation(key.getNamespace(), bedPath));
     }
 
     private record CraftingPlan(CraftingRecipe recipe, TransientCraftingContainer grid, int[] inventorySlots) {

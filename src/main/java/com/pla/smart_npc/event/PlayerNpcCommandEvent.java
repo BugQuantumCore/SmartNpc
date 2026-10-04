@@ -3,7 +3,6 @@ package com.pla.smart_npc.event;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.arguments.StringArgumentType;
-import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.init.SmartNpcModEntities;
@@ -24,21 +23,16 @@ import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.entity.MobSpawnType;
 import net.minecraft.world.phys.Vec2;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.event.RegisterCommandsEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
 
 import java.util.StringJoiner;
 import java.util.UUID;
 
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
+/** Fabric port: wired from {@code SmartNpcEvents} via {@code CommandRegistrationCallback}. */
 public final class PlayerNpcCommandEvent {
     private PlayerNpcCommandEvent() {
     }
 
-    @SubscribeEvent
-    public static void registerCommands(RegisterCommandsEvent event) {
-        CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
+    public static void registerCommands(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(Commands.literal("smart_npc")
                 .requires(source -> source.hasPermission(2))
                 .then(Commands.literal("spawn_player")
@@ -93,7 +87,7 @@ public final class PlayerNpcCommandEvent {
 
     private static int spawnPlayer(CommandSourceStack source, String name) {
         ServerLevel level = source.getLevel();
-        PlayerNpcEntity entity = SmartNpcModEntities.PLAYER_NPC.get().create(level);
+        PlayerNpcEntity entity = SmartNpcModEntities.PLAYER_NPC.create(level);
         if (entity == null) {
             source.sendFailure(Component.literal("Failed to create player NPC"));
             return 0;

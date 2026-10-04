@@ -3,12 +3,9 @@ package com.pla.smart_npc.network;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
-import net.minecraftforge.network.NetworkEvent;
-import net.minecraftforge.network.PacketDistributor;
-
-import java.util.function.Supplier;
 
 public class PlayerNpcGoalTracePacket {
     private static final double MAX_TRACE_DISTANCE_SQR = 64.0D * 64.0D;
@@ -32,43 +29,39 @@ public class PlayerNpcGoalTracePacket {
         return new PlayerNpcGoalTracePacket(entityId, enabled);
     }
 
-    public static void handle(PlayerNpcGoalTracePacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
-        NetworkEvent.Context context = contextSupplier.get();
-        context.enqueueWork(() -> {
-            ServerPlayer sender = context.getSender();
-            if (sender == null) {
-                return;
-            }
+    /** Fabric receiver body; runs on the server thread. */
+    public static void handle(PlayerNpcGoalTracePacket packet, MinecraftServer server, ServerPlayer sender) {
+        if (sender == null) {
+            return;
+        }
 
-            Entity entity = sender.level().getEntity(packet.entityId);
-            if (!(entity instanceof PlayerNpcEntity playerNpc)
-                    || !playerNpc.isAlive()
-                    || !canTrace(sender, playerNpc)) {
-                PlayerNpcGoalTraceLogger.stopTrace(sender, "invalid trace target");
-                return;
-            }
+        Entity entity = sender.level().getEntity(packet.entityId);
+        if (!(entity instanceof PlayerNpcEntity playerNpc)
+                || !playerNpc.isAlive()
+                || !canTrace(sender, playerNpc)) {
+            PlayerNpcGoalTraceLogger.stopTrace(sender, "invalid trace target");
+            return;
+        }
 
-            if (!packet.enabled && PlayerNpcGoalTraceLogger.isAllTraceEnabled()) {
-                PlayerNpcGoalTraceLogger.setAllTraceEnabled(false, sender.getGameProfile().getName());
-                PlayerNpcGoalTraceLogger.stopTrace(sender, "all trace disabled by viewer");
-            } else {
-                PlayerNpcGoalTraceLogger.setTraceEnabled(sender, playerNpc, packet.enabled);
-            }
-            SmartNpcNetwork.CHANNEL.send(
-                    PacketDistributor.PLAYER.with(() -> sender),
-                    new PlayerNpcInspectorPacket(
-                            playerNpc.getId(),
-                            PlayerNpcInspectorData.createSnapshot(playerNpc),
-                            PlayerNpcInspectorData.createBuildStatusText(playerNpc),
-                            PlayerNpcInspectorData.createPerformanceText(),
-                            PlayerNpcInspectorData.createDailyJobText(playerNpc),
-                            PlayerNpcInspectorData.createBuildRequirementsText(playerNpc),
-                            PlayerNpcInspectorData.createTeamInfo(playerNpc),
-                            PlayerNpcGoalTraceLogger.isEffectivelyTracing(sender, playerNpc)
-                    )
-            );
-        });
-        context.setPacketHandled(true);
+        if (!packet.enabled && PlayerNpcGoalTraceLogger.isAllTraceEnabled()) {
+            PlayerNpcGoalTraceLogger.setAllTraceEnabled(false, sender.getGameProfile().getName());
+            PlayerNpcGoalTraceLogger.stopTrace(sender, "all trace disabled by viewer");
+        } else {
+            PlayerNpcGoalTraceLogger.setTraceEnabled(sender, playerNpc, packet.enabled);
+        }
+        SmartNpcNetwork.sendToPlayer(
+                sender,
+                new PlayerNpcInspectorPacket(
+                        playerNpc.getId(),
+                        PlayerNpcInspectorData.createSnapshot(playerNpc),
+                        PlayerNpcInspectorData.createBuildStatusText(playerNpc),
+                        PlayerNpcInspectorData.createPerformanceText(),
+                        PlayerNpcInspectorData.createDailyJobText(playerNpc),
+                        PlayerNpcInspectorData.createBuildRequirementsText(playerNpc),
+                        PlayerNpcInspectorData.createTeamInfo(playerNpc),
+                        PlayerNpcGoalTraceLogger.isEffectivelyTracing(sender, playerNpc)
+                )
+        );
     }
 
     private static boolean canTrace(ServerPlayer sender, PlayerNpcEntity playerNpc) {

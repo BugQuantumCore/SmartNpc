@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.ai;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.InventoryUtils;
 import com.pla.smart_npc.util.PlayerNpcBuildMaterialUtil;
@@ -46,16 +47,16 @@ public final class FurnaceAi {
     public static boolean hasValidTrackedTemporaryFurnace(ServerLevel serverLevel, PlayerNpcEntity playerNpc) {
         if (serverLevel == null
                 || playerNpc == null
-                || !playerNpc.getPersistentData().contains(TEMP_FURNACE_X)
-                || !playerNpc.getPersistentData().contains(TEMP_FURNACE_Y)
-                || !playerNpc.getPersistentData().contains(TEMP_FURNACE_Z)) {
+                || !ForgeDataCompat.get(playerNpc).contains(TEMP_FURNACE_X)
+                || !ForgeDataCompat.get(playerNpc).contains(TEMP_FURNACE_Y)
+                || !ForgeDataCompat.get(playerNpc).contains(TEMP_FURNACE_Z)) {
             return false;
         }
 
         BlockPos pos = new BlockPos(
-                playerNpc.getPersistentData().getInt(TEMP_FURNACE_X),
-                playerNpc.getPersistentData().getInt(TEMP_FURNACE_Y),
-                playerNpc.getPersistentData().getInt(TEMP_FURNACE_Z)
+                ForgeDataCompat.get(playerNpc).getInt(TEMP_FURNACE_X),
+                ForgeDataCompat.get(playerNpc).getInt(TEMP_FURNACE_Y),
+                ForgeDataCompat.get(playerNpc).getInt(TEMP_FURNACE_Z)
         );
         return serverLevel.hasChunkAt(pos)
                 && serverLevel.getBlockState(pos).is(Blocks.FURNACE)

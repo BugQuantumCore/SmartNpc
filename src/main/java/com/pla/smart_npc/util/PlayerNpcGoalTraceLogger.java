@@ -1,5 +1,6 @@
 package com.pla.smart_npc.util;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.SmartNpc;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
@@ -24,12 +25,6 @@ import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.event.server.ServerStartedEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -42,7 +37,6 @@ import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.stream.Collectors;
 
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PlayerNpcGoalTraceLogger {
     private static final String ACTIVE_KEY = "PlayerNpcGoalTraceActive";
     private static final String ENTITY_UUID_KEY = "PlayerNpcGoalTraceEntityUuid";
@@ -68,17 +62,13 @@ public final class PlayerNpcGoalTraceLogger {
     private PlayerNpcGoalTraceLogger() {
     }
 
-    @SubscribeEvent
-    public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
+    public static void onServerTick(MinecraftServer server) {
         long performanceStartNanos = PlayerNpcPerformanceMonitor.beginAuxiliaryTiming();
 
-        long serverTick = event.getServer().getTickCount();
-        tickAllNpcTrace(event.getServer(), serverTick);
-        for (ServerPlayer player : event.getServer().getPlayerList().getPlayers()) {
-            CompoundTag data = player.getPersistentData();
+        long serverTick = server.getTickCount();
+        tickAllNpcTrace(server, serverTick);
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            CompoundTag data = ForgeDataCompat.get(player);
             if (!data.getBoolean(ACTIVE_KEY)) {
                 continue;
             }
@@ -113,31 +103,23 @@ public final class PlayerNpcGoalTraceLogger {
         PlayerNpcPerformanceMonitor.recordTraceLoggerTick(performanceStartNanos);
     }
 
-    @SubscribeEvent
-    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player) {
-            stopTrace(player, "viewer rejoined");
+    public static void onPlayerLoggedIn(ServerPlayer player) {
+        stopTrace(player, "viewer rejoined");
+    }
+
+    public static void onPlayerLoggedOut(ServerPlayer player) {
+        stopTrace(player, "viewer disconnected");
+        if (allTraceEnabled
+                && allTraceViewer.equals(sanitize(player.getGameProfile().getName()))) {
+            setAllTraceEnabled(false, player.getGameProfile().getName());
         }
     }
 
-    @SubscribeEvent
-    public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player) {
-            stopTrace(player, "viewer disconnected");
-            if (allTraceEnabled
-                    && allTraceViewer.equals(sanitize(player.getGameProfile().getName()))) {
-                setAllTraceEnabled(false, player.getGameProfile().getName());
-            }
-        }
-    }
-
-    @SubscribeEvent
-    public static void onServerStarted(ServerStartedEvent event) {
+    public static void onServerStarted(MinecraftServer server) {
         resetAllTraceState();
     }
 
-    @SubscribeEvent
-    public static void onServerStopping(ServerStoppingEvent event) {
+    public static void onServerStopping(MinecraftServer server) {
         resetAllTraceState();
     }
 
@@ -146,7 +128,7 @@ public final class PlayerNpcGoalTraceLogger {
             return false;
         }
 
-        CompoundTag data = player.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(player);
         boolean tracing = data.getBoolean(ACTIVE_KEY)
                 && data.hasUUID(ENTITY_UUID_KEY)
                 && data.getUUID(ENTITY_UUID_KEY).equals(playerNpc.getUUID());
@@ -177,7 +159,7 @@ public final class PlayerNpcGoalTraceLogger {
             return;
         }
 
-        CompoundTag data = player.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(player);
         data.putBoolean(ACTIVE_KEY, true);
         data.putUUID(ENTITY_UUID_KEY, playerNpc.getUUID());
         data.putInt(ENTITY_ID_KEY, playerNpc.getId());
@@ -201,7 +183,7 @@ public final class PlayerNpcGoalTraceLogger {
             return;
         }
 
-        CompoundTag data = player.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(player);
         if (!data.getBoolean(ACTIVE_KEY)) {
             clearTraceData(data);
             return;
@@ -225,7 +207,7 @@ public final class PlayerNpcGoalTraceLogger {
         if (player == null || playerNpc == null) {
             return;
         }
-        CompoundTag data = player.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(player);
         if (!data.getBoolean(ACTIVE_KEY) || !data.hasUUID(ENTITY_UUID_KEY)) {
             return;
         }
@@ -420,7 +402,7 @@ public final class PlayerNpcGoalTraceLogger {
         }
 
         BlockState state = serverLevel.getBlockState(pos);
-        String blockId = String.valueOf(net.minecraftforge.registries.ForgeRegistries.BLOCKS.getKey(state.getBlock()));
+        String blockId = String.valueOf(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()));
         boolean insideHome = PlayerNpcHomeUtil.getHome(playerNpc)
                 .map(home -> PlayerNpcHomeUtil.isInside(home, pos))
                 .orElse(false);
@@ -474,7 +456,7 @@ public final class PlayerNpcGoalTraceLogger {
     }
 
     private static PlayerNpcEntity getTracedNpc(ServerPlayer player) {
-        CompoundTag data = player.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(player);
         if (!data.hasUUID(ENTITY_UUID_KEY) || !(player.level() instanceof ServerLevel level)) {
             return null;
         }

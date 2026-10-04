@@ -15,16 +15,12 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
-import net.minecraftforge.common.ToolActions;
 import org.jetbrains.annotations.NotNull;
 import org.joml.Matrix3f;
 import org.joml.Matrix4f;
 
-@OnlyIn(Dist.CLIENT)
 public class PlayerNpcFishingBobberRenderer extends EntityRenderer<PlayerNpcFishingBobberEntity> {
-    private static final ResourceLocation TEXTURE_LOCATION = ResourceLocation.fromNamespaceAndPath("minecraft", "textures/entity/fishing_hook.png");
+    private static final ResourceLocation TEXTURE_LOCATION = new ResourceLocation("minecraft", "textures/entity/fishing_hook.png");
     private static final RenderType RENDER_TYPE = RenderType.entityCutout(TEXTURE_LOCATION);
 
     public PlayerNpcFishingBobberRenderer(EntityRendererProvider.Context context) {
@@ -86,7 +82,7 @@ public class PlayerNpcFishingBobberRenderer extends EntityRenderer<PlayerNpcFish
     private static int getLineHandSide(PlayerNpcEntity angler) {
         int handSide = angler.getMainArm() == HumanoidArm.RIGHT ? 1 : -1;
         ItemStack mainHand = angler.getMainHandItem();
-        if (!mainHand.canPerformAction(ToolActions.FISHING_ROD_CAST)) {
+        if (!(mainHand.getItem() instanceof net.minecraft.world.item.FishingRodItem)) {
             handSide = -handSide;
         }
         return handSide;

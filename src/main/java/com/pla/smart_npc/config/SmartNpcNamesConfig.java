@@ -1,12 +1,9 @@
 package com.pla.smart_npc.config;
 
-import com.electronwill.nightconfig.core.CommentedConfig;
-import com.electronwill.nightconfig.core.UnmodifiableConfig;
-import com.electronwill.nightconfig.toml.TomlFormat;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
-import net.minecraftforge.common.ForgeConfigSpec;
-import net.minecraftforge.fml.config.ModConfig;
-import net.minecraftforge.fml.event.config.ModConfigEvent;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -17,6 +14,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+/**
+ * Player NPC roster config. Semantics are identical to the Forge edition's
+ * {@code smart_npc-names.toml}: a table of {@code "skinName[:Display Name]" = [INTEREST, ...]}
+ * entries (a legacy array of {@code "name|INTEREST|..."} strings is also accepted and
+ * migrated). On Fabric the values live in {@code config/smart_npc-names.json}.
+ */
 public final class SmartNpcNamesConfig {
     private static final Object ENTRY_CACHE_LOCK = new Object();
     private static volatile List<String> cachedPlayerNpcNameEntries;
@@ -70,26 +73,26 @@ public final class SmartNpcNamesConfig {
             "Gen_Deathrow|EXPLORING|HUNT_MONSTERS|HUNT_PLAYERS|LOOTING|CHEST_PROTECT|TEAMUP",
             "Sevadus|EXPLORING|FISHING|HUNT_VILLAGERS|CAUTIOUS|LOOTING|CHEST_PROTECT|COWARD"
     );
-    private static final CommentedConfig DEFAULT_PLAYER_NPC_ROSTER = createRosterConfig(DEFAULT_PLAYER_NPC_NAMES);
 
-    public static final ForgeConfigSpec SPEC;
-    public static final ForgeConfigSpec.ConfigValue<Object> PLAYER_NPC_NAMES;
+    static final JsonConfig CONFIG = new JsonConfig("smart_npc-names.json");
+    private static final JsonObject CONFIG_RAW_DEFAULTS;
 
     static {
-        ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
-        PLAYER_NPC_NAMES = builder.comment(
-                        "Player NPC roster. Each line uses: skinName = [\"INTEREST\", \"INTEREST\", ...]",
-                        "The key must be a valid Minecraft username (1-16 letters, numbers, or underscores).",
-                        "Each NPC must contain one job: BUILDING, MINING, FARMING, FISHING, or EXPLORING.",
-                        "Other interests: HUNT_MONSTERS, HUNT_ANIMALS, HUNT_PLAYERS, HUNT_VILLAGERS, TROLL_HIT, LOOTING, CAUTIOUS, CHEST_PROTECT, TEAMUP, COWARD.",
-                        "CAUTIOUS conflict with HUNT_MONSTERS and HUNT_PLAYERS since CAUTIOUS will let NPC run away from them.",
-                        "For an optional display name, use a quoted key: \"skinName:Display Name\" = [\"BUILDING\", \"CAUTIOUS\"].",
-                        "Duplicate skin names are ignored after the first entry. An empty table disables Player NPC spawning.")
-                .<Object>define("playerNpcNames", DEFAULT_PLAYER_NPC_ROSTER, SmartNpcNamesConfig::isValidRoster);
-        SPEC = builder.build();
+        CONFIG_RAW_DEFAULTS = createRosterJson(DEFAULT_PLAYER_NPC_NAMES);
+        CONFIG.defineElement("playerNpcNames", CONFIG_RAW_DEFAULTS);
+        CONFIG.addReloadListener(SmartNpcNamesConfig::invalidatePlayerNpcNameEntries);
     }
 
     private SmartNpcNamesConfig() {
+    }
+
+    public static void load() {
+        CONFIG.load();
+    }
+
+    /** Re-reads the file and invalidates cached roster entries (Forge: config reload event). */
+    public static void reload() {
+        CONFIG.reload();
     }
 
     public static List<String> getPlayerNpcNameEntries() {
@@ -100,7 +103,7 @@ public final class SmartNpcNamesConfig {
         synchronized (ENTRY_CACHE_LOCK) {
             entries = cachedPlayerNpcNameEntries;
             if (entries == null) {
-                entries = List.copyOf(toNameEntryStrings(PLAYER_NPC_NAMES.get()));
+                entries = List.copyOf(toNameEntryStrings(CONFIG.raw("playerNpcNames")));
                 cachedPlayerNpcNameEntries = entries;
             }
             return entries;
@@ -110,16 +113,6 @@ public final class SmartNpcNamesConfig {
     /** Cheap generation check used by loaded NPCs to refresh interests after a config reload. */
     public static long getPlayerNpcNameEntriesRevision() {
         return playerNpcNameEntriesRevision;
-    }
-
-    public static void onConfigLoading(ModConfigEvent.Loading event) {
-        migrateLegacyList(event.getConfig());
-        invalidatePlayerNpcNameEntries(event.getConfig());
-    }
-
-    public static void onConfigReloading(ModConfigEvent.Reloading event) {
-        migrateLegacyList(event.getConfig());
-        invalidatePlayerNpcNameEntries(event.getConfig());
     }
 
     public static Optional<NameEntry> parseNameEntry(String rawEntry) {
@@ -168,68 +161,54 @@ public final class SmartNpcNamesConfig {
         return Optional.of(new NameEntry(skinName, displayName, List.copyOf(interests)));
     }
 
-    private static boolean isValidNameEntry(Object value) {
-        return value instanceof String entry && parseNameEntry(entry).isPresent();
-    }
-
-    private static boolean isValidRoster(Object value) {
-        if (value instanceof List<?> legacyEntries) {
-            return legacyEntries.stream().allMatch(SmartNpcNamesConfig::isValidNameEntry);
-        }
-        if (!(value instanceof UnmodifiableConfig roster)) {
-            return false;
-        }
-        for (Map.Entry<String, Object> entry : roster.valueMap().entrySet()) {
-            if (parseRosterEntry(entry.getKey(), entry.getValue()).isEmpty()) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static List<String> toNameEntryStrings(Object value) {
+    private static List<String> toNameEntryStrings(JsonElement element) {
         List<String> result = new ArrayList<>();
-        if (value instanceof List<?> legacyEntries) {
-            for (Object legacyEntry : legacyEntries) {
-                if (legacyEntry instanceof String entry && parseNameEntry(entry).isPresent()) {
-                    result.add(entry);
+        if (element instanceof JsonArray legacyEntries) {
+            // legacy list format: "skinName|INTEREST|..."
+            for (JsonElement legacyEntry : legacyEntries) {
+                if (legacyEntry.isJsonPrimitive() && legacyEntry.getAsJsonPrimitive().isString()) {
+                    String entry = legacyEntry.getAsString();
+                    if (parseNameEntry(entry).isPresent()) {
+                        result.add(entry);
+                    }
                 }
             }
             return result;
         }
-        if (!(value instanceof UnmodifiableConfig roster)) {
+        if (!(element instanceof JsonObject roster)) {
             return result;
         }
-        for (Map.Entry<String, Object> entry : roster.valueMap().entrySet()) {
-            parseRosterEntry(entry.getKey(), entry.getValue())
-                    .map(SmartNpcNamesConfig::toConfigEntry)
-                    .ifPresent(result::add);
+        for (Map.Entry<String, JsonElement> entry : roster.entrySet()) {
+            parseRosterEntry(entry.getKey(), entry.getValue()).ifPresent(result::add);
         }
         return result;
     }
 
-    private static Optional<NameEntry> parseRosterEntry(String combinedName, Object value) {
-        if (!(value instanceof List<?> rawInterests) || rawInterests.isEmpty()) {
+    private static Optional<String> parseRosterEntry(String combinedName, JsonElement value) {
+        if (!(value instanceof JsonArray rawInterests) || rawInterests.isEmpty()) {
             return Optional.empty();
         }
 
         StringBuilder legacyEntry = new StringBuilder(combinedName);
-        for (Object rawInterest : rawInterests) {
-            if (!(rawInterest instanceof String interestName)) {
+        for (JsonElement rawInterest : rawInterests) {
+            if (!rawInterest.isJsonPrimitive() || !rawInterest.getAsJsonPrimitive().isString()) {
                 return Optional.empty();
             }
-            legacyEntry.append('|').append(interestName);
+            legacyEntry.append('|').append(rawInterest.getAsString());
         }
-        return parseNameEntry(legacyEntry.toString());
+        return Optional.of(legacyEntry.toString());
     }
 
-    private static CommentedConfig createRosterConfig(List<String> entries) {
-        CommentedConfig roster = TomlFormat.newConfig(LinkedHashMap::new);
+    private static JsonObject createRosterJson(List<String> entries) {
+        JsonObject roster = new JsonObject();
         for (String rawEntry : entries) {
-            parseNameEntry(rawEntry).ifPresent(entry -> roster.set(
-                    combinedName(entry),
-                    entry.interests().stream().map(Enum::name).toList()
-            ));
+            parseNameEntry(rawEntry).ifPresent(entry -> {
+                JsonArray interests = new JsonArray();
+                for (PlayerNpcInterest interest : entry.interests()) {
+                    interests.add(interest.name());
+                }
+                roster.add(combinedName(entry), interests);
+            });
         }
         return roster;
     }
@@ -240,42 +219,8 @@ public final class SmartNpcNamesConfig {
                 : entry.skinName() + ":" + entry.displayName();
     }
 
-    private static String toConfigEntry(NameEntry entry) {
-        StringBuilder result = new StringBuilder(combinedName(entry));
-        for (PlayerNpcInterest interest : entry.interests()) {
-            result.append('|').append(interest.name());
-        }
-        return result.toString();
-    }
-
-    private static void migrateLegacyList(ModConfig config) {
-        if (config.getSpec() != SPEC || config.getConfigData() == null) {
-            return;
-        }
-
-        Object currentValue = config.getConfigData().get("playerNpcNames");
-        if (currentValue instanceof List<?> legacyEntries) {
-            List<String> entries = new ArrayList<>();
-            for (Object legacyEntry : legacyEntries) {
-                if (legacyEntry instanceof String entry && parseNameEntry(entry).isPresent()) {
-                    entries.add(entry);
-                }
-            }
-            config.getConfigData().set("playerNpcNames", createRosterConfig(entries));
-        }
-    }
-
-    private static void invalidatePlayerNpcNameEntries(ModConfig config) {
-        if (config.getSpec() != SPEC) {
-            return;
-        }
-        invalidatePlayerNpcNameEntries();
-    }
-
     static void invalidatePlayerNpcNameEntries() {
         synchronized (ENTRY_CACHE_LOCK) {
-            // Reload may mutate the existing NightConfig object in place, so identity/equality
-            // checks cannot prove freshness. The Forge config event is the cache boundary.
             cachedPlayerNpcNameEntries = null;
             playerNpcNameEntriesRevision++;
         }

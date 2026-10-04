@@ -3,10 +3,14 @@ package com.pla.smart_npc.entity.goal;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.ai.goal.RangedBowAttackGoal;
 import net.minecraft.world.item.BowItem;
 
-public class PlayerNpcRangedBowAttackGoal extends RangedBowAttackGoal<PlayerNpcEntity> {
+/**
+ * Fabric port note: extends the widened {@link SmartNpcRangedBowAttackGoal}
+ * copy of vanilla's {@code RangedBowAttackGoal} because vanilla bounds its type
+ * parameter to {@code Monster} (Forge widens it to Mob on the Forge edition).
+ */
+public class PlayerNpcRangedBowAttackGoal extends SmartNpcRangedBowAttackGoal<PlayerNpcEntity> {
     private final PlayerNpcEntity playerNpc;
 
     public PlayerNpcRangedBowAttackGoal(PlayerNpcEntity playerNpc, double speedModifier, int attackIntervalMin, float attackRadius) {

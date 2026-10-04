@@ -22,21 +22,15 @@ import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.chat.Component;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.client.event.MovementInputUpdateEvent;
-import net.minecraftforge.client.event.RenderGuiEvent;
-import net.minecraftforge.client.event.RenderGuiOverlayEvent;
-import net.minecraftforge.client.event.ScreenEvent;
-import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.registries.ForgeRegistries;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.player.Input;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
@@ -44,7 +38,11 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
-@Mod.EventBusSubscriber(modid = SmartNpc.MODID, value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
+/**
+ * Fabric port: client hooks are registered in {@link #register()} (called from the
+ * client entrypoint) instead of the Forge event bus. Screen-opening, movement input
+ * and jump-bar vetoes live in the dedicated mixins.
+ */
 public class SmartNpcInspectorOverlay {
     private static final int PANEL_WIDTH = 196;
     private static final int PANEL_HEIGHT = 294;
@@ -239,12 +237,13 @@ public class SmartNpcInspectorOverlay {
         return movePacket.hasRotation() && !movePacket.hasPosition();
     }
 
-    @SubscribeEvent
-    public static void onClientTick(TickEvent.ClientTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
+    /** Registers the client hooks (replaces the Forge @Mod.EventBusSubscriber wiring). */
+    public static void register() {
+        ClientTickEvents.END_CLIENT_TICK.register(client -> onClientTick());
+        HudRenderCallback.EVENT.register((guiGraphics, tickDelta) -> onRenderGui(guiGraphics));
+    }
 
+    private static void onClientTick() {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null || minecraft.player == null) {
             clear();
@@ -254,46 +253,31 @@ public class SmartNpcInspectorOverlay {
         tickInspectatorControls(minecraft);
     }
 
-    @SubscribeEvent
-    public static void onScreenOpening(ScreenEvent.Opening event) {
+    /** Called from {@code MinecraftScreenMixin}: veto the vanilla inventory screen. */
+    public static boolean shouldBlockScreenOpening(Screen screen) {
         Minecraft minecraft = Minecraft.getInstance();
-        if (inspectatorActive
-                && event.getNewScreen() instanceof InventoryScreen
+        return inspectatorActive
+                && screen instanceof InventoryScreen
                 && minecraft.level != null
                 && minecraft.player != null
-                && isInspectatorToggleDown(minecraft)) {
-            event.setCanceled(true);
-        }
+                && isInspectatorToggleDown(minecraft);
     }
 
-    @SubscribeEvent
-    public static void onMovementInputUpdate(MovementInputUpdateEvent event) {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (event.getEntity() != minecraft.player) {
-            return;
-        }
-
+    /** Called from {@code KeyboardInputMixin} (Forge MovementInputUpdateEvent port). */
+    public static void onMovementInputUpdate(Input input) {
         if (inspectatorActive) {
-            event.getInput().leftImpulse = 0.0F;
-            event.getInput().forwardImpulse = 0.0F;
-            event.getInput().up = false;
-            event.getInput().down = false;
-            event.getInput().left = false;
-            event.getInput().right = false;
-            event.getInput().jumping = false;
-            event.getInput().shiftKeyDown = false;
+            input.leftImpulse = 0.0F;
+            input.forwardImpulse = 0.0F;
+            input.up = false;
+            input.down = false;
+            input.left = false;
+            input.right = false;
+            input.jumping = false;
+            input.shiftKeyDown = false;
         }
     }
 
-    @SubscribeEvent
-    public static void onRenderGuiOverlayPre(RenderGuiOverlayEvent.Pre event) {
-        if (inspectatorActive && VanillaGuiOverlay.JUMP_BAR.id().equals(event.getOverlay().id())) {
-            event.setCanceled(true);
-        }
-    }
-
-    @SubscribeEvent
-    public static void onRenderGui(RenderGuiEvent.Post event) {
+    private static void onRenderGui(GuiGraphics guiGraphics) {
         if (inspectedEntityId == -1) {
             return;
         }
@@ -304,7 +288,6 @@ public class SmartNpcInspectorOverlay {
             return;
         }
 
-        GuiGraphics guiGraphics = event.getGuiGraphics();
         int screenWidth = minecraft.getWindow().getGuiScaledWidth();
         int screenHeight = minecraft.getWindow().getGuiScaledHeight();
         if (inspectedEntityId == PlayerNpcInspectorPacket.OVERALL_ENTITY_ID) {
@@ -887,7 +870,7 @@ public class SmartNpcInspectorOverlay {
                 continue;
             }
 
-            Item item = ForgeRegistries.ITEMS.getValue(itemId);
+            Item item = BuiltInRegistries.ITEM.get(itemId);
             if (item == null) {
                 continue;
             }
@@ -1023,7 +1006,7 @@ public class SmartNpcInspectorOverlay {
             return Component.translatable("gui.player_npc.inspector.empty");
         }
 
-        ResourceLocation id = ForgeRegistries.ITEMS.getKey(stack.getItem());
+        ResourceLocation id = BuiltInRegistries.ITEM.getKey(stack.getItem());
         return id == null ? Component.literal("unknown") : Component.literal(id.toString());
     }
 
@@ -1591,7 +1574,15 @@ public class SmartNpcInspectorOverlay {
             return;
         }
 
-        SmartNpcNetwork.CHANNEL.sendToServer(packet);
+        if (packet instanceof PlayerNpcGoalTracePacket goalTracePacket) {
+            SmartNpcNetwork.sendToServer(goalTracePacket);
+        } else if (packet instanceof PlayerNpcInspectatorModePacket modePacket) {
+            SmartNpcNetwork.sendToServer(modePacket);
+        } else if (packet instanceof PlayerNpcInspectatorCyclePacket cyclePacket) {
+            SmartNpcNetwork.sendToServer(cyclePacket);
+        } else if (packet instanceof PlayerNpcInspectorRequestPacket requestPacket) {
+            SmartNpcNetwork.sendToServer(requestPacket);
+        }
     }
 
     private record RequirementPayload(boolean structured, Component layout, List<RequirementRow> rows, int more) {

@@ -56,7 +56,7 @@ public class InventoryViewerMenu extends AbstractContainerMenu {
     }
 
     private InventoryViewerMenu(int containerId, Inventory playerInventory, LivingEntity target, Container equipmentInventory, SimpleContainer npcInventory) {
-        super(SmartNpcModMenus.INVENTORY_VIEWER.get(), containerId);
+        super(SmartNpcModMenus.INVENTORY_VIEWER, containerId);
         this.target = target;
         checkContainerSize(equipmentInventory, EQUIPMENT_SIZE);
         checkContainerSize(npcInventory, CUSTOM_INVENTORY_SIZE);

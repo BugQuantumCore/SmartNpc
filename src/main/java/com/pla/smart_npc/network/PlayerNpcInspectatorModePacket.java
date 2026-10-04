@@ -1,17 +1,15 @@
 package com.pla.smart_npc.network;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.PlayerNpcGoalTraceLogger;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.GameType;
-import net.minecraftforge.network.NetworkEvent;
-import net.minecraftforge.network.PacketDistributor;
-
-import java.util.function.Supplier;
 
 public class PlayerNpcInspectatorModePacket {
     private static final String ACTIVE_KEY = "PlayerNpcInspectatorActive";
@@ -36,34 +34,30 @@ public class PlayerNpcInspectatorModePacket {
         return new PlayerNpcInspectatorModePacket(buffer.readBoolean(), buffer.readVarInt());
     }
 
-    public static void handle(PlayerNpcInspectatorModePacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
-        NetworkEvent.Context context = contextSupplier.get();
-        context.enqueueWork(() -> {
-            ServerPlayer sender = context.getSender();
-            if (sender == null) {
-                return;
-            }
+    /** Fabric receiver body; runs on the server thread. */
+    public static void handle(PlayerNpcInspectatorModePacket packet, MinecraftServer server, ServerPlayer sender) {
+        if (sender == null) {
+            return;
+        }
 
-            if (!packet.active) {
-                restorePlayer(sender);
-                return;
-            }
+        if (!packet.active) {
+            restorePlayer(sender);
+            return;
+        }
 
-            Entity entity = sender.level().getEntity(packet.entityId);
-            if (!(entity instanceof PlayerNpcEntity playerNpc)
-                    || !playerNpc.isAlive()
-                    || sender.distanceToSqr(playerNpc) > MAX_START_DISTANCE_SQR) {
-                restorePlayer(sender);
-                return;
-            }
+        Entity entity = sender.level().getEntity(packet.entityId);
+        if (!(entity instanceof PlayerNpcEntity playerNpc)
+                || !playerNpc.isAlive()
+                || sender.distanceToSqr(playerNpc) > MAX_START_DISTANCE_SQR) {
+            restorePlayer(sender);
+            return;
+        }
 
-            beginInspectator(sender, playerNpc);
-        });
-        context.setPacketHandled(true);
+        beginInspectator(sender, playerNpc);
     }
 
     public static void restorePlayer(ServerPlayer player) {
-        CompoundTag data = player.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(player);
         boolean wasActive = data.getBoolean(ACTIVE_KEY);
         int originalGameMode = data.contains(ORIGINAL_GAME_MODE_KEY)
                 ? data.getInt(ORIGINAL_GAME_MODE_KEY)
@@ -87,15 +81,12 @@ public class PlayerNpcInspectatorModePacket {
     public static void restorePlayerAndClearInspector(ServerPlayer player) {
         restorePlayer(player);
         if (player.connection != null) {
-            SmartNpcNetwork.CHANNEL.send(
-                    PacketDistributor.PLAYER.with(() -> player),
-                    PlayerNpcInspectorPacket.clear()
-            );
+            SmartNpcNetwork.sendToPlayer(player, PlayerNpcInspectorPacket.clear());
         }
     }
 
     public static boolean isInspectatorActive(Entity entity) {
-        return entity != null && entity.getPersistentData().getBoolean(ACTIVE_KEY);
+        return entity != null && ForgeDataCompat.get(entity).getBoolean(ACTIVE_KEY);
     }
 
     public static boolean isInspecting(ServerPlayer player, PlayerNpcEntity playerNpc) {
@@ -103,7 +94,7 @@ public class PlayerNpcInspectatorModePacket {
             return false;
         }
 
-        CompoundTag data = player.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(player);
         return player.getCamera() == playerNpc
                 || data.hasUUID(TARGET_UUID_KEY) && data.getUUID(TARGET_UUID_KEY).equals(playerNpc.getUUID());
     }
@@ -124,7 +115,7 @@ public class PlayerNpcInspectatorModePacket {
             return false;
         }
 
-        CompoundTag data = player.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(player);
         return data.hasUUID(TARGET_UUID_KEY)
                 && data.getUUID(TARGET_UUID_KEY).equals(playerNpc.getUUID());
     }
@@ -153,7 +144,7 @@ public class PlayerNpcInspectatorModePacket {
 
         PlayerNpcGoalTraceLogger.stopIfTracingDifferentNpc(player, playerNpc);
 
-        CompoundTag data = player.getPersistentData();
+        CompoundTag data = ForgeDataCompat.get(player);
         if (!data.getBoolean(ACTIVE_KEY)) {
             data.putInt(ORIGINAL_GAME_MODE_KEY, player.gameMode.getGameModeForPlayer().getId());
             data.putBoolean(ACTIVE_KEY, true);

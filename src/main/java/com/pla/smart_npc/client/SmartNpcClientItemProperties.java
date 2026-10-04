@@ -6,16 +6,13 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.FishingRodItem;
 import net.minecraft.world.item.Items;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
 
-@OnlyIn(Dist.CLIENT)
 public final class SmartNpcClientItemProperties {
     private SmartNpcClientItemProperties() {
     }
 
     public static void register() {
-        ItemProperties.register(Items.FISHING_ROD, ResourceLocation.fromNamespaceAndPath("minecraft", "cast"), (stack, level, entity, seed) -> {
+        ItemProperties.register(Items.FISHING_ROD, new ResourceLocation("minecraft", "cast"), (stack, level, entity, seed) -> {
             if (entity instanceof PlayerNpcEntity playerNpc) {
                 boolean mainHand = playerNpc.getMainHandItem() == stack;
                 boolean offhand = playerNpc.getOffhandItem() == stack;

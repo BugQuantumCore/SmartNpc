@@ -1,5 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
+import com.pla.smart_npc.util.compat.ForgeDataCompat;
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
@@ -1212,12 +1213,12 @@ public class ManageHomeBaseGoal extends Goal {
     }
 
     private static boolean hasAttemptedDepositThisNight(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        return playerNpc.getPersistentData().contains(LAST_HOME_CHEST_DEPOSIT_NIGHT, Tag.TAG_LONG)
-                && playerNpc.getPersistentData().getLong(LAST_HOME_CHEST_DEPOSIT_NIGHT) == currentNight(serverLevel);
+        return ForgeDataCompat.get(playerNpc).contains(LAST_HOME_CHEST_DEPOSIT_NIGHT, Tag.TAG_LONG)
+                && ForgeDataCompat.get(playerNpc).getLong(LAST_HOME_CHEST_DEPOSIT_NIGHT) == currentNight(serverLevel);
     }
 
     private static void markDepositAttemptedThisNight(PlayerNpcEntity playerNpc, ServerLevel serverLevel) {
-        playerNpc.getPersistentData().putLong(LAST_HOME_CHEST_DEPOSIT_NIGHT, currentNight(serverLevel));
+        ForgeDataCompat.get(playerNpc).putLong(LAST_HOME_CHEST_DEPOSIT_NIGHT, currentNight(serverLevel));
     }
 
     private static long currentNight(ServerLevel serverLevel) {

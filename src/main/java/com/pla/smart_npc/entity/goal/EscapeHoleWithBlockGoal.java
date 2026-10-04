@@ -1,6 +1,6 @@
 package com.pla.smart_npc.entity.goal;
 
-import com.pla.smart_npc.compat.epicfight.EpicFight;
+import net.fabricmc.loader.api.FabricLoader;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.entity.ai.BreakingBlockAi;
 import com.pla.smart_npc.entity.ai.CautiousThreatAi;
@@ -48,7 +48,6 @@ import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
-import net.minecraftforge.fml.ModList;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayDeque;
@@ -282,9 +281,6 @@ public class EscapeHoleWithBlockGoal extends Goal {
     private void setEscapeMode(EscapeMode inputMode) {
         if ((this.mode == EscapeMode.GATHER_BLOCKS || this.mode == EscapeMode.CLEAR_EXIT || this.mode == EscapeMode.CLEAR_ROUTE)
                 && (inputMode != EscapeMode.GATHER_BLOCKS && inputMode != EscapeMode.CLEAR_EXIT && inputMode != EscapeMode.CLEAR_ROUTE)) {
-            if (ModList.get().isLoaded("epicfight")) {
-                EpicFight.stopDiggingAnimation(this.playerNpc);
-            }
         }
         this.mode = inputMode;
     }
