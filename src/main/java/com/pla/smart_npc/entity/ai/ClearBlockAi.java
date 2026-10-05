@@ -112,7 +112,7 @@ public final class ClearBlockAi {
             return false;
         }
         if (this.standPos == null
-                || !canUseBreakStand(serverLevel, this.standPos, this.targetPos, this.allowSoftCover)) {
+                || !canUseBreakStand(serverLevel, this.playerNpc, this.standPos, this.targetPos, this.allowSoftCover)) {
             return true;
         }
         if (isAtBreakStand(this.playerNpc, this.standPos)
@@ -802,7 +802,7 @@ public final class ClearBlockAi {
         }
 
         if (this.standPos == null
-                || !canUseBreakStand(serverLevel, this.standPos, this.targetPos, this.allowSoftCover)) {
+                || !canUseBreakStand(serverLevel, this.playerNpc, this.standPos, this.targetPos, this.allowSoftCover)) {
             this.plannedApproachPath = null;
             if (this.playerNpc.tickCount < this.nextRunningStandSelectionTick) {
                 return true;
@@ -1010,7 +1010,7 @@ public final class ClearBlockAi {
         }
         ArrayList<BlockPos> candidates = new ArrayList<>();
         BlockPos playerFeet = playerNpc.blockPosition();
-        if (canUseBreakStand(serverLevel, playerFeet, targetPos, allowSoftCover)) {
+        if (canUseBreakStand(serverLevel, playerNpc, playerFeet, targetPos, allowSoftCover)) {
             candidates.add(playerFeet.immutable());
         }
 
@@ -1019,7 +1019,7 @@ public final class ClearBlockAi {
                 for (int dz = -BREAK_STAND_RADIUS; dz <= BREAK_STAND_RADIUS; dz++) {
                     BlockPos candidate = targetPos.offset(dx, dy, dz);
                     if (candidate.equals(targetPos)
-                            || !canUseBreakStand(serverLevel, candidate, targetPos, allowSoftCover)) {
+                            || !canUseBreakStand(serverLevel, playerNpc, candidate, targetPos, allowSoftCover)) {
                         continue;
                     }
                     candidates.add(candidate.immutable());
@@ -1078,19 +1078,20 @@ public final class ClearBlockAi {
         );
     }
 
-    private static boolean canUseBreakStand(ServerLevel serverLevel, BlockPos standPos, BlockPos targetPos) {
-        return canUseBreakStand(serverLevel, standPos, targetPos, false);
+    private static boolean canUseBreakStand(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockPos standPos, BlockPos targetPos) {
+        return canUseBreakStand(serverLevel, playerNpc, standPos, targetPos, false);
     }
 
     private static boolean canUseBreakStand(
             ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
             BlockPos standPos,
             BlockPos targetPos,
             boolean allowSoftCover
     ) {
         return PathNavigationAi.canStandAt(serverLevel, standPos)
                 && distanceFromStandToTargetSqr(standPos, targetPos) <= BREAK_REACH_DISTANCE_SQR
-                && hasClearBreakRay(serverLevel, standPos, targetPos, allowSoftCover);
+                && hasClearBreakRay(serverLevel, playerNpc, standPos, targetPos, allowSoftCover);
     }
 
     private static boolean isWithinBreakReach(PlayerNpcEntity playerNpc, BlockPos targetPos) {
@@ -1163,41 +1164,45 @@ public final class ClearBlockAi {
     ) {
         return hasClearBreakRay(
                 serverLevel,
+                playerNpc,
                 new Vec3(playerNpc.getX(), playerNpc.getEyeY(), playerNpc.getZ()),
                 targetPos,
                 allowSoftCover
         );
     }
 
-    private static boolean hasClearBreakRay(ServerLevel serverLevel, BlockPos standPos, BlockPos targetPos) {
-        return hasClearBreakRay(serverLevel, standPos, targetPos, false);
+    private static boolean hasClearBreakRay(ServerLevel serverLevel, PlayerNpcEntity playerNpc, BlockPos standPos, BlockPos targetPos) {
+        return hasClearBreakRay(serverLevel, playerNpc, standPos, targetPos, false);
     }
 
     private static boolean hasClearBreakRay(
             ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
             BlockPos standPos,
             BlockPos targetPos,
             boolean allowSoftCover
     ) {
         return hasClearBreakRay(
                 serverLevel,
+                playerNpc,
                 new Vec3(standPos.getX() + 0.5D, standPos.getY() + STAND_EYE_HEIGHT, standPos.getZ() + 0.5D),
                 targetPos,
                 allowSoftCover
         );
     }
 
-    private static boolean hasClearBreakRay(ServerLevel serverLevel, Vec3 eye, BlockPos targetPos) {
-        return hasClearBreakRay(serverLevel, eye, targetPos, false);
+    private static boolean hasClearBreakRay(ServerLevel serverLevel, PlayerNpcEntity playerNpc, Vec3 eye, BlockPos targetPos) {
+        return hasClearBreakRay(serverLevel, playerNpc, eye, targetPos, false);
     }
 
     private static boolean hasClearBreakRay(
             ServerLevel serverLevel,
+            PlayerNpcEntity playerNpc,
             Vec3 eye,
             BlockPos targetPos,
             boolean allowSoftCover
     ) {
-        BlockHitResult hit = clipBreakRay(serverLevel, eye, targetPos);
+        BlockHitResult hit = clipBreakRay(serverLevel, playerNpc, eye, targetPos);
         if (hit.getType() == HitResult.Type.BLOCK) {
             return hit.getBlockPos().equals(targetPos);
         }
@@ -1227,7 +1232,7 @@ public final class ClearBlockAi {
         }
 
         Vec3 eye = new Vec3(playerNpc.getX(), playerNpc.getEyeY(), playerNpc.getZ());
-        BlockHitResult hit = clipBreakRay(serverLevel, eye, targetPos);
+        BlockHitResult hit = clipBreakRay(serverLevel, playerNpc, eye, targetPos);
         if (hit.getType() != HitResult.Type.BLOCK || hit.getBlockPos().equals(targetPos)) {
             return Optional.empty();
         }
@@ -1249,13 +1254,17 @@ public final class ClearBlockAi {
         return Optional.of(blockerPos.immutable());
     }
 
-    private static BlockHitResult clipBreakRay(ServerLevel serverLevel, Vec3 eye, BlockPos targetPos) {
+    private static BlockHitResult clipBreakRay(ServerLevel serverLevel, PlayerNpcEntity playerNpc, Vec3 eye, BlockPos targetPos) {
+        // MC 1.20.1 ClipContext forwards the entity argument straight into
+        // CollisionContext.of(entity), and EntityCollisionContext's constructor dereferences
+        // it immediately (entity.isDescending()). Passing null therefore throws an NPE on tick,
+        // so the ray owner must always be a real entity: use the NPC that casts the ray.
         return serverLevel.clip(new ClipContext(
                 eye,
                 breakRayTarget(serverLevel, eye, targetPos),
                 ClipContext.Block.OUTLINE,
                 ClipContext.Fluid.NONE,
-                null
+                playerNpc
         ));
     }
 

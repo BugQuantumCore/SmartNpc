@@ -1747,12 +1747,16 @@ public final class FarmSetupGoal extends Goal {
                 stand.getY() + FARM_CLEAR_STAND_EYE_HEIGHT,
                 stand.getZ() + 0.5D
         );
+        // MC 1.20.1 ClipContext forwards the entity argument straight into
+        // CollisionContext.of(entity), and EntityCollisionContext's constructor dereferences
+        // it immediately (entity.isDescending()). Passing null therefore throws an NPE on tick,
+        // so the ray owner must always be a real entity: use the NPC that casts the ray.
         BlockHitResult hit = serverLevel.clip(new ClipContext(
                 eye,
                 Vec3.atCenterOf(requestedTarget),
                 ClipContext.Block.OUTLINE,
                 ClipContext.Fluid.NONE,
-                null
+                this.playerNpc
         ));
         if (hit.getType() != HitResult.Type.BLOCK) {
             return null;
