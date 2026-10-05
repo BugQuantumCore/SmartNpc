@@ -89,7 +89,11 @@ public class InventoryViewerItem extends Item {
     ) {
         super.appendHoverText(stack, level, tooltip, flag);
         tooltip.add(Component.translatable("tooltip.player_npc.player_npc_inspector").withStyle(ChatFormatting.GRAY));
-        tooltip.add(Component.translatable("tooltip.player_npc.player_npc_inspector.inspectator").withStyle(ChatFormatting.DARK_AQUA));
+        // Keybind component resolves to the currently bound key name (see SmartNpcKeyBindings).
+        tooltip.add(Component.translatable(
+                "tooltip.player_npc.player_npc_inspector.inspectator",
+                Component.keybind("key.smart_npc.toggle_inspectator")
+        ).withStyle(ChatFormatting.DARK_AQUA));
     }
 
 }

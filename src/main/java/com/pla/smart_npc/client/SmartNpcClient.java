@@ -19,6 +19,7 @@ public class SmartNpcClient implements ClientModInitializer {
 
         // Client-side packet receivers and HUD/overlay/key hooks.
         SmartNpcNetwork.registerClientReceivers();
+        SmartNpcKeyBindings.register();
         SmartNpcInspectorOverlay.register();
     }
 }

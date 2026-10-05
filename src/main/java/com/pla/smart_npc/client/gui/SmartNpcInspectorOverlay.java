@@ -1,6 +1,7 @@
 package com.pla.smart_npc.client.gui;
 
 import com.pla.smart_npc.SmartNpc;
+import com.pla.smart_npc.client.SmartNpcKeyBindings;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.network.PlayerNpcGoalTracePacket;
 import com.pla.smart_npc.network.PlayerNpcInspectatorCyclePacket;
@@ -260,7 +261,7 @@ public class SmartNpcInspectorOverlay {
                 && screen instanceof InventoryScreen
                 && minecraft.level != null
                 && minecraft.player != null
-                && isInspectatorToggleDown(minecraft);
+                && isInspectatorToggleDown();
     }
 
     /** Called from {@code KeyboardInputMixin} (Forge MovementInputUpdateEvent port). */
@@ -424,9 +425,15 @@ public class SmartNpcInspectorOverlay {
         cachedMainHandText = Component.translatable("gui.player_npc.inspector.item_name", itemName);
         cachedInspectatorHint = trimToWidth(
                 font,
-                Component.translatable(spectatorHintKey()).getString(),
+                Component.translatable(spectatorHintKey(), toggleInspectatorKeyDisplayName()).getString(),
                 PANEL_WIDTH - 16
         );
+    }
+
+    /** Display name of the bound inspectator toggle key, used by the HUD hint. */
+    private static String toggleInspectatorKeyDisplayName() {
+        String name = SmartNpcKeyBindings.toggleInspectatorKeyName();
+        return name != null ? name : "Alt";
     }
 
     private static void renderPanel(GuiGraphics guiGraphics, Font font, int x, int y) {
@@ -1067,7 +1074,7 @@ public class SmartNpcInspectorOverlay {
         handleRequirementsToggleInput(minecraft);
         handleRequirementsScrollInput(minecraft);
 
-        boolean toggleDown = isInspectatorToggleDown(minecraft);
+        boolean toggleDown = isInspectatorToggleDown();
         if (toggleDown && !previousInspectatorToggleDown) {
             if (inspectatorActive && inspectatorEntityId == inspectedEntityId) {
                 stopInspectator(minecraft, true);
@@ -1164,13 +1171,12 @@ public class SmartNpcInspectorOverlay {
         }
     }
 
-    private static boolean isInspectatorToggleDown(Minecraft minecraft) {
-        return isInspectatorModifierDown(minecraft);
-    }
-
-    private static boolean isInspectatorModifierDown(Minecraft minecraft) {
-        return isPhysicalKeyDown(minecraft, GLFW.GLFW_KEY_LEFT_ALT)
-                || isPhysicalKeyDown(minecraft, GLFW.GLFW_KEY_RIGHT_ALT);
+    /**
+     * The inspectator view toggle is now a regular, rebindable key mapping
+     * (default: Left Alt) registered in {@link SmartNpcKeyBindings}.
+     */
+    private static boolean isInspectatorToggleDown() {
+        return SmartNpcKeyBindings.isToggleInspectatorDown();
     }
 
     private static void resetInspectatorToggle() {
