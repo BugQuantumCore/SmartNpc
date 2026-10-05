@@ -29,6 +29,13 @@ public final class PlayerNpcBlockBreakUtil {
             PlayerNpcEntity playerNpc,
             boolean allowOwnedFarmDestruction
     ) {
+        // Adventure NPCs may never break blocks (vanilla adventure semantics). This is the
+        // single funnel for every NPC block-breaking path, including emergency escapes.
+        if (playerNpc.isAdventureNpc()) {
+            playerNpc.setIdleTraceDetail("block break blocked by adventure mode @ "
+                    + pos.getX() + " " + pos.getY() + " " + pos.getZ(), 40);
+            return false;
+        }
         if (!allowOwnedFarmDestruction && FarmAi.isOwnedFarmDestructionProtected(playerNpc, pos)) {
             playerNpc.setIdleTraceDetail("block break protected by owned farm @ "
                     + pos.getX() + " " + pos.getY() + " " + pos.getZ(), 40);

@@ -58,6 +58,7 @@ public class FillWaterBucketGoal extends Goal {
                 || this.mob.isNoAi()
                 || this.mob.getTarget() != null
                 || this.isHealing()
+                || this.mob instanceof PlayerNpcEntity adventureNpc && adventureNpc.isAdventureNpc()
                 || !InventoryUtils.hasItem(this.mob, Items.BUCKET)) {
             return false;
         }
@@ -132,7 +133,10 @@ public class FillWaterBucketGoal extends Goal {
             return;
         }
 
-        if (this.getFilledBucket(serverLevel, this.fluidPos) != this.filledBucket
+        // Adventure NPCs may not scoop fluids either: removing the source block is still a
+        // world mutation, and the guard must fire before the empty bucket gets consumed.
+        if (this.mob instanceof PlayerNpcEntity adventureNpc && adventureNpc.isAdventureNpc()
+                || this.getFilledBucket(serverLevel, this.fluidPos) != this.filledBucket
                 || InventoryUtils.consumeItem(this.mob, Items.BUCKET, 1).isEmpty()) {
             return;
         }

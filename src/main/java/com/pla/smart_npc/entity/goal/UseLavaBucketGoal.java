@@ -33,6 +33,7 @@ public class UseLavaBucketGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
+                || this.playerNpc.isAdventureNpc()
                 || this.playerNpc.isClearingCombatObstruction()
                 || !InventoryUtils.hasItem(this.playerNpc, Items.LAVA_BUCKET)
                 || this.playerNpc.getBucketCooldown() > 0) {
@@ -61,6 +62,7 @@ public class UseLavaBucketGoal extends Goal {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
                 || this.playerNpc.isClearingCombatObstruction()
                 || this.placePos == null
+                || this.playerNpc.isAdventureNpc()
                 || !this.canPlaceLava(serverLevel, this.placePos)
                 || InventoryUtils.consumeItem(this.playerNpc, Items.LAVA_BUCKET, 1).isEmpty()) {
             this.placePos = null;

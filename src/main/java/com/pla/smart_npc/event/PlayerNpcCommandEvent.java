@@ -2,6 +2,7 @@ package com.pla.smart_npc.event;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
@@ -20,7 +21,9 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.DifficultyInstance;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.MobSpawnType;
+import net.minecraft.world.level.GameType;
 import net.minecraft.world.phys.Vec2;
 import net.minecraft.world.phys.Vec3;
 
@@ -62,6 +65,22 @@ public final class PlayerNpcCommandEvent {
                                                 context.getSource(),
                                                 StringArgumentType.getString(context, "difficulty")
                                         )))))
+                .then(Commands.literal("gamemode")
+                        .executes(context -> getNpcGameMode(context.getSource()))
+                        .then(Commands.argument("gamemode", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(
+                                        new String[]{"survival", "adventure", "creative"}, builder))
+                                .executes(context -> setNpcGameMode(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "gamemode")
+                                ))))
+                .then(Commands.literal("enabled_pvp")
+                        .executes(context -> getNpcPvp(context.getSource()))
+                        .then(Commands.argument("enabled", BoolArgumentType.bool())
+                                .executes(context -> setNpcPvp(
+                                        context.getSource(),
+                                        BoolArgumentType.getBool(context, "enabled")
+                                ))))
                 .then(Commands.literal("trace")
                         .then(Commands.literal("all")
                                 .then(Commands.literal("on")
@@ -140,6 +159,68 @@ public final class PlayerNpcCommandEvent {
                 + (changed ? "changed to " : "is already ")
                 + difficulty.id()), true);
         return changed ? 1 : 0;
+    }
+
+    // ------------------------------------------------------------------ npc game mode / pvp
+
+    private static int getNpcGameMode(CommandSourceStack source) {
+        GameType gameMode = SmartNpcConfig.getNpcGameMode();
+        source.sendSuccess(() -> Component.literal("NPC game mode is " + gameMode.getName()
+                + " (survival, adventure, or creative; spectator is not available for NPCs)"), false);
+        return 1;
+    }
+
+    private static int setNpcGameMode(CommandSourceStack source, String name) {
+        GameType gameMode = SmartNpcConfig.parseNpcGameMode(name);
+        if (gameMode == null) {
+            source.sendFailure(Component.literal("Unknown NPC game mode: " + name
+                    + " (expected survival, adventure, or creative)"));
+            return 0;
+        }
+
+        SmartNpcConfig.setNpcGameMode(gameMode);
+        int appliedCount = 0;
+        for (ServerLevel level : source.getServer().getAllLevels()) {
+            for (Entity entity : level.getAllEntities()) {
+                if (entity instanceof PlayerNpcEntity npc && npc.isAlive() && !npc.isRemoved()) {
+                    npc.setNpcGameMode(gameMode);
+                    appliedCount++;
+                }
+            }
+        }
+        final int count = appliedCount;
+        source.sendSuccess(() -> Component.literal("NPC game mode set to " + gameMode.getName()
+                + " for " + count + " loaded NPC(s); future spawns will also use "
+                + gameMode.getName()), true);
+        return 1;
+    }
+
+    private static int getNpcPvp(CommandSourceStack source) {
+        boolean enabled = SmartNpcConfig.isNpcPvpEnabled();
+        source.sendSuccess(() -> Component.literal("NPC PVP is " + (enabled ? "enabled" : "disabled")), false);
+        return 1;
+    }
+
+    private static int setNpcPvp(CommandSourceStack source, boolean enabled) {
+        SmartNpcConfig.setNpcPvpEnabled(enabled);
+        int stoodDownCount = 0;
+        if (!enabled) {
+            // Stand down every NPC still fighting from before the switch.
+            for (ServerLevel level : source.getServer().getAllLevels()) {
+                for (Entity entity : level.getAllEntities()) {
+                    if (entity instanceof PlayerNpcEntity npc
+                            && npc.isAlive() && !npc.isRemoved()
+                            && npc.getTarget() != null) {
+                        npc.setTarget(null);
+                        stoodDownCount++;
+                    }
+                }
+            }
+        }
+        final int count = stoodDownCount;
+        source.sendSuccess(() -> Component.literal("NPC PVP " + (enabled ? "enabled" : "disabled")
+                + (count > 0 ? "; stood down " + count + " fighting NPC(s)" : "")), true);
+        return 1;
     }
 
     private static int setTraceAll(CommandSourceStack source, boolean enabled) {

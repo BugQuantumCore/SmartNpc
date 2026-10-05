@@ -51,6 +51,12 @@ public final class PlacingBlockAi {
     }
 
     public boolean placeBlock(ServerLevel serverLevel, BlockPos pos, BlockState state, boolean playEffects) {
+        // Adventure NPCs may never place blocks (vanilla adventure semantics). This is the
+        // shared funnel for every AI placement path; direct setBlock call sites in goals
+        // carry their own guards for the mid-run mode-switch window.
+        if (this.playerNpc.isAdventureNpc()) {
+            return false;
+        }
         BlockState placementState = stateForPlacement(serverLevel, pos, state);
         if (!serverLevel.setBlockAndUpdate(pos, placementState)) {
             return false;

@@ -34,6 +34,17 @@ public enum PlayerNpcInterest {
         };
     }
 
+    /**
+     * Jobs whose daily work breaks or places world blocks. Adventure-mode NPCs never run
+     * these jobs, while fishing/exploring (and every characteristic) stay fully available.
+     */
+    public boolean isWorldMutationJob() {
+        return switch (this) {
+            case BUILDING, MINING, FARMING -> true;
+            default -> false;
+        };
+    }
+
     public boolean isCharacteristic() {
         return !this.isJob();
     }

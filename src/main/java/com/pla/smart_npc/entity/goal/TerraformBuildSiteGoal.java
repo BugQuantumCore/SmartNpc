@@ -607,6 +607,13 @@ public class TerraformBuildSiteGoal extends Goal {
                 this.workTicks = 0;
                 return;
             }
+            // Adventure NPCs never clear terrain directly; drop the target instead of
+            // mutating the world with a raw AIR placement.
+            if (this.playerNpc.isAdventureNpc()) {
+                this.target = null;
+                this.workTicks = 0;
+                return;
+            }
             if (this.workTicks++ < PLACE_DELAY_TICKS) {
                 return;
             }

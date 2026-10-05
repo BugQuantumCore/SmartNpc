@@ -91,6 +91,10 @@ public class BurnNearbyItemGoal extends Goal implements GatheringGoal {
         if (mob instanceof PlayerNpcEntity playerNpcEntity && playerNpcEntity.isHealing()) {
             return false;
         }
+        // Burning trash requires placing fire or lava; adventure NPCs may not mutate blocks.
+        if (mob instanceof PlayerNpcEntity burnNpc && burnNpc.isAdventureNpc()) {
+            return false;
+        }
         targetItem = findTargetItem(serverLevel);
         return targetItem != null;
     }
@@ -760,7 +764,9 @@ public class BurnNearbyItemGoal extends Goal implements GatheringGoal {
         BlockState ignitionState = burnTarget.tool() == BurnTool.LAVA_BUCKET
                 ? Blocks.LAVA.defaultBlockState()
                 : BaseFireBlock.getState(serverLevel, burnTarget.pos());
-        if (!serverLevel.setBlockAndUpdate(burnTarget.pos(), ignitionState)) {
+        // Mid-run adventure switch safety: never commit the ignition placement itself.
+        if (mob instanceof PlayerNpcEntity igniteNpc && igniteNpc.isAdventureNpc()
+                || !serverLevel.setBlockAndUpdate(burnTarget.pos(), ignitionState)) {
             targetItem = null;
             return;
         }

@@ -43,6 +43,7 @@ public class UseFlintAndSteelGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
+                || this.playerNpc.isAdventureNpc()
                 || this.playerNpc.isClearingCombatObstruction()
                 || this.playerNpc.getFlintAndSteelCooldown() > 0) {
             return false;
@@ -123,6 +124,7 @@ public class UseFlintAndSteelGoal extends Goal {
         if (!this.isEligibleTarget(this.ignitionTarget)
                 || this.firePos == null
                 || !this.firePos.equals(this.ignitionTarget.blockPosition())
+                || this.playerNpc.isAdventureNpc()
                 || !this.isFlintAndSteel(this.playerNpc.getMainHandItem())
                 || !this.canPlaceFire(serverLevel, this.firePos)) {
             this.restoreMainHand();

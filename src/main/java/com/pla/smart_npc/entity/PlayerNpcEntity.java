@@ -127,6 +127,7 @@ import net.minecraft.world.entity.monster.RangedAttackMob;
 import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.entity.projectile.ProjectileUtil;
 import net.minecraft.world.item.*;
+import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ServerLevelAccessor;
@@ -359,6 +360,8 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     private boolean teamLeaderRole;
     private boolean teamUpRequestPending;
     private boolean teamMembershipValidated;
+    /** Configured game mode of this NPC: survival, adventure, or creative (never spectator). */
+    private GameType npcGameMode = GameType.SURVIVAL;
     @Nullable
     private BlockPos upwardEscapeTarget;
     private int upwardEscapeRequestTicks = 0;
@@ -784,6 +787,40 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         return interest != null && this.getUsername().hasInterest(interest);
     }
 
+    // ------------------------------------------------------------------ npc game mode
+
+    /** Game mode of this NPC (survival, adventure, or creative). */
+    public GameType getNpcGameMode() {
+        return this.npcGameMode;
+    }
+
+    /**
+     * Sets this NPC's game mode. Spectator is not a legal NPC mode and degrades to survival,
+     * mirroring the config parser that only ever produces the three spawnable modes.
+     */
+    public void setNpcGameMode(GameType gameMode) {
+        this.npcGameMode = gameMode == GameType.SPECTATOR ? GameType.SURVIVAL : gameTypeOrSurvival(gameMode);
+    }
+
+    private static GameType gameTypeOrSurvival(GameType gameMode) {
+        return gameMode == null ? GameType.SURVIVAL : gameMode;
+    }
+
+    /** True when this NPC may not break or place blocks (vanilla adventure semantics). */
+    public boolean isAdventureNpc() {
+        return this.npcGameMode == GameType.ADVENTURE;
+    }
+
+    /** True when this NPC is invulnerable to ordinary damage (vanilla creative semantics). */
+    public boolean isCreativeNpc() {
+        return this.npcGameMode == GameType.CREATIVE;
+    }
+
+    /** True when this NPC's AI may mutate world blocks; adventure mode forbids it. */
+    public boolean canModifyWorld() {
+        return this.npcGameMode != GameType.ADVENTURE;
+    }
+
     public boolean hasAnyInterest(List<PlayerNpcInterest> interests) {
         if (interests == null || interests.isEmpty()) {
             return false;
@@ -831,6 +868,11 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     public boolean isDailyJobActive(PlayerNpcInterest interest) {
         if (PlayerNpcTeamUpManager.shouldSuspendRoutineWork(this)
                 || interest == null || !interest.isJob() || !this.hasInterest(interest)) {
+            return false;
+        }
+        // Adventure NPCs never take block-mutating jobs (building/mining/farming). Equipment,
+        // chat, and characteristic behaviours are untouched; fishing and exploring stay active.
+        if (this.isAdventureNpc() && interest.isWorldMutationJob()) {
             return false;
         }
         if (this.isBuildingBaseSelectionLocked()) {
@@ -1752,6 +1794,7 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (this.pendingSpawnInitialization) {
             tag.putBoolean(PENDING_SPAWN_INITIALIZATION_TAG, true);
         }
+        tag.putString("NpcGameMode", this.npcGameMode.getName());
         tag.put("Inventory", this.inventory.createTag());
         tag.putInt("GapCooldown", this.gapCooldown);
         tag.putInt("BucketCooldown", this.bucketCooldown);
@@ -1869,6 +1912,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
     public void readAdditionalSaveData(@NotNull CompoundTag tag) {
         super.readAdditionalSaveData(tag);
         this.pendingSpawnInitialization = tag.getBoolean(PENDING_SPAWN_INITIALIZATION_TAG);
+        // Persisted per-NPC game mode; NPCs saved before this feature existed (or with an
+        // unrecognized value) adopt the currently configured default mode.
+        GameType savedGameMode = tag.contains("NpcGameMode")
+                ? SmartNpcConfig.parseNpcGameMode(tag.getString("NpcGameMode"))
+                : null;
+        this.npcGameMode = savedGameMode != null ? savedGameMode : SmartNpcConfig.getNpcGameMode();
         if (tag.contains("Inventory", Tag.TAG_LIST)) {
             this.inventory.fromTag(tag.getList("Inventory", Tag.TAG_COMPOUND));
         }
@@ -2490,11 +2539,27 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     @Override
     public void setTarget(@Nullable LivingEntity target) {
+        // PVP disabled: this NPC must never acquire an attack target, no matter whether
+        // hunting, retaliation, ally alerts, or help calls requested it. Clearing (null)
+        // always stays allowed so ongoing fights can still be stood down.
+        if (target != null && !SmartNpcConfig.isNpcPvpEnabled()) {
+            return;
+        }
         // Cautious avoidance owns threats; target goals must not turn them into retaliation.
         super.setTarget(this.hasInterest(PlayerNpcInterest.CAUTIOUS) ? null : target);
     }
 
     public boolean hurt(@NotNull DamageSource damageSource, float f) {
+        // Creative NPCs mirror vanilla creative players: immune to everything except
+        // damage tagged BYPASSES_INVULNERABILITY (void, /kill, and similar).
+        if (this.isCreativeNpc() && !damageSource.is(DamageTypeTags.BYPASSES_INVULNERABILITY)) {
+            return false;
+        }
+        // PVP disabled: block every damage source inflicted by another NPC (melee, arrows,
+        // and other projectiles resolve their owner as the causing entity).
+        if (!SmartNpcConfig.isNpcPvpEnabled() && damageSource.getEntity() instanceof PlayerNpcEntity) {
+            return false;
+        }
         if (this.isTeamAlliedWith(damageSource.getEntity())) {
             return false;
         }
@@ -2552,6 +2617,12 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
         if (this.hasInterest(PlayerNpcInterest.CAUTIOUS)) {
             return false;
         }
+        // PVP disabled: this NPC may not harm players, other NPCs, or any other living
+        // creature. Non-living targets (boats, item frames, ...) stay allowed.
+        if (!SmartNpcConfig.isNpcPvpEnabled() && target instanceof LivingEntity) {
+            this.setTarget(null);
+            return false;
+        }
         if (this.isTeamAlliedWith(target)) {
             this.setTarget(null);
             return false;
@@ -2579,6 +2650,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public void hurtItemInHand(InteractionHand hand, int amount) {
         if (amount <= 0) {
+            return;
+        }
+        // Creative NPCs never wear out their tools, matching vanilla creative item usage.
+        if (this.isCreativeNpc()) {
             return;
         }
 
@@ -4756,6 +4831,10 @@ public class PlayerNpcEntity extends FakePlayer implements RangedAttackMob {
 
     public SpawnGroupData finalizeSpawn(@NotNull ServerLevelAccessor serverLevelAccessor, @NotNull DifficultyInstance difficultyInstance, @NotNull MobSpawnType mobSpawnType, @Nullable SpawnGroupData spawngroupdata, @Nullable CompoundTag compoundtag) {
         SpawnGroupData returnSpawnGroupData = super.finalizeSpawn(serverLevelAccessor, difficultyInstance, mobSpawnType, spawngroupdata, compoundtag);
+
+        // Every spawn path (natural biome spawns, /smart_npc spawn_player, spawners) funnels
+        // through here: adopt the configured game mode for the new NPC.
+        this.npcGameMode = SmartNpcConfig.getNpcGameMode();
 
         if (this.isRemoved()) {
             return returnSpawnGroupData;

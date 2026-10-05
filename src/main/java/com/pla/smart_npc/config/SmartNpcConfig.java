@@ -1,6 +1,9 @@
 package com.pla.smart_npc.config;
 
+import net.minecraft.world.level.GameType;
+
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Server behaviour config. Semantics (names, defaults, ranges) are identical to the
@@ -28,6 +31,10 @@ public class SmartNpcConfig {
     public static JsonConfig.NumberListValue PLAYER_NPC_SPAWN;
     public static JsonConfig.StringListValue BLACKLIST_COMPAT_MOD_WEAPON;
     public static JsonConfig.BooleanValue PERFORMANCE_MONITOR_ENABLED;
+    /** Game mode applied to newly spawned NPCs: survival, adventure, or creative (never spectator). */
+    public static JsonConfig.StringValue NPC_GAMEMODE;
+    /** Master switch for NPC combat against other living beings (NPC vs NPC, NPC vs players, NPC vs mobs). */
+    public static JsonConfig.BooleanValue NPC_PVP_ENABLED;
 
     static {
         REMOTE_NPC_DEPARTURE_ENABLED = CONFIG.defineBoolean("remoteNpcDeparture.enabled", true);
@@ -52,6 +59,9 @@ public class SmartNpcConfig {
         BLACKLIST_COMPAT_MOD_WEAPON = CONFIG.defineStringList("blacklistCompatModWeapon", List.of());
 
         PERFORMANCE_MONITOR_ENABLED = CONFIG.defineBoolean("performanceMonitor.enabled", false);
+
+        NPC_GAMEMODE = CONFIG.defineString("gamemode", "survival");
+        NPC_PVP_ENABLED = CONFIG.defineBoolean("pvp.enabled", true);
     }
 
     private SmartNpcConfig() {
@@ -84,6 +94,49 @@ public class SmartNpcConfig {
 
     public static int getMaxNaturalPlayerNpcs() {
         return MAX_NATURAL_PLAYER_NPCS.get();
+    }
+
+    // ------------------------------------------------------------------ npc game mode
+
+    /**
+     * Parses an NPC game mode name. Accepts the three spawnable modes (plus their vanilla
+     * single-letter aliases) and deliberately rejects spectator and anything unknown.
+     *
+     * @return the parsed mode, or {@code null} when the name is not a legal NPC game mode
+     */
+    public static GameType parseNpcGameMode(String name) {
+        String normalized = name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "survival", "s", "0" -> GameType.SURVIVAL;
+            case "creative", "c", "1" -> GameType.CREATIVE;
+            case "adventure", "a", "2" -> GameType.ADVENTURE;
+            default -> null;
+        };
+    }
+
+    /** Game mode used for NPCs that spawn while the current config value applies. */
+    public static GameType getNpcGameMode() {
+        GameType parsed = parseNpcGameMode(NPC_GAMEMODE.get());
+        return parsed != null ? parsed : GameType.SURVIVAL;
+    }
+
+    /** Persists the configured spawn game mode and writes the config file to disk. */
+    public static void setNpcGameMode(GameType gameMode) {
+        NPC_GAMEMODE.set(gameMode.getName());
+        CONFIG.save();
+    }
+
+    // ------------------------------------------------------------------ npc pvp
+
+    /** True when NPCs may fight players, other NPCs, and other living creatures. */
+    public static boolean isNpcPvpEnabled() {
+        return NPC_PVP_ENABLED.get();
+    }
+
+    /** Persists the NPC PVP switch and writes the config file to disk. */
+    public static void setNpcPvpEnabled(boolean enabled) {
+        NPC_PVP_ENABLED.set(enabled);
+        CONFIG.save();
     }
 
     private static SpawnConfig parseSpawnConfigOrDefault(List<? extends Number> rawValues, SpawnConfig defaultConfig) {

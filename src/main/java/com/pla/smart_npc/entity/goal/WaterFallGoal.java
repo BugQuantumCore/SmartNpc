@@ -62,6 +62,7 @@ public class WaterFallGoal extends Goal {
                 || this.playerNpc.isRemoved()
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
+                || this.playerNpc.isAdventureNpc()
                 || this.playerNpc.onGround()
                 || this.playerNpc.isInWaterOrBubble()
                 || serverLevel.dimensionType().ultraWarm()
@@ -213,6 +214,7 @@ public class WaterFallGoal extends Goal {
             return false;
         }
         if (this.playerNpc.getBucketCooldown() > 0
+                || this.playerNpc.isAdventureNpc()
                 || !this.canPlaceWater(serverLevel, target)
                 || InventoryUtils.consumeItem(this.playerNpc, Items.WATER_BUCKET, 1).isEmpty()) {
             this.finished = true;

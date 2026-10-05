@@ -42,6 +42,7 @@ public class UseWaterBucketGoal extends Goal {
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isPassenger()
                 || this.playerNpc.isHealing()
+                || this.playerNpc.isAdventureNpc()
                 || !this.playerNpc.onGround()
                 || serverLevel.dimensionType().ultraWarm()
                 || !InventoryUtils.hasItem(this.playerNpc, Items.WATER_BUCKET)
@@ -72,6 +73,7 @@ public class UseWaterBucketGoal extends Goal {
     public void start() {
         if (!(this.playerNpc.level() instanceof ServerLevel serverLevel)
                 || this.placePos == null
+                || this.playerNpc.isAdventureNpc()
                 || !this.canPlaceWater(serverLevel, this.placePos)
                 || InventoryUtils.consumeItem(this.playerNpc, Items.WATER_BUCKET, 1).isEmpty()) {
             this.placePos = null;

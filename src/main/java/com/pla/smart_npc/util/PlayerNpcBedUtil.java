@@ -80,6 +80,7 @@ public final class PlayerNpcBedUtil {
         BlockState companionState = serverLevel.getBlockState(companionPos);
         if (isMatchingCompanion(brokenBedState, companionState)
                 && !isOccupied(companionState)
+                && !playerNpc.isAdventureNpc()
                 && !FarmAi.isOwnedFarmDestructionProtected(playerNpc, companionPos)) {
             // Vanilla normally removes the other half via neighbor updates. This no-drop fallback
             // repairs a surviving half while leaving the targeted half responsible for the loot.

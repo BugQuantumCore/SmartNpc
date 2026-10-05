@@ -256,6 +256,11 @@ public final class ChestAi {
     }
 
     private static void migrateOwnedChest(PlayerNpcEntity playerNpc, ServerLevel serverLevel, BlockPos oldPos, BlockPos newPos) {
+        // Adventure NPCs leave world blocks alone: skip chest relocation entirely instead of
+        // half-migrating contents and then removing the old chest block.
+        if (playerNpc.isAdventureNpc()) {
+            return;
+        }
         if (oldPos.equals(newPos)
                 || !serverLevel.getBlockState(oldPos).is(Blocks.CHEST)
                 || !serverLevel.getBlockState(newPos).is(Blocks.CHEST)

@@ -1,6 +1,7 @@
 package com.pla.smart_npc.entity.goal;
 
 import com.pla.smart_npc.clazz.PlayerNpcInterest;
+import com.pla.smart_npc.config.SmartNpcConfig;
 import com.pla.smart_npc.entity.PlayerNpcEntity;
 import com.pla.smart_npc.util.InventoryUtils;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -58,6 +59,15 @@ public class PlayerNpcSmartTargetGoal extends TargetGoal {
         if (this.playerNpc.level().isClientSide
                 || this.playerNpc.isNoAi()
                 || this.playerNpc.isHealing()) {
+            return false;
+        }
+
+        // PVP disabled: this NPC never hunts players, other NPCs, or any other creature.
+        // Stand down any target that predates the switch so no stale fight lingers.
+        if (!SmartNpcConfig.isNpcPvpEnabled()) {
+            if (this.playerNpc.getTarget() != null) {
+                this.playerNpc.setTarget(null);
+            }
             return false;
         }
 

@@ -5202,6 +5202,7 @@ public class EscapeHoleWithBlockGoal extends Goal {
     ) {
         BlockState companionState = serverLevel.getBlockState(companionPos);
         if (isMatchingBedCompanion(brokenBedState, companionState)
+                && !this.playerNpc.isAdventureNpc()
                 && !FarmAi.isOwnedFarmDestructionProtected(this.playerNpc, companionPos)) {
             // Vanilla normally removes the other half during destroyBlock's neighbor update. This
             // no-drop fallback only repairs a surviving paired half; the broken half supplied the loot.
